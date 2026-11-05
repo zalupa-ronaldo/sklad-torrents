@@ -120,7 +120,13 @@ async function performMockAction(id: string, action: "pause" | "resume" | "cance
 export async function collectJobs(tick: SchedulerTick, now: number): Promise<JobSnapshot[]> {
   const extra = await listRegisteredJobs();
   const mocks = listMockJobs(now).filter((job) => job.id === "transcode-broken" || !coveredByEngine(job, extra));
-  const jobs = [...mocks, ...torrentJobs(tick.dashboard.torrents, tick.catalog, now), ...extra];
+  const jobs = [...mocks, ...torrentJobs(tick.dashboard.torrents, tick.catalog, now), ...extra]
+    .filter((job) => job && typeof job.id === "string")
+    .map((job) => ({
+      ...job,
+      title: job.title || "Операция",
+      status: job.status || "running",
+    }));
   jobs.sort(compareJobs);
   return jobs;
 }
@@ -188,9 +194,9 @@ function torrentError(torrent: TorrentView): string | null {
 
 function compareJobs(a: JobSnapshot, b: JobSnapshot): number {
   const rank: Record<JobStatus, number> = { error: 0, running: 1, paused: 2, queued: 3, cancelled: 4, completed: 5 };
-  const byStatus = rank[a.status] - rank[b.status];
+  const byStatus = (rank[a.status] ?? 9) - (rank[b.status] ?? 9);
   if (byStatus !== 0) return byStatus;
-  return a.title.localeCompare(b.title, "ru");
+  return String(a.title ?? "").localeCompare(String(b.title ?? ""), "ru");
 }
 
 function baseName(value: string): string | null {
