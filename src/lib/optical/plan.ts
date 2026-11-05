@@ -11,7 +11,7 @@ export interface OpticalPlan {
 
 export function planOptical(input: {
   action: OpticalAction;
-  platform: CommandPlatform;
+  platform: "darwin" | "win32" | "linux";
   media: MediaKind;
   eraseConfirmed: boolean;
   device: string;
@@ -20,6 +20,7 @@ export function planOptical(input: {
   outputDir: string;
   label: string;
 }): OpticalPlan {
+  const platform: CommandPlatform = input.platform === "win32" ? "win32" : "darwin";
   const rewritable = isRewritable(input.media);
   const erase = input.eraseConfirmed === true && rewritable && input.action !== "iso";
   const sourceDir = sourceDirectory(input.files, input.outputDir);
@@ -30,7 +31,7 @@ export function planOptical(input: {
     if (erase) {
       steps.push({
         phase: "запись",
-        argv: eraseArgv(input.platform, input.device, input.driveIndex),
+        argv: eraseArgv(platform, input.device, input.driveIndex),
         currentFile: null,
       });
     }
@@ -40,19 +41,19 @@ export function planOptical(input: {
   const current = input.files[0]?.name ?? null;
   steps.push({
     phase: "образ",
-    argv: isoArgv(input.platform, sourceDir, isoPath || "disc.iso", input.label),
+    argv: isoArgv(platform, sourceDir, isoPath || "disc.iso", input.label),
     currentFile: current,
   });
 
   if (input.action === "burn") {
     steps.push({
       phase: "запись",
-      argv: burnArgv(input.platform, input.device, isoPath || "disc.iso", sourceDir, erase),
+      argv: burnArgv(platform, input.device, isoPath || "disc.iso", sourceDir, erase),
       currentFile: fileName(isoPath || "disc.iso"),
     });
   }
 
-  for (const argv of verifyArgv(input.platform, isoPath || "disc.iso", input.device)) {
+  for (const argv of verifyArgv(platform, isoPath || "disc.iso", input.device)) {
     steps.push({
       phase: "проверка",
       argv,

@@ -17,6 +17,6 @@ export async function POST(request: Request) {
   return jobGuard(async () => {
     ensureJobWorkers();
     const result = await getJobStore().enqueue(enqueueFromBody(await readJson(request)));
-    return jobJson({ job: publicJob(result.job), created: result.created }, result.created ? 201 : 200);
+    return jobJson({ job: publicJob(result.job), created: result.created }, 202);
   });
 }

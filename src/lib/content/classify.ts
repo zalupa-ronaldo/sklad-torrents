@@ -53,8 +53,12 @@ const SOFTWARE_RE =
 const CONSOLE_RE =
   /(playstation\s*2|(^|[^a-z0-9])ps2([^a-z0-9]|$)|(^|[^a-z0-9])psx([^a-z0-9]|$)|(^|[^a-z0-9])ps[1345]([^a-z0-9]|$)|switch|xbox|wiiu|(^|[^a-z0-9])wii([^a-z0-9]|$)|(^|[^a-z0-9])3ds([^a-z0-9]|$)|(^|[^a-z0-9])nds([^a-z0-9]|$)|dreamcast|gamecube|(^|[^a-z0-9])sega([^a-z0-9]|$))/i;
 
+function fileLeaf(name: string): string {
+  return name.split(/[/\\]/).pop() ?? name;
+}
+
 export function fileExtension(name: string): string {
-  const base = name.split(/[/\\]/).pop() ?? name;
+  const base = fileLeaf(name);
   const dot = base.lastIndexOf(".");
   if (dot <= 0) return "";
   return base.slice(dot + 1).toLowerCase();
@@ -133,7 +137,7 @@ function classifyByExtensions(input: ClassifyInput): Classification | null {
   const hintText = [input.name, input.savePath ?? "", ...fileNames].join("\n");
   const platform = platformHint(hintText);
   const library = hasGameLibrary(hintText);
-  const softwareAgrees = SOFTWARE_RE.test(hintText);
+  const softwareAgrees = SOFTWARE_RE.test([input.name, ...fileNames.map(fileLeaf)].join("\n"));
 
   if (majority(video, bulk, [audio, document, installer])) {
     const series = SERIES_RE.test(hintText);
@@ -216,7 +220,7 @@ function platformHint(text: string): GameSubtype | null {
 }
 
 function hasGameLibrary(text: string): boolean {
-  return /(^|[/\\])games?([/\\]|$)/i.test(text);
+  return /(^|[/\\])games?([/\\]|\s|$)/i.test(text);
 }
 
 function hasToken(text: string, token: string): boolean {

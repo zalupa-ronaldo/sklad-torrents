@@ -8,6 +8,7 @@ const KIND_LABEL: Record<JobKind, string> = {
   compact: "Сжатие",
   transcode: "Перекодирование",
   optical: "Рисунок на диске",
+  localsend: "LocalSend",
 };
 
 const STATUS_LABEL: Record<JobStatus, string> = {

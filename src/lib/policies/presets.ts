@@ -1,13 +1,14 @@
 import type { ContentKind, IndexProfile, PostAction } from "@/lib/content/types";
 import { CONTENT_KINDS } from "@/lib/content/types";
-import { catalogDiskKey } from "@/lib/scheduler/disk-key";
+import { DISK_ID } from "@/lib/drives/ids";
 import type { HandbrakeSettings, PolicyRules, PresetId, TypeRule } from "@/lib/policies/types";
 
-/** Keys match the demo drive shelf (serial + uuid). A saved shelf file with the same identity still resolves. */
+/** Shelf ids from the drive catalog. Hardware identity stays serial + uuid. */
 export const DISK_KEY = {
-  vault: catalogDiskKey("WD-WCAV8TB", "6F4A-VAULT"),
-  games: catalogDiskKey("SAMSUNG-990-D", "A1B2-GAMES"),
-  archive: catalogDiskKey("HGST-ARCHIVE", "E0E0-ARCHIVE"),
+  vault: DISK_ID.vault,
+  games: DISK_ID.gamesHdd,
+  media: DISK_ID.media,
+  archive: DISK_ID.offline,
 } as const;
 
 export const DEFAULT_HANDBRAKE: HandbrakeSettings = {
@@ -71,12 +72,12 @@ function withPost(rules: PolicyRules, post: Partial<Record<ContentKind, PostActi
 
 const shelfRules: PolicyRules = {
   game: rule(DISK_KEY.games, "Games", "ntfs-mft", "compact"),
-  movie: rule(DISK_KEY.vault, "Cinema", "walk", "handbrake", CINEMA_HANDBRAKE),
-  series: rule(DISK_KEY.vault, "Series", "walk", "handbrake", SERIES_HANDBRAKE),
+  movie: rule(DISK_KEY.media, "Cinema", "walk", "handbrake", CINEMA_HANDBRAKE),
+  series: rule(DISK_KEY.media, "Series", "walk", "handbrake", SERIES_HANDBRAKE),
   music: rule(DISK_KEY.vault, "Music", "walk", "none"),
   software: rule(DISK_KEY.games, "Software", "walk", "none"),
-  document: rule(DISK_KEY.vault, "Documents", "walk", "none"),
-  other: rule(DISK_KEY.archive, "Other", "walk", "none"),
+  document: rule(DISK_KEY.media, "Documents", "walk", "none"),
+  other: rule(DISK_KEY.vault, "Other", "walk", "none"),
 };
 
 export const PRESETS: Record<Exclude<PresetId, "custom">, NamedPreset> = {

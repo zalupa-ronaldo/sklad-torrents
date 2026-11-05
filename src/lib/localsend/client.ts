@@ -89,7 +89,7 @@ export async function protocolRequest(options: {
         headers,
         agent: options.peer.protocol === "https" ? httpsAgent : httpAgent,
         rejectUnauthorized: false,
-        servername: options.peer.address,
+        servername: /^\d{1,3}(\.\d{1,3}){3}$/.test(options.peer.address) ? undefined : options.peer.address,
       },
       (res) => {
         const chunks: Buffer[] = [];

@@ -56,7 +56,10 @@ export interface OpticalPayload {
   driveId: string | null;
   driveName: string | null;
   device: string | null;
-  platform: "darwin" | "win32";
+  platform: "win32";
+  /** Live burn and verify are addressed to the Windows agent. */
+  host: "pc-agent";
+  verifiedBy: "pc-agent" | null;
   media: MediaKind;
   files: IndexedPath[];
   isoPath: string | null;

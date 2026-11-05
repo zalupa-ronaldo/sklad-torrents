@@ -1,5 +1,6 @@
 import { opticalFailure, opticalJson } from "@/app/api/optical/http";
 import { AGENT_OFFLINE } from "@/lib/optical/errors";
+import { enqueueArtworkJob, presentOpticalJob } from "@/lib/optical/jobs";
 import { enqueueOpticalJob, listOpticalJobs } from "@/lib/optical/service";
 import type { MacJobRequest, OpticalKind } from "@/lib/optical/types";
 
@@ -25,7 +26,29 @@ export async function GET() {
 
 export async function POST(request: Request) {
   try {
-    const body = (await request.json()) as Partial<MacJobRequest>;
+    const raw = (await request.json()) as Partial<MacJobRequest> & {
+      artworkPath?: string;
+      platform?: string;
+      action?: string;
+      medium?: string;
+      dataDir?: string;
+      filePosition?: string;
+      outputPath?: string;
+    };
+    if (typeof raw.artworkPath === "string" && !raw.kind) {
+      const platform = raw.platform === "darwin" || raw.platform === "win32" || raw.platform === "linux" ? raw.platform : "linux";
+      const job = await enqueueArtworkJob({
+        platform,
+        action: raw.action === "burn" ? "burn" : "export",
+        medium: raw.medium || "cd",
+        artworkPath: raw.artworkPath,
+        dataDir: raw.dataDir,
+        filePosition: raw.filePosition === "outer" ? "outer" : "inner",
+        outputPath: raw.outputPath,
+      });
+      return opticalJson(presentOpticalJob(job), 201);
+    }
+    const body = raw;
     if (!body.kind || !KINDS.has(body.kind)) {
       return opticalJson({ error: "Неизвестный тип задания." }, 400);
     }

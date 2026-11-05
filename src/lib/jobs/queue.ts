@@ -81,7 +81,7 @@ export async function enqueueJob<T>(input: {
   bytesTotal?: number;
   message?: string;
   onCreate?: () => void;
-}): Promise<JobRecord<T>> {
+}): Promise<{ job: JobRecord<T>; duplicate: boolean }> {
   const created = await lock(async () => {
     const file = await readJobs();
     const existing = file.jobs.find((job) => job.idempotencyKey === input.idempotencyKey && ACTIVE.has(job.state));
@@ -111,7 +111,7 @@ export async function enqueueJob<T>(input: {
   });
   if (!created.duplicate) input.onCreate?.();
   kickQueue();
-  return created.job;
+  return created;
 }
 
 export async function insertJob<T>(input: {
@@ -216,6 +216,10 @@ export async function controlJob(id: string, action: "pause" | "cancel" | "resum
 function kickQueue(): void {
   const state = runtime();
   state.drainChain = state.drainChain.then(drain, drain);
+}
+
+export function resumeQueue(): void {
+  kickQueue();
 }
 
 async function drain(): Promise<void> {

@@ -5,6 +5,7 @@ import type { BackgroundJob } from "@/lib/jobs/types";
 import { claimNext, getJob, insertIfIdle, patchJob, readJobs } from "@/lib/jobs/store";
 import { checkCapacity, treeBytes } from "@/lib/optical/capacity";
 import { addBurnedDisc, listDiscs } from "@/lib/optical/catalog";
+import { demoDrives } from "@/lib/optical/demo";
 import { detectDrives, spawnExec } from "@/lib/optical/detect";
 import { loadIndexedPaths } from "@/lib/optical/drive-catalog";
 import { OpticalError } from "@/lib/optical/errors";
@@ -26,7 +27,8 @@ import type {
 } from "@/lib/optical/media";
 
 const OPTICAL_KINDS = ["optical.iso", "optical.burn", "optical.erase"] as const;
-const WORKER_ID = `optical-${process.pid}`;
+const WORKER_ID = "pc-agent";
+const LOCAL_MAC_BURN = /\b(?:drutil|hdiutil)\s+burn\b/i;
 
 let runnerOverride: ProcessRunner | null = null;
 let pumpTail: Promise<void> = Promise.resolve();
@@ -56,6 +58,25 @@ export interface OpticalJob extends Omit<BackgroundJob, "payload"> {
   payload: OpticalPayload;
 }
 
+function windowsReportedDrives(demo: boolean): Promise<DetectResult> {
+  if (process.env.SKLAD_OPTICAL_AGENT === "offline") {
+    return Promise.resolve({
+      status: "no-drive",
+      drives: [],
+      detail: "Рекордер подключён к Windows-ПК. агент Windows недоступен",
+    });
+  }
+  const mockAgent = process.env.SKLAD_OPTICAL_MOCK !== "0" && process.env.NODE_ENV !== "production";
+  if (demo || mockAgent) {
+    return Promise.resolve({
+      status: demo ? "demo" : "ok",
+      drives: demoDrives().map((drive) => ({ ...drive, demo })),
+      detail: "Рекордер подключён к Windows-ПК. Список приводов сообщил агент Windows.",
+    });
+  }
+  return detectDrives({ platform: "win32", demo: false, exec: spawnExec() });
+}
+
 export async function opticalSnapshot(): Promise<{
   demo: boolean;
   detection: DetectResult;
@@ -65,7 +86,7 @@ export async function opticalSnapshot(): Promise<{
 }> {
   const demo = await isDemoEnabled();
   const [detection, indexed, discs] = await Promise.all([
-    detectDrives({ platform: process.platform, demo, exec: demo ? undefined : spawnExec() }),
+    windowsReportedDrives(demo),
     loadIndexedPaths(),
     listDiscs(),
   ]);
@@ -80,7 +101,7 @@ export async function setDemoMode(enabled: boolean): Promise<boolean> {
 export async function searchShelf(query: string): Promise<SearchHit[]> {
   const [discs, detection] = await Promise.all([
     listDiscs(),
-    detectDrives({ platform: process.platform, demo: await isDemoEnabled(), exec: undefined }),
+    windowsReportedDrives(await isDemoEnabled()),
   ]);
   const drives = detection.demo ? [] : detection.drives;
   return searchBurnedFiles(discs, query, drives);
@@ -92,7 +113,7 @@ export async function enqueueOptical(input: EnqueueInput, deps?: { detect?: () =
   if (action !== "iso" && action !== "burn" && action !== "erase") {
     throw new OpticalError("validation", "Неизвестное действие.");
   }
-  const detect = deps?.detect ?? (() => detectDrives({ platform: process.platform, demo, exec: demo ? undefined : spawnExec() }));
+  const detect = deps?.detect ?? (() => windowsReportedDrives(demo));
   const detection = await detect();
   const drive = input.driveId ? detection.drives.find((item) => item.id === input.driveId) ?? null : null;
   if ((action === "burn" || action === "erase") && !drive) {
@@ -133,7 +154,7 @@ export async function enqueueOptical(input: EnqueueInput, deps?: { detect?: () =
     throw new OpticalError("validation", "Стирание выключено, пока нет подтверждения.");
   }
   const media: MediaKind = drive?.media ?? "unknown";
-  const platform = drive?.platform ?? (process.platform === "win32" ? "win32" : "darwin");
+  const platform = "win32" as const;
   const plan = planOptical({
     action,
     platform,
@@ -167,6 +188,8 @@ export async function enqueueOptical(input: EnqueueInput, deps?: { detect?: () =
     eraseConfirmed,
     demo,
     volumeUuid: drive?.volumeUuid ?? null,
+    host: "pc-agent",
+    verifiedBy: null,
     verified: false,
     source: null,
     steps: plan.steps,
@@ -186,6 +209,7 @@ export async function enqueueOptical(input: EnqueueInput, deps?: { detect?: () =
     mock: runner.mock,
     hardware: false,
     idempotencyKey: idempotencyKey(action, drive?.id ?? null, files),
+    host: "pc-agent",
     claimedBy: null,
     createdAt: now,
     updatedAt: now,
@@ -247,6 +271,10 @@ async function executeClaimed(claimed: BackgroundJob): Promise<void> {
     for (const step of payload.steps) {
       const ready = await waitIfPaused(claimed.id);
       if (!ready || ready.status === "error" || ready.status === "done") return;
+      if (LOCAL_MAC_BURN.test(step.argv.join(" "))) {
+        await failJob(claimed.id, "Mac не записывает диск локально.", runner.mock);
+        return;
+      }
       const percent = percentFor(step.phase);
       await patchJob(claimed.id, {
         status: "running",
@@ -270,7 +298,13 @@ async function executeClaimed(claimed: BackgroundJob): Promise<void> {
         return;
       }
     }
-    const verified = verifyNeeded > 0 && verifyRan === verifyNeeded;
+    const hadBurn = payload.steps.some((step) => step.phase === "запись");
+    const verified =
+      claimed.claimedBy === "pc-agent" &&
+      payload.action === "burn" &&
+      hadBurn &&
+      verifyNeeded > 0 &&
+      verifyRan === verifyNeeded;
     if (payload.action === "burn" && verified) {
       if (runner.mock && payload.demo) {
         await addBurnedDisc(discFrom(claimed.id, payload, "mock"));
@@ -288,6 +322,8 @@ async function executeClaimed(claimed: BackgroundJob): Promise<void> {
       hardware: !runner.mock && verified && payload.action === "burn",
       payload: {
         verified,
+        verifiedBy: verified ? "pc-agent" : null,
+        host: "pc-agent",
         source: runner.mock ? "mock" : "tool",
         erase: payload.erase,
       },

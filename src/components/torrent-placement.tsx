@@ -4,7 +4,6 @@ import Link from "next/link";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
 
-import { Button } from "@/components/ui/button";
 import { api } from "@/lib/api-client";
 import { INDEX_LABEL, KIND_LABEL, POST_LABEL, REASON_LABEL, SUBTYPE_LABEL, kindLabel } from "@/lib/content/labels";
 import { CONTENT_KINDS, GAME_SUBTYPES, type ContentKind, type GameSubtype } from "@/lib/content/types";

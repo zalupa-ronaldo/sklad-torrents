@@ -7,6 +7,7 @@ import { useState } from "react";
 import { toast } from "sonner";
 
 import { handbrakeHref, moveGameHref, torrentReadyForMedia } from "@/addons/media-games/links";
+import { TorrentHashes } from "@/components/torrent-hashes";
 import { TorrentPlacementCard } from "@/components/torrent-placement";
 import { ProgressBar, ProgressLabel } from "@/components/progress-bar";
 import { StateBadge } from "@/components/state-badge";
@@ -224,6 +225,12 @@ export function TorrentDetail({
                 </div>
               </div>
             ) : null}
+            <TorrentHashes
+              hostId={torrent.hostId}
+              hash={torrent.hash}
+              name={torrent.name}
+              complete={torrent.progress >= 0.999 && torrent.state !== "moving" && torrent.state !== "checking"}
+            />
             <FileList
               files={detail.files}
               busy={busy}

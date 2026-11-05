@@ -229,6 +229,7 @@ async function runJob(id: string): Promise<IntegrityJob> {
     });
     if (job.state === "cancelled") return job;
     await ensureFileList(job, readers, controller.signal);
+    await mergeDestination(id, readers, controller.signal);
     job = (await getIntegrityJob(id)) ?? job;
     if (job.state === "cancelled") return job;
     await hashPending(id, readers, controller.signal, started);
@@ -241,8 +242,7 @@ async function runJob(id: string): Promise<IntegrityJob> {
       const current = await getIntegrityJob(id);
       if (current) return current;
     }
-    const message = error instanceof Error ? error.message : "Не удалось посчитать SHA-256.";
-    return fail(id, message);
+    return fail(id, readableError(error));
   } finally {
     running.delete(id);
     aborts.delete(id);
@@ -262,6 +262,22 @@ async function ensureFileList(job: IntegrityJob, readers: Readers, signal: Abort
   await update(job.id, (current) => {
     if (current.files.length === 0) current.files = files;
     refreshProgress(current, Date.now());
+  });
+}
+
+async function mergeDestination(id: string, readers: Readers, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) throw new IntegrityHalt();
+  const job = await getIntegrityJob(id);
+  if (!job || !readers.destination) return;
+  if (job.kind === "localsend" && !job.transferDone) return;
+  if (!needsDestination(job)) return;
+  const listed = await readers.destination.list();
+  const now = new Date().toISOString();
+  await update(id, (current) => {
+    for (const file of listed) {
+      const exists = current.files.some((item) => item.side === "destination" && item.relativePath === file.relativePath);
+      if (!exists) current.files.push(pendingRecord(file.relativePath, file.size, "destination", now));
+    }
   });
 }
 
@@ -291,7 +307,7 @@ async function hashPending(id: string, readers: Readers, signal: AbortSignal, st
       await digestFile(id, index, reader, signal, started);
     } catch (error) {
       if (error instanceof IntegrityHalt || signal.aborted) throw new IntegrityHalt();
-      const message = error instanceof Error ? error.message : "Ошибка чтения.";
+      const message = readableError(error);
       await update(id, (job) => {
         const target = job.files[index];
         if (!target) return;
@@ -582,6 +598,14 @@ function payloadOf(job: IntegrityJob): Record<string, unknown> {
     deleteAllowed: job.deleteAllowed,
     message: phaseOf(job),
   };
+}
+
+function readableError(error: unknown): string {
+  const code = (error as NodeJS.ErrnoException).code;
+  if (code === "ENOENT" || code === "ENOTDIR") {
+    return "Файлы не найдены на машине Склада. Диск отсюда не читался, ничего не удалялось.";
+  }
+  return error instanceof Error && error.message ? error.message : "Не удалось посчитать SHA-256.";
 }
 
 function phaseOf(job: IntegrityJob): string {

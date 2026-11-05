@@ -4,10 +4,13 @@ import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
 
 import { AppShell } from "@/components/app-shell";
+import { FileEnqueue } from "@/components/file-enqueue";
 import { DownloadQueue, type QueueCommand } from "@/components/download-queue";
 import { JobCard } from "@/components/job-card";
 import { Button } from "@/components/ui/button";
 import { api } from "@/lib/api-client";
+import { fileJobSnapshot } from "@/lib/jobs/snapshot";
+import type { JobEvent } from "@/lib/jobs/model";
 import type { ProgressPayload } from "@/lib/progress/jobs";
 import { toJobCard } from "@/lib/progress/view";
 
@@ -33,10 +36,31 @@ export function useProgress(initial: ProgressPayload | null) {
     const kick = window.setTimeout(run, 2_000);
     const timer = window.setInterval(run, 2_000);
     document.addEventListener("visibilitychange", run);
+    const source = new EventSource("/api/jobs/events");
+    const onEvent = (message: MessageEvent<string>) => {
+      try {
+        const event = JSON.parse(message.data) as JobEvent;
+        if (event.type !== "upsert" && event.type !== "progress") return;
+        const snapshot = fileJobSnapshot(event.job);
+        setData((current) => {
+          if (!current) return current;
+          const index = current.jobs.findIndex((job) => job.id === snapshot.id);
+          const jobs = current.jobs.slice();
+          if (index === -1) jobs.unshift(snapshot);
+          else jobs[index] = snapshot;
+          return { ...current, jobs };
+        });
+      } catch {
+        // Ignore a malformed frame; the poll still refreshes the page.
+      }
+    };
+    source.addEventListener("upsert", onEvent);
+    source.addEventListener("progress", onEvent);
     return () => {
       window.clearTimeout(kick);
       window.clearInterval(timer);
       document.removeEventListener("visibilitychange", run);
+      source.close();
     };
   }, [refresh]);
 
@@ -46,6 +70,11 @@ export function useProgress(initial: ProgressPayload | null) {
 export function ProgressScreen({ initial }: { initial: ProgressPayload }) {
   const { data, error, pending, setPending, refresh } = useProgress(initial);
   const jobs = (data?.jobs ?? []).map((job) => toJobCard(job));
+  const [jobPage, setJobPage] = useState(0);
+  const pageSize = 20;
+  const pages = Math.max(1, Math.ceil(jobs.length / pageSize));
+  const page = Math.min(jobPage, pages - 1);
+  const visible = jobs.slice(page * pageSize, page * pageSize + pageSize);
 
   async function onAction(id: string, action: "pause" | "resume" | "cancel") {
     if (action === "cancel" && !window.confirm("Остановить операцию? Файлы на диске не будут удалены.")) return;
@@ -69,6 +98,7 @@ export function ProgressScreen({ initial }: { initial: ProgressPayload }) {
       <BoardMessage error={error} hasData={Boolean(data)} onRetry={() => void refresh()} />
       <div className="grid items-start gap-6 lg:grid-cols-[minmax(0,1fr)_22rem]">
         <section className="order-2 grid gap-3 lg:order-1">
+          <FileEnqueue />
           <h2 className="text-base font-semibold">Операции</h2>
           {jobs.length === 0 ? (
             <div className="rounded-xl border border-dashed px-4 py-10">
@@ -78,10 +108,25 @@ export function ProgressScreen({ initial }: { initial: ProgressPayload }) {
               </p>
             </div>
           ) : (
-            jobs.map((card) => (
+            visible.map((card) => (
               <JobCard key={card.id} card={card} pending={pending} onAction={(action) => void onAction(card.id, action)} />
             ))
           )}
+          {jobs.length > pageSize ? (
+            <div className="flex items-center justify-between text-xs text-muted-foreground">
+              <span>
+                {page * pageSize + 1}–{page * pageSize + visible.length} из {jobs.length}
+              </span>
+              <span className="flex gap-2">
+                <Button type="button" size="xs" variant="outline" disabled={page <= 0} onClick={() => setJobPage(page - 1)}>
+                  Назад
+                </Button>
+                <Button type="button" size="xs" variant="outline" disabled={page + 1 >= pages} onClick={() => setJobPage(page + 1)}>
+                  Дальше
+                </Button>
+              </span>
+            </div>
+          ) : null}
         </section>
         <aside className="order-1 lg:sticky lg:top-4 lg:order-2">
           <DownloadQueue queues={data?.queues ?? []} pending={pending} onCommand={(command) => void runQueue(command)} />

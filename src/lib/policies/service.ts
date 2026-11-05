@@ -1,7 +1,9 @@
 import type { GameSubtype } from "@/lib/content/types";
 import { isContentKind, isGameSubtype } from "@/lib/content/types";
 import { loadDriveCatalog } from "@/lib/drives/catalog";
-import { enqueuePolicyJob, type PolicyJob } from "@/lib/policies/jobs";
+import { toPolicyDisk } from "@/lib/policies/disks";
+import { enqueuePolicyJob, loadPolicyJobs, type PolicyJob } from "@/lib/policies/jobs";
+import { PRESET_LIST } from "@/lib/policies/presets";
 import { QbittorrentError } from "@/lib/qbittorrent/errors";
 import { assertHash } from "@/lib/qbittorrent/paths";
 import { clientFor, getDashboard, relocateTorrent, requireHost } from "@/lib/qbittorrent/service";
@@ -18,21 +20,38 @@ import {
 } from "@/lib/policies/store";
 import type { DryRunInput, DryRunResult, PolicyDocument, PolicyHost, PolicyTorrent, PresetId, TorrentPlacement } from "@/lib/policies/types";
 
-export async function getPolicyView(): Promise<{
-  policy: PolicyDocument;
-  disks: Awaited<ReturnType<typeof loadDriveCatalog>>;
-  hosts: PolicyHost[];
-}> {
-  const [policy, disks, dashboard] = await Promise.all([loadPolicy(), loadDriveCatalog(), getDashboard()]);
+export async function getPolicyView() {
+  const [policy, catalog, dashboard, jobs] = await Promise.all([
+    loadPolicy(),
+    loadDriveCatalog(),
+    getDashboard(),
+    loadPolicyJobs(),
+  ]);
+  const hosts: PolicyHost[] = dashboard.hosts.map((host) => ({
+    id: host.id,
+    name: host.name,
+    os: host.os,
+    online: host.online,
+  }));
   return {
     policy,
-    disks,
-    hosts: dashboard.hosts.map((host) => ({
-      id: host.id,
-      name: host.name,
-      os: host.os,
-      online: host.online,
-    })),
+    hosts,
+    jobs,
+    presets: PRESET_LIST.map((preset) => ({ id: preset.id, name: preset.name, description: preset.description })),
+    disks: catalog.map((disk) => {
+      const hostId = disk.mounts.find((mount) => mount.hostId)?.hostId;
+      const view = toPolicyDisk(disk, hosts.find((host) => host.id === hostId)?.name ?? "");
+      return {
+        id: view.id,
+        label: view.label,
+        online: view.online,
+        filesystem: view.filesystem,
+        mountPath: view.mountPath,
+        hostId: view.hostId,
+        hostName: view.hostName,
+        os: view.os,
+      };
+    }),
   };
 }
 

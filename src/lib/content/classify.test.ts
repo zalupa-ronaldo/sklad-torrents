@@ -66,6 +66,15 @@ describe("classify downloads", () => {
     expect(result.kind).not.toBe("game");
   });
 
+  it("does not treat a game exe in an x64 folder as software", () => {
+    const result = classify({
+      name: "Cyberpunk 2077",
+      savePath: "D:\\Games",
+      files: [{ name: "Cyberpunk 2077/bin/x64/Cyberpunk2077.exe", size: 90_000_000 }],
+    });
+    expect(result).toMatchObject({ kind: "game", gameSubtype: "pc", reason: "extension" });
+  });
+
   it("lets a user override beat the guess", () => {
     const result = classify({
       name: "God of War (PSP)",

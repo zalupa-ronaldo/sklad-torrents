@@ -1,9 +1,14 @@
 import "@/lib/policies/jobs";
 import "@/lib/optical/jobs";
+import "@/lib/optical/progress-source";
+import "@/lib/integrity/progress-source";
+import "@/lib/progress/engine-jobs";
+import "@/lib/jobs/register-source";
 import type { CatalogDisk } from "@/lib/drives/types";
 import { QbittorrentError } from "@/lib/qbittorrent/errors";
 import { pauseTorrent } from "@/lib/qbittorrent/service";
 import type { TorrentView } from "@/lib/qbittorrent/types";
+import { performKernelAction } from "@/lib/progress/engine-jobs";
 import { parseJobId } from "@/lib/progress/ids";
 import { cancelMockJob, listMockJobs, pauseMockJob, resumeMockJob } from "@/lib/progress/mock-jobs";
 import { listRegisteredJobs } from "@/lib/progress/sources";
@@ -21,9 +26,19 @@ export interface ProgressPayload {
 }
 
 export async function getProgressPayload(now = Date.now()): Promise<ProgressPayload> {
+  await registerLocalsendJobs();
   const tick = await tickScheduler();
   const jobs = await collectJobs(tick, now);
   return { jobs, queues: tick.plan.queues, fetchedAt: now };
+}
+
+async function registerLocalsendJobs(): Promise<void> {
+  try {
+    const { registerLocalsendProgress } = await import("@/lib/localsend/progress");
+    registerLocalsendProgress();
+  } catch {
+    // The progress page still lists the other engines if LocalSend failed to load.
+  }
 }
 
 export async function getJob(id: string, now = Date.now()): Promise<JobSnapshot | null> {
@@ -37,7 +52,24 @@ export async function performJobAction(
   action: "pause" | "resume" | "cancel",
   now = Date.now(),
 ): Promise<{ notice?: string }> {
+  if (id.startsWith("hash-")) {
+    if (action !== "cancel") {
+      throw new QbittorrentError("validation", "Пауза подсчёта — это отмена. Уже посчитанные хэши остаются, файлы не удаляются.");
+    }
+    const { cancelIntegrity } = await import("@/lib/integrity/engine");
+    await cancelIntegrity(id);
+    return { notice: "Подсчёт SHA-256 остановлен. Файлы не удалялись." };
+  }
+  if (id.startsWith("localsend__")) {
+    const { controlJob } = await import("@/lib/jobs/queue");
+    await controlJob(id.slice("localsend__".length), action);
+    return action === "cancel" ? { notice: "Остановка LocalSend запрошена. Файл не удаляется." } : {};
+  }
   const parsed = parseJobId(id);
+  if (parsed.kind === "local" && parsed.id.startsWith("kernel__")) {
+    return performKernelAction(parsed.id.slice("kernel__".length), action);
+  }
+  if (parsed.kind === "local" && parsed.id.startsWith("job_")) return fileQueueAction(parsed.id, action);
   if (parsed.kind === "local") return performMockAction(parsed.id, action, now);
   if (action === "cancel") {
     throw new QbittorrentError("validation", "Отмена раздачи не удаляет файлы отсюда. Удалите её в списке, если нужно.");
@@ -50,6 +82,23 @@ export async function performJobAction(
       : {};
   }
   return resumeRespectingDisk(parsed.hostId, parsed.hash);
+}
+
+async function fileQueueAction(id: string, action: "pause" | "resume" | "cancel"): Promise<{ notice?: string }> {
+  const { JobError } = await import("@/lib/jobs/errors");
+  const { getJobStore } = await import("@/lib/jobs/engine");
+  try {
+    const store = getJobStore();
+    if (action === "pause") await store.pause(id);
+    else if (action === "resume") await store.resume(id);
+    else await store.cancel(id);
+  } catch (error) {
+    if (error instanceof JobError) {
+      throw new QbittorrentError(error.code === "not_found" ? "not_found" : "validation", error.message);
+    }
+    throw error;
+  }
+  return action === "cancel" ? { notice: "Отменено. Файлы на диске не удалялись." } : {};
 }
 
 async function performMockAction(id: string, action: "pause" | "resume" | "cancel", now: number): Promise<{ notice?: string }> {
@@ -70,9 +119,16 @@ async function performMockAction(id: string, action: "pause" | "resume" | "cance
 
 export async function collectJobs(tick: SchedulerTick, now: number): Promise<JobSnapshot[]> {
   const extra = await listRegisteredJobs();
-  const jobs = [...listMockJobs(now), ...torrentJobs(tick.dashboard.torrents, tick.catalog, now), ...extra];
+  const mocks = listMockJobs(now).filter((job) => job.id === "transcode-broken" || !coveredByEngine(job, extra));
+  const jobs = [...mocks, ...torrentJobs(tick.dashboard.torrents, tick.catalog, now), ...extra];
   jobs.sort(compareJobs);
   return jobs;
+}
+
+function coveredByEngine(mock: JobSnapshot, extra: JobSnapshot[]): boolean {
+  return extra.some(
+    (job) => job.kind === mock.kind && (job.status === "running" || job.status === "paused") && job.processedBytes > 0,
+  );
 }
 
 function torrentJobs(torrents: TorrentView[], catalog: CatalogDisk[], now: number): JobSnapshot[] {

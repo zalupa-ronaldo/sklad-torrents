@@ -1,4 +1,4 @@
-export type JobKind = "torrent" | "index" | "copy" | "compact" | "transcode" | "optical";
+export type JobKind = "torrent" | "index" | "copy" | "compact" | "transcode" | "optical" | "localsend";
 
 export type JobStatus = "running" | "paused" | "queued" | "completed" | "error" | "cancelled";
 

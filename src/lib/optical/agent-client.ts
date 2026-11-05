@@ -32,11 +32,11 @@ export class HttpWindowsAgent {
   }
 
   async health(): Promise<AgentHealth> {
-    return this.request<AgentHealth>("/health");
+    return this.request<AgentHealth>("/v1/health");
   }
 
   async submit(job: OpticalJob): Promise<OpticalJob> {
-    return this.request<OpticalJob>("/jobs", {
+    return this.request<OpticalJob>("/v1/optical/jobs", {
       method: "POST",
       body: JSON.stringify(job),
     });
@@ -44,7 +44,7 @@ export class HttpWindowsAgent {
 
   async getJob(id: string): Promise<OpticalJob | null> {
     try {
-      return await this.request<OpticalJob>(`/jobs/${encodeURIComponent(id)}`);
+      return await this.request<OpticalJob>(`/v1/optical/jobs/${encodeURIComponent(id)}`);
     } catch (error) {
       if (error instanceof OpticalError && error.code === "not_found") return null;
       throw error;
@@ -52,7 +52,7 @@ export class HttpWindowsAgent {
   }
 
   async listDrives(): Promise<OpticalDrive[]> {
-    const body = await this.request<{ drives: OpticalDrive[] }>("/drives");
+    const body = await this.request<{ drives: OpticalDrive[] }>("/v1/optical/drives");
     return body.drives ?? [];
   }
 

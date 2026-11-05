@@ -7,6 +7,7 @@ import { QbittorrentError } from "@/lib/qbittorrent/errors";
 import { planDownloads } from "@/lib/scheduler/plan";
 import type { SchedulerPlan, SchedulerTorrent } from "@/lib/scheduler/types";
 import type { DryRunInput, DryRunResult, DryRunRow, DryRunStep, HandbrakeSettings, PolicyDocument, QueueRole } from "@/lib/policies/types";
+import { diskKey } from "@/lib/policies/disks";
 import {
   compactLeaf,
   constrainToFilesystem,
@@ -47,9 +48,13 @@ export function buildDryRun(input: DryRunInput): DryRunResult {
       progress: Math.min(torrent.progress, 0.99),
       userPaused: false,
     }));
+  const chosen = new Map<string, (typeof input.disks)[number]>();
+  for (const row of prepared) {
+    if (row.dest.disk) chosen.set(diskKey(row.dest.disk), row.dest.disk);
+  }
   const schedulerPlan = planDownloads({
     torrents: routed,
-    catalog: input.disks,
+    catalog: chosen.size > 0 ? [...chosen.values()] : input.disks,
     order: {},
     priority: {},
   });

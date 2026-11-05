@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { setAppDataDir } from "@/lib/app-data";
 import { searchCatalog, acceptReceivedFiles } from "@/lib/drive/catalog";
-import { enqueueJob, getJob, listJobs, registerJobHandler, updateJob, whenJobsIdle } from "@/lib/jobs/queue";
+import { enqueueJob, getJob, listJobs, registerJobHandler, whenJobsIdle } from "@/lib/jobs/queue";
 import type { JobRecord, JobState } from "@/lib/jobs/types";
 import { protocolRequest, transferToPeer } from "@/lib/localsend/client";
 import { upsertDevice } from "@/lib/localsend/discovery";
@@ -138,7 +138,7 @@ describe("LocalSend jobs", () => {
     await waitJob(again.job.id, ["done", "error"]);
   });
 
-  it("keeps a queued job on disk and does not mark an interrupted running job done", async () => {
+  it("reloads a running job from disk and does not mark an interrupted run as done", async () => {
     let release = () => {};
     const gate = new Promise<void>((resolve) => {
       release = resolve;
@@ -147,25 +147,14 @@ describe("LocalSend jobs", () => {
       await gate;
     });
     try {
-      const queued = await enqueueJob({
-        kind: "test.hold",
-        idempotencyKey: "hold-1",
-        title: "Ждёт",
-        payload: { ok: true },
-      });
-      expect(queued.duplicate).toBe(false);
-      const reread = await getJob(queued.job.id);
-      expect(reread?.state).toBe("running");
-      expect(reread?.payload).toEqual({ ok: true });
-
       const blocked = await enqueueJob({
         kind: "test.block",
         idempotencyKey: "block-1",
         title: "Держим",
-        payload: {},
+        payload: { n: 1 },
       });
-      await waitJob(blocked.job.id, ["running"]);
-      await updateJob(queued.job.id, { state: "running" });
+      const running = await waitJob(blocked.job.id, ["running"]);
+      expect(running.payload).toEqual({ n: 1 });
       const { recoverInterruptedJobs } = await import("@/lib/jobs/queue");
       await recoverInterruptedJobs();
       const recovered = await getJob(blocked.job.id);

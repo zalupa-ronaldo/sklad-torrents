@@ -19,6 +19,23 @@ const DISKUTIL = `
 `;
 
 describe("optical detection", () => {
+  it("does not report a local recorder on macOS", async () => {
+    const calls: string[][] = [];
+    const result = await detectDrives({
+      platform: "darwin",
+      demo: false,
+      exec: async (argv) => {
+        calls.push(argv);
+        if (argv[0] === "drutil" && argv[1] === "status") return { code: 0, stdout: DRUTIL, stderr: "", mock: false };
+        if (argv[0] === "diskutil") return { code: 0, stdout: DISKUTIL, stderr: "", mock: false };
+        return { code: 0, stdout: "", stderr: "", mock: false };
+      },
+    });
+    expect(calls).toEqual([]);
+    expect(result.drives).toEqual([]);
+    expect(result.detail).toMatch(/Windows/);
+  });
+
   it("returns no drive on linux without spawning", async () => {
     const calls: string[] = [];
     const result = await detectDrives({

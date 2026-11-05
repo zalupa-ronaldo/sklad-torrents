@@ -57,7 +57,7 @@ export function jobIdempotencyKey(kind: JobKind, host: JobHost, source: string, 
 }
 
 function normalizeOperand(host: JobHost, value: string): string {
-  let text = value.trim().replace(/[\u0000\u0001]/g, "");
+  const text = value.trim().replace(/[\u0000\u0001]/g, "");
   if (host === "pc-agent") return text.replace(/\//g, "\\").replace(/\\+$/g, "").toLowerCase();
   return text.replace(/\\/g, "/").replace(/\/+$/g, "");
 }

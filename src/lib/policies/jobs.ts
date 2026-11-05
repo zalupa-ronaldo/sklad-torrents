@@ -87,7 +87,7 @@ export function policyJobsAsSnapshots(jobs: PolicyJob[]): JobSnapshot[] {
     .filter((job) => job.kind === "handbrake" || job.kind === "compact")
     .map((job) => ({
       id: `policy-${job.id}`,
-      kind: job.kind === "handbrake" ? "transcode" : "compact",
+      kind: job.kind === "handbrake" ? "transcode" : job.kind === "index" ? "index" : "compact",
       title: job.torrentName,
       status: "queued",
       progress: 0,

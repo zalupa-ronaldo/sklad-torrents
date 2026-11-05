@@ -17,6 +17,8 @@ export interface BackgroundJob {
   /** True only after a non-mock tool run that actually finished its success path. */
   hardware: boolean;
   idempotencyKey: string;
+  /** Optical hardware jobs use `pc-agent`. Other queues may leave this empty. */
+  host?: string;
   claimedBy: string | null;
   createdAt: string;
   updatedAt: string;

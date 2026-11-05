@@ -18,10 +18,12 @@ export async function guard(fn: () => Promise<Response>): Promise<Response> {
 }
 
 function statusFor(error: unknown): number {
+  if (error instanceof AppError) return error.status;
   if (error instanceof OpticalError) {
-    if (error.code === "validation" || error.code === "tool_not_found") return 400;
     if (error.code === "not_found") return 404;
     if (error.code === "conflict") return 409;
+    if (error.code === "offline") return 503;
+    if (error.code === "forbidden") return 403;
     return 400;
   }
   if (!(error instanceof QbittorrentError)) return 500;

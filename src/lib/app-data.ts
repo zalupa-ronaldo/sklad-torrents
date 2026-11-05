@@ -13,5 +13,5 @@ export function setAppDataDir(dir: string | null): void {
 }
 
 export function jobsFile(): string {
-  return path.join(appDataDir(), "jobs.json");
+  return path.join(appDataDir(), "localsend-jobs.json");
 }

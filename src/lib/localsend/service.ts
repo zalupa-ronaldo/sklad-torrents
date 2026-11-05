@@ -12,6 +12,7 @@ import {
   insertJob,
   recoverInterruptedJobs,
   registerJobHandler,
+  resumeQueue,
   unbindJobAbort,
   updateJob,
 } from "@/lib/jobs/queue";
@@ -38,6 +39,7 @@ import {
   type DeviceInfo,
 } from "@/lib/localsend/protocol";
 import { loadSettings, resolveReceiveDestination, saveSettings, type LocalSendSettings } from "@/lib/localsend/settings";
+import { registerLocalsendProgress } from "@/lib/localsend/progress";
 import { startPeerServer, type IncomingFile, type PeerServer } from "@/lib/localsend/server";
 
 export interface SendFilePayload {
@@ -131,6 +133,7 @@ export async function addManualDevice(address: string, port = LOCALSEND_PORT): P
 export async function enqueueSend(input: {
   fingerprint: string;
   entryIds: string[];
+  driveFiles?: { diskId: string; path: string; name: string; kind?: string }[];
   pin?: string;
 }): Promise<{ job: JobRecord<SendPayload>; duplicate: boolean }> {
   await refreshMock();
@@ -142,7 +145,8 @@ export async function enqueueSend(input: {
     throw new AppError(409, "Демо-получатель не запущен. Отправка не создана.");
   }
   const selected = await expandSelection(input.entryIds);
-  if (selected.length === 0) throw new AppError(400, "Выберите файлы из каталога.");
+  const fromShelf = await resolveShelfFiles(input.driveFiles ?? []);
+  if (selected.length + fromShelf.length === 0) throw new AppError(400, "Выберите файлы из каталога.");
   const files: SendFilePayload[] = [];
   for (const entry of selected) {
     if (!entry.localPath) {
@@ -162,6 +166,7 @@ export async function enqueueSend(input: {
       sent: false,
     });
   }
+  files.push(...fromShelf);
   const payload: SendPayload = {
     peer: {
       alias: device.alias,
@@ -181,6 +186,54 @@ export async function enqueueSend(input: {
     payload,
     bytesTotal: files.reduce((sum, file) => sum + file.size, 0),
   });
+}
+
+async function resolveShelfFiles(
+  picks: { diskId: string; path: string; name: string; kind?: string }[],
+): Promise<SendFilePayload[]> {
+  if (picks.length === 0) return [];
+  const { readCatalog } = await import("@/addons/drives/store");
+  const { joinDisplay } = await import("@/addons/drives/paths");
+  const catalog = await readCatalog();
+  const disks = catalog?.disks ?? [];
+  const files: SendFilePayload[] = [];
+  for (const pick of picks) {
+    const disk = disks.find((item) => item.id === pick.diskId);
+    if (!disk) throw new AppError(404, "Диск из полки не найден.");
+    const mount = disk.lastMountPath || disk.connectedHosts[0]?.mountPaths[0] || "";
+    const chosen = disk.files.filter((file) => {
+      const full = joinDisplay(disk.pathStyle, mount, file.relativePath);
+      if (pick.kind === "dir") return file.kind === "file" && (full === pick.path || full.startsWith(pick.path.endsWith("/") || pick.path.endsWith("\\") ? pick.path : `${pick.path}/`) || full.startsWith(`${pick.path}\\`));
+      return full === pick.path || file.relativePath === pick.path || file.name === pick.name && full.endsWith(pick.name);
+    });
+    const concrete = chosen.filter((file) => file.kind === "file");
+    if (concrete.length === 0) {
+      throw new AppError(400, `В каталоге нет файлов для «${pick.name || pick.path}».`);
+    }
+    for (const file of concrete) {
+      const full = joinDisplay(disk.pathStyle, mount, file.relativePath);
+      let size = file.size;
+      try {
+        const info = await stat(full);
+        if (!info.isFile()) throw new Error("не файл");
+        size = info.size;
+      } catch {
+        throw new AppError(400, `Нет локальной копии «${full}». Передача не создана и не будет отмечена как отправленная.`);
+      }
+      files.push({
+        fileId: randomUUID(),
+        fileName: file.name,
+        size,
+        fileType: fileTypeForName(file.name),
+        localPath: full,
+        catalogPath: full,
+        diskId: disk.id,
+        hostId: disk.lastHostId,
+        sent: false,
+      });
+    }
+  }
+  return files;
 }
 
 async function runSendJob(job: JobRecord): Promise<void> {
@@ -249,7 +302,14 @@ async function runSendJob(job: JobRecord): Promise<void> {
         });
         return;
       }
-      withHash.push({ ...file, sha256: await sha256File(file.localPath), path: file.localPath });
+      withHash.push({
+        id: file.fileId,
+        fileName: file.fileName,
+        size: file.size,
+        fileType: file.fileType,
+        sha256: await sha256File(file.localPath),
+        path: file.localPath,
+      });
     }
 
     let sentBytes = already;
@@ -412,6 +472,8 @@ async function boot(): Promise<void> {
     await listen(settings, 0);
   }
   if (runtime().self) startMulticast(() => runtime().self ?? fallbackSelf());
+  registerLocalsendProgress();
+  resumeQueue();
   if (process.env.LOCALSEND_MOCK === "1") {
     try {
       const mock = await startPeerServer({
@@ -478,7 +540,17 @@ async function listen(settings: LocalSendSettings, port: number): Promise<void> 
         progress: progressSnapshot(update.fileBytes, Math.max(job.progress.bytesTotal, update.fileSize), job.startedAt, update.fileName),
       });
     },
-    onFileAccepted: (file: IncomingFile) => acceptReceivedFiles([file]).then(() => undefined),
+    onFileAccepted: async (file: IncomingFile) => {
+      await acceptReceivedFiles([file]);
+      const { appendReceivedFiles } = await import("@/addons/drives/service");
+      await appendReceivedFiles({
+        diskId: file.diskId,
+        relativePath: file.fileName,
+        size: file.size,
+        os: file.os,
+        catalogPath: file.catalogPath,
+      });
+    },
     onSessionFinished: async (sessionId) => {
       const jobId = runtime().receiveJobs.get(sessionId);
       if (!jobId) return;

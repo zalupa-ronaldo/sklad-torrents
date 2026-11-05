@@ -17,7 +17,11 @@ export interface PolicyDisk {
 }
 
 export function diskKey(disk: CatalogDisk): string {
-  return catalogDiskKey(disk.serial, disk.uuid);
+  return disk.id || catalogDiskKey(disk.serial, disk.uuid);
+}
+
+export function sameDisk(disk: CatalogDisk, id: string): boolean {
+  return diskKey(disk) === id || catalogDiskKey(disk.serial, disk.uuid) === id;
 }
 
 export function toPolicyDisk(disk: CatalogDisk, hostName = ""): PolicyDisk {

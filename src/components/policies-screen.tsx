@@ -59,12 +59,14 @@ export function PoliciesScreen() {
   const [error, setError] = useState<string | null>(null);
   const [preview, setPreview] = useState<PreviewPayload | null>(null);
   const [stale, setStale] = useState(false);
+  const [savedKey, setSavedKey] = useState("");
   const [busy, setBusy] = useState(false);
 
   const load = useCallback(async () => {
     const next = await api<PolicyPayload>("/api/policies");
     setPayload(next);
     setRules(next.policy.rules);
+    setSavedKey(JSON.stringify(next.policy.rules));
     setPresetId(next.policy.presetId);
     setError(null);
     return next;
@@ -72,11 +74,14 @@ export function PoliciesScreen() {
 
   useEffect(() => {
     let cancelled = false;
-    void load().catch((reason: unknown) => {
-      if (!cancelled) setError(reason instanceof Error ? reason.message : "Не удалось открыть правила");
-    });
+    const kick = window.setTimeout(() => {
+      void load().catch((reason: unknown) => {
+        if (!cancelled) setError(reason instanceof Error ? reason.message : "Не удалось открыть правила");
+      });
+    }, 0);
     return () => {
       cancelled = true;
+      window.clearTimeout(kick);
     };
   }, [load]);
 
@@ -105,13 +110,15 @@ export function PoliciesScreen() {
     if (!rules) return;
     setBusy(true);
     try {
+      const draftDirty = JSON.stringify(rules) !== savedKey;
       const next = await api<PreviewPayload>("/api/policies/preview", {
         method: "POST",
-        body: JSON.stringify(stale ? { rules } : {}),
+        body: JSON.stringify(draftDirty ? { rules } : {}),
       });
       setPreview(next);
       setStale(false);
       setRules(next.policy.rules);
+      setSavedKey(JSON.stringify(next.policy.rules));
       setPresetId(next.policy.presetId);
       setPayload((current) => (current ? { ...current, policy: next.policy } : current));
       toast.success("Сухой прогон готов. Ничего не удалено и не перенесено");
@@ -408,7 +415,7 @@ function RuleCard({
           >
             <option value="none">Не индексировать</option>
             <option value="walk">Обычный обход</option>
-            <option value="ntfs-mft" disabled={!ntfs && Boolean(disk)}>
+            <option value="ntfs-mft" disabled={!ntfs}>
               NTFS MFT
             </option>
           </select>

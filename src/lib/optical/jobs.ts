@@ -242,7 +242,9 @@ async function pumpDiscJobs(): Promise<void> {
           .sort((a, b) => a.createdAt.localeCompare(b.createdAt))[0];
         if (!next) return null;
         next.status = "running";
-        next.claimedBy = "disc-image-studio";
+        const action = (next.payload as { plan?: { action?: string } }).plan?.action;
+        next.claimedBy = action === "burn" ? "pc-agent" : "disc-image-studio";
+        if (action === "burn") next.host = "pc-agent";
         next.updatedAt = new Date().toISOString();
         return next;
       });
@@ -277,16 +279,18 @@ async function executeClaimed(job: BackgroundJob): Promise<void> {
     await finish(job.id, mockDoneMessage(payload.plan), true);
     return;
   }
+  const hostPlatform = control?.hostPlatform ?? process.platform;
+  if (payload.plan.action === "burn" && hostPlatform !== "win32") {
+    await finish(
+      job.id,
+      "Имитация агента Windows: живая запись IMAPI2 на Mac не запускалась. Диск не записан.",
+      true,
+    );
+    return;
+  }
   const resolve = control?.resolveBinary ?? (() => resolveDiscImageStudioBinary(control?.env));
   const binary = await resolve();
   if (!binary) throw new OpticalError("tool_not_found", missingBinaryMessage());
-  const hostPlatform = control?.hostPlatform ?? process.platform;
-  if (payload.plan.action === "burn" && hostPlatform !== "win32") {
-    throw new OpticalError(
-      "validation",
-      "Живая запись через IMAPI2 доступна только когда Склад запущен на Windows. Команда на привод не отправлялась. Диск не записан.",
-    );
-  }
   await touch(job.id, {
     percent: 35,
     phase: payload.plan.imapiProbe ? "опрос IMAPI2" : "сборка образа",

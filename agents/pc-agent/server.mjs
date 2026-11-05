@@ -91,6 +91,14 @@ async function handle(req, res) {
     await handleFileIndex(req, res, url);
     return;
   }
+  if (parts[0] === "v1" && parts[1] === "optical") {
+    const { handleOptical } = await import("./optical-routes.mjs");
+    const result = await handleOptical(req, url, readBody);
+    if (result) {
+      send(res, result.status, result.body);
+      return;
+    }
+  }
   send(res, 404, { error: "Не найдено." });
 }
 

@@ -74,11 +74,16 @@ describe("optical jobs", () => {
     const payload = readOpticalPayload(done);
     expect(payload.verified).toBe(true);
     expect(payload.source).toBe("mock");
-    const bins = runner.calls.map((call) => call.argv[0]);
-    expect(bins).toContain("hdiutil");
-    expect(bins).toContain("drutil");
-    expect(runner.calls.some((call) => call.argv.includes("makehybrid"))).toBe(true);
-    expect(runner.calls.some((call) => call.argv.includes("checksum"))).toBe(true);
+    const joined = runner.calls.map((call) => call.argv.join(" ")).join("\n");
+    expect(joined).not.toMatch(/\bdrutil\s+burn\b/);
+    expect(joined).not.toMatch(/\bhdiutil\s+burn\b/);
+    expect(joined).toMatch(/imapi-burn\.ps1/);
+    expect(joined).toMatch(/imapi-verify\.ps1/);
+    expect(done.claimedBy).toBe("pc-agent");
+    expect(done.host).toBe("pc-agent");
+    expect(payload.verifiedBy).toBe("pc-agent");
+    expect(payload.host).toBe("pc-agent");
+    expect(payload.driveName).toBe("HL-DT-ST DVDRAM GP57ES60");
   });
 
   it("rejects a duplicate active burn", async () => {

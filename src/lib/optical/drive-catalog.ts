@@ -1,13 +1,22 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 
+import { readCatalog } from "@/addons/drives/store";
+import type { DiskRecord } from "@/addons/drives/types";
 import { demoIndexedPaths } from "@/lib/optical/demo";
 import type { IndexedPath } from "@/lib/optical/media";
 import { dataDir } from "@/lib/qbittorrent/store";
 
-const CANDIDATES = ["drive-catalog.json", "drives.json", "drive-manager.json", "catalog.json"];
+const CANDIDATES = ["drive-catalog.json", "drive-manager.json", "catalog.json"];
 
 export async function loadIndexedPaths(): Promise<{ source: "drive-manager" | "demo"; records: IndexedPath[] }> {
+  try {
+    const catalog = await readCatalog();
+    const fromDisks = catalog ? filesFromDisks(catalog.disks) : [];
+    if (fromDisks.length > 0) return { source: "drive-manager", records: fromDisks };
+  } catch {
+    // A different drives.json shape belongs to another module. Fall through.
+  }
   for (const name of CANDIDATES) {
     try {
       const text = await readFile(path.join(dataDir(), name), "utf8");
@@ -43,6 +52,27 @@ export function normalizeCatalog(value: unknown): IndexedPath[] {
       size,
       kind: item.kind === "folder" || item.kind === "dir" ? "folder" : "file",
     });
+  }
+  return records;
+}
+
+function filesFromDisks(disks: DiskRecord[]): IndexedPath[] {
+  const records: IndexedPath[] = [];
+  for (const disk of disks) {
+    if (!disk || !Array.isArray(disk.files)) continue;
+    for (const file of disk.files) {
+      if (!file?.relativePath) continue;
+      const root = (disk.lastMountPath || "").replace(/[\\/]+$/, "");
+      const relative = file.relativePath.replace(/^[\\/]+/, "");
+      const separator = disk.pathStyle === "win32" ? "\\" : "/";
+      records.push({
+        diskLabel: disk.label || disk.volumeName || "Диск",
+        path: root ? `${root}${separator}${relative}` : relative,
+        name: file.name || relative.split(/[/\\]/).pop() || relative,
+        size: Number.isFinite(file.size) ? file.size : 0,
+        kind: file.kind === "dir" ? "folder" : "file",
+      });
+    }
   }
   return records;
 }

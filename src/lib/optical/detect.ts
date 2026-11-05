@@ -203,13 +203,19 @@ export async function detectDrives(options: {
       detail: "Демо-приводы. Это не оборудование этой машины, запись на диск не выполняется.",
     };
   }
-  if (options.platform !== "darwin" && options.platform !== "win32") {
+  if (options.platform === "darwin") {
+    return {
+      status: "no-drive",
+      drives: [],
+      detail: "Оптический привод не найден. На Mac локального привода нет: запись идёт через агент Windows.",
+    };
+  }
+  if (options.platform !== "win32") {
     return { status: "no-drive", drives: [], detail: "Оптический привод не найден." };
   }
   const exec = options.exec;
   if (!exec) return { status: "no-drive", drives: [], detail: "Оптический привод не найден." };
   try {
-    if (options.platform === "darwin") return await detectMac(exec);
     return await detectWindows(exec);
   } catch (error) {
     const missing = (error as NodeJS.ErrnoException).code === "ENOENT" || /не найдена/i.test(String((error as Error).message || ""));
@@ -219,52 +225,6 @@ export async function detectDrives(options: {
       detail: missing ? "Оптический привод не найден." : "Оптический привод не найден.",
     };
   }
-}
-
-async function detectMac(exec: CommandSpawn): Promise<DetectResult> {
-  const status = await exec(["drutil", "status"]);
-  const listed = await exec(["drutil", "list"]).catch(() => ({ code: 1, stdout: "", stderr: "", mock: false }));
-  const parsed = parseDrutilStatus(status.stdout);
-  if (parsed.length === 0) {
-    return { status: "no-drive", drives: [], detail: "Оптический привод не найден." };
-  }
-  const indexes = parseDrutilList(listed.stdout);
-  const drives: OpticalDrive[] = [];
-  for (const [offset, item] of parsed.entries()) {
-    let info = {
-      location: "unknown" as OpticalDrive["location"],
-      media: null as MediaKind | null,
-      volumeName: null as string | null,
-      volumeUuid: null as string | null,
-      hardwareSerial: null as string | null,
-    };
-    try {
-      const disk = await exec(["diskutil", "info", item.device]);
-      info = parseDiskutilInfo(disk.stdout);
-    } catch {
-      // diskutil is optional enrichment; drutil already found the drive.
-    }
-    const media = info.media && info.media !== "unknown" ? info.media : item.media;
-    drives.push({
-      id: `darwin:${item.device}`,
-      name: item.name || indexes[offset]?.name || "Оптический привод",
-      device: item.device,
-      driveIndex: indexes[offset]?.index ?? null,
-      location: info.location,
-      media,
-      volumeName: info.volumeName,
-      volumeUuid: info.volumeUuid,
-      hardwareSerial: info.hardwareSerial,
-      rewritable: media === "cd-rw" || media === "dvd-rw" || media === "dvd+rw",
-      suggestedProfile: profileForMedia(media),
-      demo: false,
-      platform: "darwin",
-      recorderId: null,
-    });
-  }
-  return drives.length
-    ? { status: "ok", drives, detail: "" }
-    : { status: "no-drive", drives: [], detail: "Оптический привод не найден." };
 }
 
 async function detectWindows(exec: CommandSpawn): Promise<DetectResult> {

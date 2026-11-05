@@ -61,7 +61,7 @@ export function OpticalPanel() {
       const job = await api<{ id: string; state: string; title: string }>("/api/optical/disc-image", {
         method: "POST",
         body: JSON.stringify({
-          platform,
+          platform: action === "burn" ? "win32" : platform,
           action,
           medium,
           artworkPath,
@@ -106,10 +106,14 @@ export function OpticalPanel() {
           . Если программы нет, задача завершится ошибкой «DiscImageStudio не найден».
         </p>
         <p>
-          На macOS и Linux действие одно: <strong>собрать офлайн-образ</strong>. Экспериментальный CLI не пишет диск.
-          Живая запись через IMAPI2 есть только у Windows-приложения и помечена как экспериментальная. Кнопка «Записать»
-          ставит в очередь команду <span className="font-mono">burn-devices</span>: она показывает приводы IMAPI2 и не
-          прожигает болванку.
+          Рекордер подключён к Windows-ПК. Mac только ставит задание в очередь и показывает прогресс: имя привода
+          приходит от агента Windows. Локальный DVD-привод на Mac не ищется и не заявляется.
+        </p>
+        <p>
+          Сборка офлайн-образа на macOS и Linux — отдельное экспериментальное действие CLI, привод для него не нужен.
+          Живая запись IMAPI2 экспериментальная и выполняется только агентом Windows. Кнопка «Записать на Windows»
+          ставит в эту очередь команду <span className="font-mono">burn-devices</span>: она показывает приводы IMAPI2 и
+          не прожигает болванку.
         </p>
         <p className="text-muted-foreground">
           Двухслойный BD и DVD-DL эта форма не примет. VLESS не используется. В этом облаке диск не записывался и
@@ -147,8 +151,8 @@ export function OpticalPanel() {
           </div>
           <p className="text-xs text-muted-foreground">
             {windows
-              ? "На Windows можно собрать офлайн-образ или поставить в очередь экспериментальный опрос IMAPI2. Аппаратный путь экспериментальный."
-              : "На macOS и Linux доступна только сборка офлайн-образа. Кнопки живой записи нет."}
+              ? "Офлайн-образ или экспериментальный опрос IMAPI2 уходит агенту Windows. Это не локальная запись на Mac."
+              : "На Mac доступна экспериментальная офлайн-сборка без привода. Живая запись — задание агента Windows."}
           </p>
         </fieldset>
 
@@ -258,18 +262,19 @@ export function OpticalPanel() {
           <Button type="submit" disabled={busy}>
             Собрать офлайн-образ
           </Button>
-          {windows ? (
-            <Button type="button" variant="outline" disabled={busy} onClick={() => void submit("burn")}>
-              Записать
-            </Button>
-          ) : null}
+          <Button
+            type="button"
+            variant="outline"
+            disabled={busy}
+            onClick={() => void submit("burn")}
+          >
+            Записать на Windows
+          </Button>
         </div>
-        {windows ? (
-          <p className="text-xs text-warn">
-            «Записать» не запускает лазер. В очередь попадает экспериментальный опрос IMAPI2 (`burn-devices`). Живая
-            запись остаётся в окне DiscImageStudio на Windows и в документации названа экспериментальной.
-          </p>
-        ) : null}
+        <p className="text-xs text-warn">
+          «Записать на Windows» не включает лазер на этом компьютере. Задание получает агент Windows. Опрос IMAPI2
+          (`burn-devices`) экспериментальный и диск здесь не записывается.
+        </p>
       </form>
     </div>
   );
