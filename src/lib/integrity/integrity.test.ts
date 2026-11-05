@@ -252,7 +252,7 @@ function bytes(text: string): Uint8Array {
 }
 
 async function runPair(
-  kind: "move" | "compact" | "handbrake" | "optical",
+  kind: "move" | "copy" | "compact" | "handbrake" | "optical",
   source: Record<string, Uint8Array>,
   destination: Record<string, Uint8Array>,
   extra: { comparable?: boolean; rewritable?: boolean } = {},
