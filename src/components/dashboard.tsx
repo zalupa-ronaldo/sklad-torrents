@@ -154,7 +154,7 @@ export function Dashboard() {
               Где лежат раздачи на Mac и Windows
               <span className="px-1.5 text-border">·</span>
               <Link href="/optical" className="underline-offset-4 hover:underline">
-                Оптика
+                Диски DVD
               </Link>
               <span className="px-1.5 text-border">·</span>
               <Link href="/drives" className="underline-offset-4 hover:underline">
@@ -163,6 +163,10 @@ export function Dashboard() {
               <span className="px-1.5 text-border">·</span>
               <Link href="/policies" className="underline-offset-4 hover:underline">
                 Правила
+              </Link>
+              <span className="px-1.5 text-border">·</span>
+              <Link href="/localsend" className="underline-offset-4 hover:underline">
+                LocalSend
               </Link>
               <span className="px-1.5 text-border">·</span>
               <Link href="/progress" className="underline-offset-4 hover:underline">

@@ -1,4 +1,5 @@
 import { pollAgents } from "@/addons/drives/agent-client";
+import { applyIndexUpdate } from "@/addons/drives/index-apply";
 import { loadLibraries } from "@/addons/drives/libraries";
 import { buildMockCatalog, liveObservations } from "@/addons/drives/mock-source";
 import { fileCount, mountPathsOf, online, reconcileCatalog } from "@/addons/drives/reconcile";
@@ -85,7 +86,7 @@ export async function getShelf(): Promise<ShelfResponse> {
 }
 
 export async function searchShelf(query: string): Promise<SearchResponse> {
-  const shelf = await getShelf();
+  await getShelf();
   const stored = await readCatalog();
   return { query, hits: searchDisks(stored?.disks ?? [], query) };
 }
@@ -105,6 +106,64 @@ export async function renameDisk(id: string, label: string): Promise<DiskView> {
     disk.namedByUser = true;
     await save(base, true);
     return toView(base).find((item) => item.id === id)!;
+  });
+}
+
+/**
+ * Incremental catalog add. Does not format, move, or delete existing files.
+ * A Mac APFS path is never attached to an NTFS disk.
+ */
+export async function appendReceivedFiles(input: {
+  diskId: string | null;
+  relativePath: string;
+  size: number;
+  os: "darwin" | "win32" | "linux";
+  catalogPath: string;
+}): Promise<void> {
+  await withLock(async () => {
+    const libraries = await loadLibraries();
+    const config = await readAgentConfig();
+    const stored = await readCatalog();
+    const disks = stored?.disks ?? (config.mode === "mock" ? buildMockCatalog(libraries) : []);
+    const apfsPath = input.os === "darwin" || input.catalogPath.startsWith("/Volumes/");
+    let disk = input.diskId ? disks.find((item) => item.id === input.diskId) : undefined;
+    if (apfsPath) {
+      if (disk && disk.filesystem.toLowerCase() === "ntfs") {
+        throw new DriveError(400, "Путь APFS нельзя записать в каталог как NTFS.");
+      }
+      disk = disk && disk.filesystem.toLowerCase() !== "ntfs" ? disk : disks.find((item) => item.filesystem.toLowerCase() === "apfs");
+    }
+    if (!disk) return;
+    if (apfsPath && disk.filesystem.toLowerCase() === "ntfs") {
+      throw new DriveError(400, "Путь APFS нельзя записать в каталог как NTFS.");
+    }
+    const relativePath = input.relativePath.replace(/^[/\\]+/, "");
+    const name = relativePath.split(/[/\\]/).pop() || relativePath;
+    const mount = disk.lastMountPath || disk.connectedHosts[0]?.mountPaths[0] || "/";
+    const updated = applyIndexUpdate({
+      previous: disk.files,
+      previousScan: disk.scan,
+      update: {
+        state: "complete",
+        progress: 1,
+        strategy: "walk",
+        delta: {
+          upserts: [{ relativePath, name, kind: "file", size: input.size, mtimeMs: Date.now() }],
+          deletes: [],
+          complete: true,
+        },
+      },
+      busy: false,
+      libraries,
+      pathStyle: disk.pathStyle,
+      mountPath: mount,
+      filesystem: disk.filesystem,
+      platform: disk.pathStyle === "win32" ? "win32" : "darwin",
+      elevated: false,
+    });
+    disk.files = updated.files;
+    disk.scan = { ...updated.scan, message: "LocalSend добавил файл в индекс. Диск не форматировался и файлы не переносились." };
+    await save(disks, true);
   });
 }
 

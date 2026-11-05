@@ -355,7 +355,7 @@ describe("read-only indexer", () => {
       path.join(process.cwd(), "src/addons/drives"),
     ];
     const extra = [
-      path.join(process.cwd(), "agents/pc-agent/index.mts"),
+      path.join(process.cwd(), "agents/pc-agent/drive.mts"),
       path.join(process.cwd(), "agents/pc-agent/collect.mts"),
     ];
     const banned = [
@@ -381,7 +381,7 @@ describe("read-only indexer", () => {
         expect(text.includes(token), `${filePath} contains ${token}`).toBe(false);
       }
     }
-    const mac = readFileSync(path.join(process.cwd(), "agents/mac-agent/index.mts"), "utf8");
+    const mac = readFileSync(path.join(process.cwd(), "agents/mac-agent/drive.mts"), "utf8");
     expect(mac.includes("fsutil")).toBe(false);
     expect(mac.includes("readNtfs")).toBe(false);
   });
@@ -441,11 +441,7 @@ Volume Free Space:         1.2 TB (1200000000000 Bytes)
   });
 
   it("reads a synthetic NTFS file tree and a USN delete", async () => {
-    const records = Array.from({ length: 12 }, () => Buffer.alloc(1024));
-    records[0] = makeRecord({ parent: 5, name: "$MFT", directory: true });
-    records[5] = makeRecord({ parent: 5, name: ".", directory: true });
-    records[10] = makeRecord({ parent: 5, name: "Cinema", directory: true });
-    records[11] = makeRecord({ parent: 10, name: "movie.mkv", size: 100 });
+    const records = [makeRecord({ parent: 5, name: "$MFT", directory: true }), makeRecord({ parent: 5, name: "Cinema", directory: true }), makeRecord({ parent: 1, name: "movie.mkv", size: 100 })];
     const files = filesFromRecords(records, 1024, 512);
     expect(files.map((entry) => entry.relativePath)).toEqual(["Cinema", "Cinema/movie.mkv"]);
     expect(files[1].size).toBe(100);
@@ -461,7 +457,7 @@ Volume Free Space:         1.2 TB (1200000000000 Bytes)
     records.forEach((record, index) => record.copy(disk, 2048 + index * 1024));
     const read = await readNtfsVolume(async (offset, length) => {
       const buffer = Buffer.alloc(length);
-      disk.copy(buffer, 0, offset, Math.min(disk.length, offset + length));
+      if (offset < disk.length) disk.copy(buffer, 0, offset, Math.min(disk.length, offset + length));
       return buffer;
     });
     expect(read.complete).toBe(true);

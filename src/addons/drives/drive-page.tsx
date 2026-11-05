@@ -68,13 +68,7 @@ export function DrivePage() {
 
   useEffect(() => {
     const needle = query.trim();
-    if (!needle) {
-      setHits(null);
-      setSearchError(null);
-      setSearching(false);
-      return;
-    }
-    setSearching(true);
+    if (!needle) return;
     const timer = window.setTimeout(() => {
       void (async () => {
         try {
@@ -137,8 +131,16 @@ export function DrivePage() {
             id="drive-search"
             value={query}
             onChange={(event) => {
-              setQuery(event.target.value);
+              const value = event.target.value;
+              setQuery(value);
               setSelected(null);
+              if (!value.trim()) {
+                setHits(null);
+                setSearchError(null);
+                setSearching(false);
+              } else {
+                setSearching(true);
+              }
             }}
             placeholder="Файл на любом диске, даже если он на полке"
             className="pl-8"

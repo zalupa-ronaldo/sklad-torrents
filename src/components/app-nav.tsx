@@ -6,9 +6,10 @@ import { cn } from "@/lib/utils";
 
 const LINKS = [
   { href: "/", id: "torrents", label: "Раздачи" },
+  { href: "/optical", id: "optical", label: "Диски DVD" },
   { href: "/drives", id: "drives", label: "Полка дисков" },
+  { href: "/localsend", id: "localsend", label: "LocalSend" },
   { href: "/policies", id: "policies", label: "Правила" },
-  { href: "/optical", id: "optical", label: "Оптика" },
   { href: "/progress", id: "progress", label: "Прогресс" },
   { href: "/scheduler", id: "scheduler", label: "Очередь" },
   { href: "/tools", id: "tools", label: "Медиа и игры" },
