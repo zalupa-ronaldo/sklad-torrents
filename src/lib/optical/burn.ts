@@ -103,7 +103,7 @@ export async function searchShelf(query: string): Promise<SearchHit[]> {
     listDiscs(),
     windowsReportedDrives(await isDemoEnabled()),
   ]);
-  const drives = detection.demo ? [] : detection.drives;
+  const drives = detection.status === "demo" ? [] : detection.drives;
   return searchBurnedFiles(discs, query, drives);
 }
 
