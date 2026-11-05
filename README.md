@@ -1,29 +1,89 @@
 # Склад
 
-Одно локальное приложение: qBittorrent на Mac mini и Windows, полка дисков, очередь заданий, правила контента, HandBrake и сжатие NTFS. Что именно входит в продукт и какие противоречия уже сняты — в [docs/PRODUCT_SPEC.md](docs/PRODUCT_SPEC.md).
+Локальная панель. qBittorrent ставится отдельно, своего торрент-движка здесь нет. Без настоящего железа работают демо-хосты и mock-исполнители. В этом облаке диски не записывались, настоящая MFT не читалась, передача LocalSend до реального компьютера не доводилась.
 
-Склад не качает сам — движок только qBittorrent, установленный отдельно. Прокси и VLESS не нужны: приложение ходит в Web UI напрямую по домашней сети.
+Панель закрывает qBittorrent на Mac mini и Windows, полку дисков, очередь заданий, правила контента, HandBrake и сжатие NTFS. Что входит в продукт и какие противоречия уже сняты — в [docs/PRODUCT_SPEC.md](docs/PRODUCT_SPEC.md).
+
+Прокси и VLESS не нужны. Панель ходит в Web UI qBittorrent и в агентов напрямую по домашней сети.
 
 ## Запуск
 
-Нужен Node.js 22.
+Нужен Node.js 22. Команды ниже — из корня репозитория, где лежит `package.json`.
 
 ```bash
 npm install
+npm test
 npm run dev
 ```
 
-Откройте [http://127.0.0.1:4317](http://127.0.0.1:4317).
+Панель: [http://127.0.0.1:4317](http://127.0.0.1:4317).
+
+`npm test` поднимает поддельный Web API qBittorrent в процессе. Настоящий Mac или ПК для тестов не нужен.
 
 Сразу видны два демо-хоста, «Mac mini» и «Windows PC», с несколькими раздачами. Они не выходят в сеть. Добавление магнет-ссылки на демо-хосте меняет список в этом процессе; перезапуск `npm run dev` возвращает исходные демо-раздачи. Настоящие хосты и отметки «к переносу» пишутся в `data/` и переживают перезапуск.
 
-Проверка логики без живых машин:
+## Настоящие агенты хостов
+
+Полка в демо, пока режим не `agents`. Это решает `src/addons/drives/store.ts`. `SKLAD_DRIVE_MODE=agents` включает агентов, `SKLAD_DRIVE_MODE=mock` возвращает демо. Если переменная не задана, берётся `"mode"` из `data/drive-agents.json`, а когда файла нет — снова `mock`. Адреса, которые панель подставляет, когда в этом файле нет списка агентов:
+
+- Mac: `SKLAD_MAC_AGENT_URL`, иначе `http://127.0.0.1:4371`
+- Windows: `SKLAD_WINDOWS_AGENT_URL`, иначе `http://127.0.0.1:4372`
+
+Оба процесса полки слушают `0.0.0.0` на своём порту. Макет включается только флагом `--mock` (`process.argv`). Переменной `SKLAD_PC_AGENT_MOCK` эти два файла не смотрят. Чтобы читать эту машину, `--mock` не передают.
+
+### Mac
+
+Рабочий каталог — корень этого репозитория.
 
 ```bash
-npm test
+node --import ./agents/register.mjs agents/mac-agent/drive.mts --port 4371
 ```
 
-Тесты поднимают поддельный Web API qBittorrent в процессе. Настоящий Mac или ПК для них не нужен.
+Файл: `agents/mac-agent/drive.mts`. Если `--port` не указан, код всё равно берёт `4371`. Сбор томов в `agents/mac-agent/collect.mts` вызывает `diskutil info -all` только при `process.platform === "darwin"`. На другой системе агент отвечает, что сборщик macOS запущен не на Mac, и список томов пустой.
+
+Панель на этом же Mac, из того же корня:
+
+```bash
+SKLAD_DRIVE_MODE=agents SKLAD_MAC_AGENT_URL=http://127.0.0.1:4371 npm run dev
+```
+
+Адрес, который должна использовать панель: `http://127.0.0.1:4371`.
+
+### Windows
+
+Тот же корень репозитория. Сборщик `agents/pc-agent/collect.mts` работает только при `process.platform === "win32"` и вызывает `powershell.exe`. Процесс `node` внутри Linux-дистрибутива WSL — это Linux: тома не читаются, ответ «Сборщик Windows запущен не на Windows.» Запускайте Windows-сборку Node (cmd или PowerShell на Windows), не `node` из WSL.
+
+```bash
+node --import ./agents/register.mjs agents/pc-agent/drive.mts --port 4372
+```
+
+Файл: `agents/pc-agent/drive.mts`. Порт по умолчанию в коде — `4372`.
+
+Панель на этом же Windows:
+
+```bash
+SKLAD_DRIVE_MODE=agents SKLAD_WINDOWS_AGENT_URL=http://127.0.0.1:4372 npm run dev
+```
+
+Адрес для панели на этой машине: `http://127.0.0.1:4372`. Если панель на Mac, а агент на ПК, в `SKLAD_WINDOWS_AGENT_URL` ставят `http://<IPv4 этого ПК>:4372`. Это порт полки, не `4730`.
+
+Те же две команды с `--mock` — проверка без дисков. Это снова демо.
+
+### Агент заданий Windows
+
+Отдельный процесс: HandBrake, `compact.exe`, индекс NTFS и оптика. Это не агент полки. Скрипт в `package.json`: `npm run pc-agent` вызывает `node agents/pc-agent/server.mjs`. Порт — `PORT`, иначе `4730`. Адрес прослушивания — `SKLAD_PC_AGENT_HOST`, иначе `127.0.0.1`.
+
+Макет здесь включён по умолчанию. `agents/pc-agent/server.mjs` считает `mock`, пока `SKLAD_PC_AGENT_MOCK` не равен строке `0`.
+
+Настоящий запуск — на Windows, из корня репозитория, когда `HandBrakeCLI.exe` и `compact.exe` уже лежат по путям:
+
+```bat
+set SKLAD_PC_AGENT_MOCK=0
+set SKLAD_PC_AGENT_HOST=0.0.0.0
+node agents/pc-agent/server.mjs
+```
+
+Панель на той же машине использует `http://127.0.0.1:4730`. С Mac — `http://<IPv4 ПК>:4730` (свой адрес из `ipconfig`). Тот же URL задаётся в «Медиа и игры → Настройки» у хоста «Windows PC» и переменной `SKLAD_PC_AGENT_URL` (оптика и индекс). Пока в настройках медиа включён демо-режим, панель этот агент не вызывает. VLESS нет.
 
 ## Демо
 
@@ -126,21 +186,16 @@ npm test
 
 Настоящие машины: панель опрашивает URL агентов. Облако само диски не видит.
 
-Агент Mac mini:
+Команды настоящего Mac и Windows, порты `4371` и `4372`, и то, чем панель их включает, — в разделе «Настоящие агенты хостов» выше. Кратко, из корня репозитория и без `--mock`:
 
 ```bash
 node --import ./agents/register.mjs agents/mac-agent/drive.mts --port 4371
-```
-
-Агент Windows (на самом ПК):
-
-```bash
 node --import ./agents/register.mjs agents/pc-agent/drive.mts --port 4372
 ```
 
 Проверка без дисков: те же команды с `--mock`.
 
-Адреса можно положить в `data/drive-agents.json` и выставить `"mode": "agents"`, либо задать `SKLAD_DRIVE_MODE=agents`, `SKLAD_MAC_AGENT_URL` и `SKLAD_WINDOWS_AGENT_URL`. Пока файла нет, Склад остаётся в демо-режиме.
+Адреса можно положить в `data/drive-agents.json` и выставить `"mode": "agents"`, либо задать `SKLAD_DRIVE_MODE=agents`, `SKLAD_MAC_AGENT_URL` и `SKLAD_WINDOWS_AGENT_URL`. Пока режима `agents` нет, Склад остаётся в демо.
 
 На Windows быстрый индекс NTFS читает MFT и журнал USN, как Everything. Для этого агент нужен от имени администратора: сырой том открывается только так. Без прав администратора полка прямо говорит, что идёт обычный обход папок. Журнал USN только читается.
 
