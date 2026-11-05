@@ -39,7 +39,7 @@ export default function SettingsPage() {
     if (!draft) return;
     setBusy(true);
     try {
-      const next = await api<typeof data>("/api/tools/config", { method: "PUT", body: JSON.stringify(draft) });
+      const next = await api<NonNullable<typeof data>>("/api/tools/config", { method: "PUT", body: JSON.stringify(draft) });
       setDraft(structuredClone(next.config));
       toast.success("Настройки сохранены");
       await refresh();

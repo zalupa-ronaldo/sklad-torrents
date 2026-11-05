@@ -10,7 +10,7 @@ import { createJobStore, getJobStore } from "@/lib/jobs/engine";
 import { formatSse } from "@/lib/jobs/http";
 import { setMockWorkerGateForTests } from "@/lib/jobs/mock-worker";
 import { resetJobRuntimeForTests } from "@/lib/jobs/runtime";
-import type { JobHost, JobKind } from "@/lib/jobs/model";
+import type { JobHost } from "@/lib/jobs/model";
 
 const move = {
   kind: "move" as const,
@@ -234,7 +234,7 @@ describe("file job queue", () => {
   });
 });
 
-function jsonRequest(body: { kind: JobKind; host: JobHost; source: string; destination: string; diskId?: string; handbrakeProfile?: string; compactAlgorithm?: string }) {
+function jsonRequest(body: unknown) {
   return new Request("http://127.0.0.1/api/jobs", {
     method: "POST",
     headers: { "content-type": "application/json" },

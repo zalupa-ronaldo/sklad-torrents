@@ -13,8 +13,11 @@ describe("demo job engine", () => {
       const before = early.find((job) => job.id === id);
       const after = later.find((job) => job.id === id);
       expect(before?.status).toBe("running");
-      expect(after && before && after.processedBytes).toBeGreaterThan(before.processedBytes);
-      expect(after && before && after.progress).toBeGreaterThan(before.progress);
+      expect(before).toBeDefined();
+      expect(after).toBeDefined();
+      if (!before || !after) return;
+      expect(after.processedBytes).toBeGreaterThan(before.processedBytes);
+      expect(after.progress).toBeGreaterThan(before.progress);
     }
     const compact = later.find((job) => job.id === "compact-gow");
     expect(compact?.capabilities.pause).toBe(false);

@@ -216,7 +216,7 @@ export class JobStore {
 
   async enqueue(input: EnqueueInput): Promise<EnqueueResult> {
     const draft = validateEnqueue(input);
-    return this.exclusive(async () => {
+    return this.exclusive<EnqueueResult>(async () => {
       const key = jobIdempotencyKey(draft.kind, draft.host, draft.source, draft.destination);
       const existing = this.jobs.find((job) => job.idempotencyKey === key && ACTIVE_JOB_STATES.has(job.state));
       if (existing) return { result: { job: cloneJob(existing), created: false }, dirty: false, events: [] };
@@ -281,7 +281,7 @@ export class JobStore {
   }
 
   async claim(id: string, host: JobHost): Promise<ClaimResult> {
-    return this.exclusive(async () => {
+    return this.exclusive<ClaimResult>(async () => {
       const job = this.jobs.find((item) => item.id === id);
       if (!job) return { result: { ok: false as const, reason: "not_found" as const, job: null }, dirty: false, events: [] };
       if (job.host !== host || job.state !== "queued") {
