@@ -207,7 +207,7 @@ export async function detectDrives(options: {
     return {
       status: "no-drive",
       drives: [],
-      detail: "Оптический привод не найден. На Mac локального привода нет: запись идёт через агент Windows.",
+      detail: "Рекордер подключён к Windows-ПК. На Mac локальный DVD-привод не ищется и не заявляется.",
     };
   }
   if (options.platform !== "win32") {
