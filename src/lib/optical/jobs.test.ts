@@ -260,7 +260,6 @@ function base(overrides: Partial<Parameters<typeof enqueueArtworkJob>[0]> = {}) 
 async function waitUntil(predicate: (job: NonNullable<Awaited<ReturnType<typeof waitForJob>>>) => boolean, id: string) {
   const started = Date.now();
   while (Date.now() - started < 2000) {
-    const { getJob } = await import("@/lib/jobs/store");
     const job = await getJob(id);
     if (job && predicate(job)) return job;
     await new Promise((resolve) => setTimeout(resolve, 15));
