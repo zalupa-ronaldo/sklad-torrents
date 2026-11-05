@@ -11,7 +11,7 @@ export async function GET() {
 export async function POST(request: Request) {
   return guard(async () => {
     const body = (await request.json()) as { demo?: boolean };
-    const demo = await setDemoMode(body.demo === true);
-    return json({ demo, ...(await opticalSnapshot()) });
+    await setDemoMode(body.demo === true);
+    return json(await opticalSnapshot());
   });
 }

@@ -92,3 +92,17 @@ npm run dev
 Агент Windows, макет: `npm run pc-agent` или `node agents/pc-agent/server.mjs`. Подробности — `agents/pc-agent/README.md`.
 
 qBittorrent, HandBrake, CompactGUI и права администратора для MFT ставятся отдельно. Их пути задаются в панели. Пароли Web UI лежат в `data/` и в git не попадают.
+
+## LocalSend
+
+Передача по домашней сети протоколом LocalSend v2 (https://github.com/localsend/protocol). Это экран того же Склада, не отдельное приложение.
+
+Поиск: UDP multicast `224.0.0.167:53317`, JSON с alias, version, deviceModel, deviceType, fingerprint, port, protocol, download. Если мультикаст закрыт, устройство добавляется по IPv4 через `POST /api/localsend/v2/register`.
+
+Отправка: `POST /api/localsend/v2/prepare-upload`, затем `POST /api/localsend/v2/upload?sessionId&fileId&token`. Остановка — `POST /api/localsend/v2/cancel?sessionId`, только когда сессия уже создана. Для HTTPS отпечаток — SHA-256 сертификата. Несовпадение останавливает передачу, устройство не подменяется молча. VLESS и прокси нет.
+
+Кнопка ставит задачу в очередь и сразу отвечает. Состояния: в очереди, выполняется, пауза, готово, ошибка. Прогресс (байты, скорость, ETA, процент, текущий файл) на общей странице. Готово — только после HTTP 200 на prepare-upload и на каждый upload. Отказ или молчащий демо-сервер — ошибка. Повтор тех же файлов тому же отпечатку, пока задача активна, возвращает ту же задачу.
+
+Приём пишет в каталог из настроек: диск полки и папка либо абсолютный путь. `/Volumes/…` на Mac — APFS, не NTFS. В индекс полки и в сухой прогон правил файл попадает только после завершённого upload. Ничего не удаляется само.
+
+`LOCALSEND_MOCK=1` поднимает mock-сервер в процессе и подписывает его как демо, не как компьютер в сети. В этом облаке настоящий обмен с Mac или Windows по LAN не выполнялся.

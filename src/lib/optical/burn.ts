@@ -6,7 +6,7 @@ import { claimNext, getJob, insertIfIdle, patchJob, readJobs } from "@/lib/jobs/
 import { checkCapacity, treeBytes } from "@/lib/optical/capacity";
 import { addBurnedDisc, listDiscs } from "@/lib/optical/catalog";
 import { demoDrives } from "@/lib/optical/demo";
-import { detectDrives, spawnExec } from "@/lib/optical/detect";
+import { detectDrives, spawnExec } from "@/lib/optical/host-detect";
 import { loadIndexedPaths } from "@/lib/optical/drive-catalog";
 import { OpticalError } from "@/lib/optical/errors";
 import { isAbsoluteFolder, planOptical } from "@/lib/optical/plan";

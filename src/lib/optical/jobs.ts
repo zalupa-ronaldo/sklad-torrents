@@ -193,7 +193,7 @@ export async function listOpticalJobs(): Promise<BackgroundJob[]> {
 }
 
 export function presentOpticalJob(job: BackgroundJob) {
-  const payload = job.payload as ArtworkPayload;
+  const payload = job.payload as unknown as ArtworkPayload;
   return {
     ...job,
     state: job.status,
