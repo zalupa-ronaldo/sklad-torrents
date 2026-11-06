@@ -36,6 +36,8 @@ export interface IndexDelta {
 }
 
 export interface IndexPayload {
+  revision?: string;
+  recordCount?: number;
   state: ScanStatus;
   progress: number;
   message?: string;
@@ -61,6 +63,7 @@ export interface ConnectedHost {
 }
 
 export interface DiskRecord {
+  indexRevision?: string;
   id: string;
   serial: string;
   serialNorm: string;

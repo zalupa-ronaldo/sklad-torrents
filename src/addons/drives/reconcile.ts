@@ -11,7 +11,7 @@ import type {
 } from "@/addons/drives/types";
 
 function cloneDisks(disks: readonly DiskRecord[]): DiskRecord[] {
-  return structuredClone(disks) as DiskRecord[];
+  return disks.map((disk) => ({ ...disk, scan: { ...disk.scan }, connectedHosts: disk.connectedHosts.map((host) => ({ ...host, mountPaths: [...host.mountPaths] })), cloneOfIds: [...disk.cloneOfIds] }));
 }
 
 function uniquePaths(paths: readonly string[]): string[] {
@@ -219,6 +219,7 @@ export function reconcileCatalog(
       });
       disk.files = applied.files;
       disk.scan = applied.scan;
+      if (volume.index?.revision) disk.indexRevision = volume.index.revision;
       seenIds.add(disk.id);
     }
     seen.set(observation.hostId, seenIds);

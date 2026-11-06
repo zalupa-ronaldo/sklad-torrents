@@ -4,7 +4,7 @@ import { loadLibraries } from "@/addons/drives/libraries";
 import { buildMockCatalog, liveObservations } from "@/addons/drives/mock-source";
 import { fileCount, mountPathsOf, online, reconcileCatalog } from "@/addons/drives/reconcile";
 import { searchDisks } from "@/addons/drives/search";
-import { readAgentConfig, readCatalog, writeCatalog, type CatalogFile } from "@/addons/drives/store";
+import { readAgentConfig, readCatalog, writeCatalog, writeCatalogChanges, cacheCatalog, type CatalogFile } from "@/addons/drives/store";
 import type { DiskRecord, DiskView, DriveMode, HostObservation, MediaCategory, SearchResponse, ShelfResponse } from "@/addons/drives/types";
 import { DriveError } from "@/addons/drives/types";
 
@@ -19,12 +19,16 @@ function withLock<T>(fn: () => Promise<T>): Promise<T> {
   return run;
 }
 
+const summaryCache = new WeakMap<DiskRecord["files"], { tally: Record<MediaCategory, number>; files: number }>();
 function counts(disk: DiskRecord): Record<MediaCategory, number> {
+  const cached = summaryCache.get(disk.files);
+  if (cached) return cached.tally;
   const tally = { torrent: 0, game: 0, media: 0, series: 0, installer: 0, music: 0, software: 0, documents: 0 };
   for (const file of disk.files) {
     if (file.kind !== "file" || file.name === "sklad-catalog.json") continue;
     for (const category of file.categories) tally[category] += 1;
   }
+  summaryCache.set(disk.files, { tally, files: fileCount(disk.files) });
   return tally;
 }
 
@@ -51,8 +55,8 @@ export function toView(disks: readonly DiskRecord[]): DiskView[] {
     possibleClone: disk.possibleClone,
     clonePeerLabels: disk.cloneOfIds.map((id) => byId.get(id)?.label).filter((label): label is string => Boolean(label)),
     scan: disk.scan,
-    fileCount: fileCount(disk.files),
     categoryCounts: counts(disk),
+    fileCount: summaryCache.get(disk.files)!.files,
   }));
 }
 
@@ -78,17 +82,23 @@ export async function getShelf(): Promise<ShelfResponse> {
       await save(disks, true);
       return present(disks, "mock", []);
     }
-    const { observations, errors } = await pollAgents(config.agents);
+    const { observations, errors } = await pollAgents(config.agents, stored?.disks ?? []);
     const disks = reconcileCatalog(stored?.disks ?? [], observations, libraries, now);
-    await save(disks, true);
+    const changed = !stored || disks.length !== stored.disks.length || disks.some((disk) => {
+      const before = stored.disks.find((item) => item.id === disk.id);
+      return !before || before.files !== disk.files;
+    });
+    if (changed) await writeCatalogChanges({ version: 1, seeded: true, disks }, stored);
+    else cacheCatalog({ version: 1, seeded: true, disks });
     return present(disks, "agents", errors);
   });
 }
 
-export async function searchShelf(query: string): Promise<SearchResponse> {
-  await getShelf();
-  const stored = await readCatalog();
-  return { query, hits: searchDisks(stored?.disks ?? [], query) };
+export async function searchShelf(query: string, limit = 100): Promise<SearchResponse> {
+  // Search the ready local tree: never queue behind an agent poll or disk scan.
+  let stored = await readCatalog();
+  if (!stored) { await getShelf(); stored = await readCatalog(); }
+  return { query, hits: searchDisks(stored?.disks ?? [], query, Math.min(1000, Math.max(1, Math.floor(limit) || 100))) };
 }
 
 export async function renameDisk(id: string, label: string): Promise<DiskView> {

@@ -1,4 +1,6 @@
-import type { AgentEndpoint, HostObservation, IndexPayload, RawIndexedFile } from "@/addons/drives/types";
+import { createHash } from "node:crypto";
+import { normalizeSerial, normalizeUuid } from "@/addons/drives/identity";
+import type { AgentEndpoint, DiskRecord, HostObservation, IndexPayload, RawIndexedFile } from "@/addons/drives/types";
 import { DriveError } from "@/addons/drives/types";
 
 interface WireVolume {
@@ -34,16 +36,41 @@ function assertHttpUrl(value: string): string {
   return url.toString().replace(/\/$/, "");
 }
 
-export async function pollAgent(agent: AgentEndpoint): Promise<HostObservation> {
+export async function pollAgent(agent: AgentEndpoint, known: readonly DiskRecord[] = []): Promise<HostObservation> {
   const base = assertHttpUrl(agent.url);
-  const response = await fetch(`${base}/v1/volumes`, {
+  const response = await fetch(`${base}/v1/volumes?metadata=1`, {
     cache: "no-store",
-    signal: AbortSignal.timeout(120000),
+    signal: AbortSignal.timeout(8000),
   });
   if (!response.ok) {
     throw new DriveError(502, `${agent.name}: агент ответил ${response.status}.`);
   }
   const body = (await response.json()) as VolumeResponse;
+  // Hydrate only a changed, complete revision. Commit it only after every page arrived.
+  for (const volume of body.volumes ?? []) {
+    const index = volume.index;
+    const existing = known.find((disk) => normalizeSerial(disk.serial) === normalizeSerial(volume.serial ?? "") && normalizeUuid(disk.volumeUuid) === normalizeUuid(volume.volumeUuid ?? ""));
+    // Compatibility with an already-running older Mac agent until its next restart.
+    if (index?.files && !index.revision) index.revision = `legacy:${createHash("sha256").update(JSON.stringify(index.files)).digest("hex")}`;
+    if (index?.revision && existing?.indexRevision === index.revision) { delete index.files; delete index.delta; }
+    if (!index?.revision || index.state !== "complete" || index.files) continue;
+    const prior = known.find((disk) => normalizeSerial(disk.serial) === normalizeSerial(volume.serial ?? "") && normalizeUuid(disk.volumeUuid) === normalizeUuid(volume.volumeUuid ?? ""));
+    if (prior?.indexRevision === index.revision) continue;
+    // Bootstrap from the panel's exact existing tree, imported into this agent.
+    if (prior && !prior.indexRevision && index.revision === `restored:${prior.files.length}` && index.recordCount === prior.files.length) continue;
+    const files: RawIndexedFile[] = [];
+    const expected = index.recordCount ?? 0;
+    while (files.length < expected) {
+      const params = new URLSearchParams({ serial: String(volume.serial), uuid: String(volume.volumeUuid), revision: index.revision, offset: String(files.length), limit: "10000" });
+      const pageResponse = await fetch(`${base}/v1/files?${params}`, { cache: "no-store", signal: AbortSignal.timeout(15000) });
+      if (!pageResponse.ok) throw new DriveError(502, `${agent.name}: снимок изменился или страница недоступна.`);
+      const page = await pageResponse.json() as { files: RawIndexedFile[]; revision: string };
+      if (page.revision !== index.revision || !Array.isArray(page.files) || !page.files.length) throw new DriveError(502, "Неполная страница индекса.");
+      files.push(...page.files.filter(isRawFile));
+    }
+    if (files.length !== expected) throw new DriveError(502, "Неполный снимок индекса.");
+    index.files = files;
+  }
   const os = body.os === "win32" || body.os === "darwin" ? body.os : agent.os;
   const volumes = Array.isArray(body.volumes) ? body.volumes : [];
   return {
@@ -72,6 +99,8 @@ function sanitizeIndex(index: IndexPayload | null | undefined): IndexPayload | n
   const files = Array.isArray(index.files) ? index.files.filter(isRawFile) : undefined;
   return {
     state,
+    revision: index.revision,
+    recordCount: index.recordCount,
     progress: Number(index.progress) || 0,
     message: typeof index.message === "string" ? index.message.slice(0, 400) : undefined,
     strategy: index.strategy === "mft-usn" ? "mft-usn" : "walk",
@@ -86,7 +115,7 @@ function isRawFile(value: unknown): value is RawIndexedFile {
   return typeof file.relativePath === "string" && typeof file.name === "string" && (file.kind === "file" || file.kind === "dir");
 }
 
-export async function pollAgents(agents: readonly AgentEndpoint[]): Promise<{
+export async function pollAgents(agents: readonly AgentEndpoint[], known: readonly DiskRecord[] = []): Promise<{
   observations: HostObservation[];
   errors: { hostName: string; message: string }[];
 }> {
@@ -95,7 +124,7 @@ export async function pollAgents(agents: readonly AgentEndpoint[]): Promise<{
   await Promise.all(
     agents.map(async (agent) => {
       try {
-        observations.push(await pollAgent(agent));
+        observations.push(await pollAgent(agent, known));
       } catch (error) {
         errors.push({
           hostName: agent.name,

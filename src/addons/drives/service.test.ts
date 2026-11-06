@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { MOCK_VAULT } from "@/addons/drives/mock-source";
 import { getShelf, ingestObservation, renameDisk, searchShelf } from "@/addons/drives/service";
-import { readCatalog } from "@/addons/drives/store";
+import { readCatalog, writeCatalog, writeCatalogChanges, catalogFilePath } from "@/addons/drives/store";
 
 let directory = "";
 let previous: string | undefined;
@@ -67,4 +67,17 @@ describe("drive shelf service", () => {
     expect(hits.hits[0]?.connectHint).toBe("Подключите диск «Архив 2019»");
     expect(hits.hits[0]?.reachable).toBe(false);
   });
+});
+
+it("persists a small volume overlay without rewriting the big base and ignores it after a full replacement", async () => {
+  await getShelf();
+  const before = (await readCatalog())!;
+  const disk = before.disks.find((item) => item.files.length > 0)!;
+  const baseTime = (await stat(catalogFilePath())).mtimeMs;
+  const changed = { ...before, disks: before.disks.map((item) => item.id === disk.id ? { ...item, files: [...item.files, { ...item.files[0], name: "overlay.txt", relativePath: "overlay.txt" }] } : item) };
+  await writeCatalogChanges(changed, before);
+  expect((await stat(catalogFilePath())).mtimeMs).toBe(baseTime);
+  expect((await readCatalog())?.disks.find((item) => item.id === disk.id)?.files.length).toBe(disk.files.length + 1);
+  await writeCatalog(before);
+  expect((await readCatalog())?.disks.find((item) => item.id === disk.id)?.files.length).toBe(disk.files.length);
 });
