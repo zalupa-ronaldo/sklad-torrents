@@ -19,6 +19,7 @@ export const SUBTYPE_LABEL: Record<GameSubtype, string> = {
 
 export const REASON_LABEL: Record<ClassifyReason, string> = {
   override: "вручную",
+  folder: "по папке",
   extension: "по расширению",
   name: "по имени",
   unknown: "не распознано",

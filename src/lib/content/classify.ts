@@ -75,6 +75,9 @@ export function classify(input: ClassifyInput): Classification {
     };
   }
 
+  const fromFolder = classifyByFolder(input.savePath ?? "");
+  if (fromFolder) return fromFolder;
+
   const fromFiles = classifyByExtensions(input);
   if (fromFiles) return fromFiles;
   const fromName = classifyByName(input.name);
@@ -174,6 +177,37 @@ function classifyByExtensions(input: ClassifyInput): Classification | null {
     };
   }
 
+  return null;
+}
+
+
+function classifyByFolder(savePath: string): Classification | null {
+  const text = savePath.replace(/\\/g, "/");
+  if (!text) return null;
+  if (/(^|[/])(psp)([/]|$)/i.test(text)) {
+    return game("psp", "Папка PSP в пути сохранения", "folder");
+  }
+  if (/(^|[/])(games?|игры|steam|steamapps)([/]|$)/i.test(text)) {
+    return game("pc", "Папка игр в пути сохранения", "folder");
+  }
+  if (/(^|[/])(series|сериалы|сирики|мульты|мультфильмы|tv[ -]?shows?)([/]|$)/i.test(text)) {
+    return { kind: "series", gameSubtype: null, reason: "folder", detail: "Папка сериалов в пути сохранения" };
+  }
+  if (/(^|[/])(cinema|movies?|видеки|видео|videos?|фильмы|перекодированные)([/]|$)/i.test(text)) {
+    return { kind: "movie", gameSubtype: null, reason: "folder", detail: "Папка фильмов в пути сохранения" };
+  }
+  if (/(^|[/])(music|музыка)([/]|$)/i.test(text)) {
+    return { kind: "music", gameSubtype: null, reason: "folder", detail: "Папка музыки в пути сохранения" };
+  }
+  if (/(^|[/])(games? setup|установщики|installers?)([/]|$)/i.test(text)) {
+    return { kind: "software", gameSubtype: null, reason: "folder", detail: "Папка установщиков в пути сохранения" };
+  }
+  if (/(^|[/])(software|софт|programs?)([/]|$)/i.test(text)) {
+    return { kind: "software", gameSubtype: null, reason: "folder", detail: "Папка софта в пути сохранения" };
+  }
+  if (/(^|[/])(documents?|документы|comics|комиксы)([/]|$)/i.test(text)) {
+    return { kind: "document", gameSubtype: null, reason: "folder", detail: "Папка документов в пути сохранения" };
+  }
   return null;
 }
 

@@ -72,7 +72,7 @@ export function AddTorrentDialog({
         }
         const form = new FormData();
         form.set("hostId", host.id);
-        form.set("savePath", savePath);
+        form.set("savePath", savePath.trim());
         form.set("paused", paused ? "true" : "false");
         form.set("torrent", file);
         result = await api("/api/torrents", { method: "POST", body: form });
@@ -98,7 +98,7 @@ export function AddTorrentDialog({
         <DialogHeader>
           <DialogTitle>Добавить раздачу</DialogTitle>
           <DialogDescription>
-            Файл ляжет в выбранный каталог на {host ? host.name : "хосте"}. qBittorrent сам качает и раздаёт.
+            Склад сам выберет диск и папку категории. На {host ? host.name : "хосте"} раздача сначала попадёт в приёмник, затем разложится автоматически. Исходники не удаляются.
           </DialogDescription>
         </DialogHeader>
         <div className="grid gap-4">
@@ -152,33 +152,9 @@ export function AddTorrentDialog({
               />
             </div>
           )}
-          <div className="grid gap-1.5">
-            <Label htmlFor="save-path">Каталог на {host ? osLabel(host.os) : "машине"}</Label>
-            {host && host.pathPresets.length > 0 ? (
-              <div className="flex flex-wrap gap-1.5">
-                {host.pathPresets.map((preset) => (
-                  <button
-                    key={preset.id}
-                    type="button"
-                    onClick={() => setSavePath(preset.path)}
-                    className={cn(
-                      "rounded-full border px-2.5 py-1 text-xs",
-                      savePath === preset.path ? "border-primary bg-primary/15 text-foreground" : "border-border text-muted-foreground",
-                    )}
-                  >
-                    {preset.label}
-                  </button>
-                ))}
-              </div>
-            ) : null}
-            <Input
-              id="save-path"
-              value={savePath}
-              onChange={(event) => setSavePath(event.target.value)}
-              placeholder={host?.os === "win32" ? "D:\\Downloads" : "/Volumes/vault/PSP/Games/Downloads"}
-              className="font-mono text-xs"
-              spellCheck={false}
-            />
+          <div className="rounded-lg border border-border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
+            Приёмник: <span className="font-mono text-foreground">{savePath || "выберет Склад"}</span>
+            <div className="mt-1">После загрузки Склад перенесёт раздачу в папку категории на подходящий диск.</div>
           </div>
           <label className="flex items-center gap-2 text-sm">
             <Checkbox checked={paused} onCheckedChange={setPaused} />
@@ -189,7 +165,7 @@ export function AddTorrentDialog({
           <Button variant="outline" onClick={onClose}>
             Отмена
           </Button>
-          <Button disabled={busy || !savePath.trim()} onClick={() => void submit()}>
+          <Button disabled={busy || !(savePath.trim() || host)} onClick={() => void submit()}>
             {busy ? "Добавляем…" : "Добавить"}
           </Button>
         </DialogFooter>

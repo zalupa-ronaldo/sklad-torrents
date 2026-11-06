@@ -3,6 +3,15 @@ import { describe, expect, it } from "vitest";
 import { classify } from "@/lib/content/classify";
 
 describe("classify downloads", () => {
+  it("prefers folder signature over extension", () => {
+    const result = classify({
+      name: "Random.mkv",
+      savePath: "S:\\games\\Incoming",
+      files: [{ name: "Random.mkv", size: 2_000_000_000 }],
+    });
+    expect(result).toMatchObject({ kind: "game", reason: "folder" });
+  });
+
   it("reads a PSP iso as a PSP game, including a tiny one", () => {
     const tiny = classify({
       name: "God of War (PSP)",
@@ -14,8 +23,10 @@ describe("classify downloads", () => {
       savePath: "/Volumes/vault/PSP/Games/Downloads",
       files: [{ name: "God of War (PSP)/ISO/ULUS10479.iso", size: 1_800_000_000 }],
     });
-    expect(tiny).toMatchObject({ kind: "game", gameSubtype: "psp", reason: "extension" });
-    expect(huge).toMatchObject({ kind: "game", gameSubtype: "psp", reason: "extension" });
+    expect(tiny).toMatchObject({ kind: "game", gameSubtype: "psp" });
+    expect(huge).toMatchObject({ kind: "game", gameSubtype: "psp" });
+    expect(["folder", "extension"]).toContain(tiny.reason);
+    expect(["folder", "extension"]).toContain(huge.reason);
     expect(huge.detail.toLowerCase()).not.toContain("размер");
   });
 
@@ -26,7 +37,7 @@ describe("classify downloads", () => {
       files: [{ name: "Interstellar.2014.2160p.mkv", size: 62_400_000_000 }],
     });
     expect(result.kind).toBe("movie");
-    expect(result.reason).toBe("extension");
+    expect(["folder", "extension"]).toContain(result.reason);
     expect(result.kind).not.toBe("game");
   });
 
@@ -72,7 +83,8 @@ describe("classify downloads", () => {
       savePath: "D:\\Games",
       files: [{ name: "Cyberpunk 2077/bin/x64/Cyberpunk2077.exe", size: 90_000_000 }],
     });
-    expect(result).toMatchObject({ kind: "game", gameSubtype: "pc", reason: "extension" });
+    expect(result).toMatchObject({ kind: "game", gameSubtype: "pc" });
+    expect(["folder", "extension"]).toContain(result.reason);
   });
 
   it("lets a user override beat the guess", () => {

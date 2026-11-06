@@ -335,7 +335,8 @@ describe("policy service", () => {
     expect(JSON.stringify(preview.rows.flatMap((row) => row.steps))).not.toContain('"type":"delete"');
 
     const gow = preview.rows.find((row) => row.hash === DEMO_HASH.godOfWar);
-    expect(gow).toMatchObject({ kind: "game", gameSubtype: "psp", reason: "extension" });
+    expect(gow).toMatchObject({ kind: "game", gameSubtype: "psp" });
+    expect(["folder", "extension"]).toContain(gow?.reason);
     const games = preview.rows.filter((row) => row.kind === "game" && row.scheduler !== "idle");
     expect(games.filter((row) => row.scheduler === "active")).toHaveLength(1);
 

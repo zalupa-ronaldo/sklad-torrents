@@ -10,7 +10,7 @@ export function AppShell({
   subtitle,
   children,
 }: {
-  current: "torrents" | "drives" | "policies" | "optical" | "localsend" | "progress" | "scheduler" | "tools";
+  current: "torrents" | "drives" | "optical" | "localsend" | "progress" | "scheduler" | "tools";
   subtitle: string;
   children: React.ReactNode;
 }) {

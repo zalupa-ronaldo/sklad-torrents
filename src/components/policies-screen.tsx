@@ -180,7 +180,7 @@ export function PoliciesScreen() {
   const canEnable = Boolean(preview) && !stale && !enabled;
 
   return (
-    <AppShell current="policies" subtitle="Куда класть раздачи по типу">
+    <AppShell current="torrents" subtitle="Куда класть раздачи по типу">
       {error ? <p className="text-sm text-destructive">{error}</p> : null}
       {!payload || !rules || !policy ? (
         <p className="text-sm text-muted-foreground">Загружаем правила…</p>

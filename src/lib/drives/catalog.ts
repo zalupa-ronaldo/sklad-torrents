@@ -2,7 +2,7 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 
 import { DISK_ID } from "@/lib/drives/ids";
-import type { CatalogDisk } from "@/lib/drives/types";
+import type { CatalogDisk, DriveMount, VolumeFilesystem } from "@/lib/drives/types";
 import { DEMO_MAC_ID, DEMO_PC_ID } from "@/lib/qbittorrent/demo-data";
 import { dataDir } from "@/lib/qbittorrent/store";
 
@@ -75,29 +75,107 @@ export function demoDisks(): CatalogDisk[] {
   ];
 }
 
+function mapFilesystem(value: unknown): VolumeFilesystem | undefined {
+  const raw = String(value || "").toLowerCase();
+  if (!raw) return undefined;
+  if (raw.includes("ntfs")) return "ntfs";
+  if (raw.includes("apfs")) return "apfs";
+  if (raw.includes("hfs")) return "hfs";
+  if (raw.includes("exfat")) return "exfat";
+  return "other";
+}
+
+function mapOs(pathValue: string, hostOs?: string): DriveMount["os"] {
+  if (hostOs === "win32" || hostOs === "darwin") return hostOs;
+  if (/^[A-Za-z]:[\\/]/.test(pathValue) || pathValue.includes("\\")) return "win32";
+  return "darwin";
+}
+
+function mapHostId(raw: unknown): string | undefined {
+  const value = String(raw || "");
+  if (!value) return undefined;
+  if (value === "windows-pc" || value === "pc-real") return "pc-real";
+  if (value === "mac-mini" || value === "mac-real") return "mac-real";
+  return value;
+}
+
+/** Convert shelf DiskRecord (or legacy CatalogDisk) rows into policy/scheduler mounts. */
+export function adaptShelfDisk(value: unknown): CatalogDisk | null {
+  if (!value || typeof value !== "object") return null;
+  const raw = value as Record<string, unknown>;
+
+  if (isLegacyCatalogDisk(raw)) return raw as unknown as CatalogDisk;
+
+  const serial = typeof raw.serial === "string" ? raw.serial : "";
+  const uuid =
+    typeof raw.volumeUuid === "string" && raw.volumeUuid
+      ? raw.volumeUuid
+      : typeof raw.uuid === "string"
+        ? raw.uuid
+        : "";
+  const label = typeof raw.label === "string" ? raw.label : typeof raw.volumeName === "string" ? raw.volumeName : "";
+  if (!label) return null;
+
+  const mountPaths = Array.isArray(raw.mountPaths)
+    ? raw.mountPaths.filter((item): item is string => typeof item === "string" && item.length > 0)
+    : [];
+  const lastMountPath = typeof raw.lastMountPath === "string" ? raw.lastMountPath : "";
+  const paths = mountPaths.length > 0 ? mountPaths : lastMountPath ? [lastMountPath] : [];
+  // Exclude dying Z: from placement targets entirely.
+  const usable = paths.filter((item) => !/^z:\\/i.test(item));
+  if (usable.length === 0 && paths.some((item) => /^z:\\/i.test(item))) {
+    return {
+      id: typeof raw.id === "string" ? raw.id : undefined,
+      serial: serial || `unknown-${label}`,
+      uuid: uuid || `unknown-${label}`,
+      label,
+      online: false,
+      filesystem: mapFilesystem(raw.filesystem),
+      mounts: [],
+    };
+  }
+
+  const hostId = mapHostId(raw.lastHostId);
+  const mounts: DriveMount[] = (usable.length ? usable : paths).map((mountPath) => ({
+    hostId,
+    os: mapOs(mountPath),
+    path: mountPath,
+  }));
+
+  const online = Boolean(raw.online) && mounts.length > 0;
+  return {
+    id: typeof raw.id === "string" ? raw.id : undefined,
+    serial: serial || `unknown-${label}`,
+    uuid: uuid || `unknown-${label}`,
+    label,
+    online,
+    filesystem: mapFilesystem(raw.filesystem),
+    mounts,
+  };
+}
+
+function isLegacyCatalogDisk(value: Record<string, unknown>): boolean {
+  return (
+    typeof value.serial === "string" &&
+    value.serial.length > 0 &&
+    typeof value.uuid === "string" &&
+    value.uuid.length > 0 &&
+    typeof value.label === "string" &&
+    value.label.length > 0 &&
+    typeof value.online === "boolean" &&
+    Array.isArray(value.mounts) &&
+    (value.mounts as unknown[]).every((mount) => mount && typeof mount === "object" && typeof (mount as DriveMount).path === "string")
+  );
+}
+
 export async function loadDriveCatalog(): Promise<CatalogDisk[]> {
   try {
     const text = await readFile(path.join(dataDir(), "drives.json"), "utf8");
     const parsed = JSON.parse(text) as { disks?: unknown };
     if (!Array.isArray(parsed.disks)) return demoDriveCatalog();
-    const disks = parsed.disks.filter(isCatalogDisk);
+    const disks = parsed.disks.map(adaptShelfDisk).filter((disk): disk is CatalogDisk => Boolean(disk));
     return disks.length > 0 ? disks : demoDriveCatalog();
   } catch {
     return demoDriveCatalog();
   }
-}
-
-function isCatalogDisk(value: unknown): value is CatalogDisk {
-  if (!value || typeof value !== "object") return false;
-  const disk = value as CatalogDisk;
-  return (
-    typeof disk.serial === "string" &&
-    disk.serial.length > 0 &&
-    typeof disk.uuid === "string" &&
-    disk.uuid.length > 0 &&
-    typeof disk.label === "string" &&
-    disk.label.length > 0 &&
-    typeof disk.online === "boolean" &&
-    Array.isArray(disk.mounts)
-  );
 }

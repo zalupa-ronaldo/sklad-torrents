@@ -119,8 +119,19 @@ async function performMockAction(id: string, action: "pause" | "resume" | "cance
 
 export async function collectJobs(tick: SchedulerTick, now: number): Promise<JobSnapshot[]> {
   const extra = await listRegisteredJobs();
-  const mocks = listMockJobs(now).filter((job) => job.id === "transcode-broken" || !coveredByEngine(job, extra));
+  const realOnly = process.env.SKLAD_REAL_ONLY === "1";
+  const mocks = realOnly
+    ? []
+    : listMockJobs(now).filter((job) => job.id === "transcode-broken" || !coveredByEngine(job, extra));
   const jobs = [...mocks, ...torrentJobs(tick.dashboard.torrents, tick.catalog, now), ...extra]
+    .filter((job) => {
+      if (!realOnly) return true;
+      const id = String(job.id || "");
+      const host = String(job.host || "").toLowerCase();
+      if (id.includes("demo") || id.startsWith("kernel__job-demo")) return false;
+      if (host.includes("demo")) return false;
+      return true;
+    })
     .filter((job) => job && typeof job.id === "string")
     .map((job) => ({
       ...job,

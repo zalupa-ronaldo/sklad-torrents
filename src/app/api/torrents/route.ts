@@ -1,4 +1,6 @@
 import { guard, json } from "@/app/api/respond";
+import { markManaged } from "@/lib/policies/auto-managed";
+import { inboxPathForHost, safeTickAutomaticPlacement } from "@/lib/policies/auto-runner";
 import { QbittorrentError } from "@/lib/qbittorrent/errors";
 import { addTorrent } from "@/lib/qbittorrent/service";
 import { ensureSchedulerLoop, tickScheduler } from "@/lib/scheduler/apply";
@@ -11,6 +13,19 @@ export async function GET() {
     const tick = await tickScheduler();
     return json(tick.dashboard);
   });
+}
+
+async function resolveSavePath(hostId: string, requested: string): Promise<string> {
+  const trimmed = requested.trim();
+  if (trimmed) return trimmed;
+  return inboxPathForHost(hostId);
+}
+
+async function afterAdd(hostId: string, hashes: string[]): Promise<void> {
+  for (const hash of hashes) {
+    if (hash) await markManaged(hostId, hash);
+  }
+  void safeTickAutomaticPlacement();
 }
 
 export async function POST(request: Request) {
@@ -28,14 +43,17 @@ export async function POST(request: Request) {
         data = new Uint8Array(await file.arrayBuffer());
         filename = file.name;
       }
+      const hostId = String(form.get("hostId") || "");
+      const savePath = await resolveSavePath(hostId, String(form.get("savePath") || ""));
       const result = await addTorrent({
-        hostId: String(form.get("hostId") || ""),
+        hostId,
         urls: String(form.get("urls") || ""),
-        savePath: String(form.get("savePath") || ""),
+        savePath,
         paused: String(form.get("paused") || "") === "true",
         filename,
         data,
       });
+      await afterAdd(hostId, result.hashes);
       return json(result);
     }
     const body = (await request.json()) as {
@@ -44,12 +62,15 @@ export async function POST(request: Request) {
       savePath?: string;
       paused?: boolean;
     };
+    const hostId = String(body.hostId || "");
+    const savePath = await resolveSavePath(hostId, String(body.savePath || ""));
     const result = await addTorrent({
-      hostId: String(body.hostId || ""),
+      hostId,
       urls: typeof body.urls === "string" ? body.urls : "",
-      savePath: String(body.savePath || ""),
+      savePath,
       paused: Boolean(body.paused),
     });
+    await afterAdd(hostId, result.hashes);
     return json(result);
   });
 }

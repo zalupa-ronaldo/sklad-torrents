@@ -5,14 +5,13 @@ import Link from "next/link";
 import { cn } from "@/lib/utils";
 
 const LINKS = [
-  { href: "/", id: "torrents", label: "Раздачи" },
-  { href: "/optical", id: "optical", label: "Диски DVD" },
-  { href: "/drives", id: "drives", label: "Полка дисков" },
+  { href: "/", id: "torrents", label: "Склад" },
+  { href: "/optical", id: "optical", label: "DVD" },
+  { href: "/drives", id: "drives", label: "Полка" },
   { href: "/localsend", id: "localsend", label: "LocalSend" },
-  { href: "/policies", id: "policies", label: "Правила" },
-  { href: "/progress", id: "progress", label: "Прогресс" },
+  { href: "/progress", id: "progress", label: "Задачи" },
   { href: "/scheduler", id: "scheduler", label: "Очередь" },
-  { href: "/tools", id: "tools", label: "Медиа и игры" },
+  { href: "/tools", id: "tools", label: "Инструменты" },
 ] as const;
 
 export function AppNav({ current }: { current: (typeof LINKS)[number]["id"] }) {

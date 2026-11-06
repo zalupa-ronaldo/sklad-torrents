@@ -26,7 +26,7 @@ export async function savePolicy(policy: PolicyDocument): Promise<void> {
 export function defaultPolicy(): PolicyDocument {
   return {
     presetId: "shelf",
-    automationEnabled: false,
+    automationEnabled: true,
     rules: emptyRules(),
     preview: null,
   };
@@ -53,7 +53,9 @@ export async function clearOverride(hostId: string, hash: string): Promise<void>
 export function applyNamedPreset(policy: PolicyDocument, presetId: Exclude<PresetId, "custom">): PolicyDocument {
   const preset = PRESETS[presetId];
   if (!preset) throw new QbittorrentError("validation", "Неизвестный пресет.");
-  return replaceRules(policy, structuredClone(preset.rules), presetId);
+  const next = replaceRules(policy, structuredClone(preset.rules), presetId);
+  // Named presets never arm automation by themselves.
+  return { ...next, automationEnabled: false, preview: null };
 }
 
 export function saveCustomRules(policy: PolicyDocument, rules: unknown): PolicyDocument {
@@ -131,7 +133,7 @@ function normalizePolicy(value: unknown): PolicyDocument | null {
   try {
     return {
       presetId,
-      automationEnabled: raw.automationEnabled === true,
+      automationEnabled: raw.automationEnabled !== false,
       rules: sanitizeRules(raw.rules, base.rules),
       preview: normalizePreview(raw.preview),
     };
