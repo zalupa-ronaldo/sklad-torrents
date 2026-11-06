@@ -25,6 +25,8 @@ export interface BrowseEntry {
   categories: MediaCategory[];
   fileCount: number;
   dirCount: number;
+  /** False while indexedBytes is not a finished total. */
+  sizesReady?: boolean;
 }
 
 export interface BrowseResponse {
@@ -106,7 +108,8 @@ function ensureChild(parent: FolderNode, name: string): FolderNode {
 }
 
 function revisionOf(disk: DiskRecord): string {
-  return `${disk.id}:${disk.indexRevision || ""}:${disk.files.length}:${disk.scan.status}:${disk.lastSeenAt}`;
+  // lastSeenAt changes on every shelf poll and must not rebuild a million-row tree.
+  return `${disk.id}:${disk.indexRevision || ""}:${disk.files.length}:${disk.summary?.indexedBytes ?? ""}:${disk.scan.status}`;
 }
 
 /** O(n) once per disk revision — recursive size/file totals for every folder. */
@@ -276,8 +279,9 @@ export function browseRoots(disks: readonly DiskRecord[], limit = 200, cursor = 
     const mount = mountOf(disk);
     const connected = online(disk);
     // An empty offline placeholder stays out of the tree. A connected disk stays, even with no index.
-    if (disk.files.length === 0 && !connected) continue;
-    const tree = buildDiskTree(disk);
+    if (disk.files.length === 0 && !connected && !disk.summary && !(disk.reportedRecords && disk.reportedRecords > 0)) continue;
+    const summarized = Boolean(disk.summary) && disk.files.length === 0;
+    const tree = summarized ? null : buildDiskTree(disk);
     const name = displayDiskName({
       label: disk.label,
       volumeName: disk.volumeName,
@@ -292,15 +296,16 @@ export function browseRoots(disks: readonly DiskRecord[], limit = 200, cursor = 
       relativePath: "",
       displayPath: mount || name,
       kind: "dir",
-      size: tree.root.size,
-      allocated: tree.root.allocated,
-      onDisk: tree.root.onDisk,
-      compression: tree.root.compression,
-      mtimeMs: tree.root.mtimeMs,
+      size: tree ? tree.root.size : (disk.summary?.indexedBytes ?? 0),
+      allocated: tree ? tree.root.allocated : null,
+      onDisk: tree ? tree.root.onDisk : null,
+      compression: tree ? tree.root.compression : null,
+      mtimeMs: tree ? tree.root.mtimeMs : 0,
       extension: "",
-      categories: [...tree.root.categories].slice(0, 6),
-      fileCount: tree.root.fileCount,
-      dirCount: tree.root.dirCount,
+      categories: tree ? [...tree.root.categories].slice(0, 6) : [],
+      fileCount: tree ? tree.root.fileCount : (disk.summary?.fileCount ?? disk.reportedRecords ?? 0),
+      dirCount: tree ? tree.root.dirCount : 0,
+      sizesReady: Boolean(tree) || Boolean(disk.summary),
     });
   }
   entries.sort((a, b) => b.size - a.size || b.fileCount - a.fileCount || a.name.localeCompare(b.name, "ru"));

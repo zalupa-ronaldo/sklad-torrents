@@ -1,11 +1,14 @@
+import { summarizeIndexed } from "@/addons/drives/disk-summary";
 import { pollAgents } from "@/addons/drives/agent-client";
+import { scheduleIndexIngest } from "@/addons/drives/shelf-ingest";
 import { applyIndexUpdate } from "@/addons/drives/index-apply";
 import { loadLibraries } from "@/addons/drives/libraries";
 import { buildMockCatalog, liveObservations } from "@/addons/drives/mock-source";
-import { fileCount, mountPathsOf, online, reconcileCatalog } from "@/addons/drives/reconcile";
+import { mountPathsOf, online, reconcileCatalog } from "@/addons/drives/reconcile";
 import { searchDisks } from "@/addons/drives/search";
-import { readAgentConfig, readCatalog, writeCatalog, writeCatalogChanges, cacheCatalog, type CatalogFile } from "@/addons/drives/store";
-import type { DiskRecord, DiskView, DriveMode, HostObservation, MediaCategory, SearchResponse, ShelfResponse } from "@/addons/drives/types";
+import { readAgentConfig, readCatalog, writeCatalog, writeCatalogChanges, cacheCatalog, setLiveDisks, liveDisks, catalogFileBytes, HEAVY_CATALOG_BYTES, persistLargeCatalog, type CatalogFile } from "@/addons/drives/store";
+import { startLegacyCatalogMigrate } from "@/addons/drives/catalog-migrate";
+import type { DiskRecord, DiskView, DriveMode, HostObservation, SearchResponse, ShelfResponse } from "@/addons/drives/types";
 import { DriveError } from "@/addons/drives/types";
 
 let chain: Promise<unknown> = Promise.resolve();
@@ -19,26 +22,34 @@ function withLock<T>(fn: () => Promise<T>): Promise<T> {
   return run;
 }
 
-const summaryCache = new WeakMap<DiskRecord["files"], { tally: Record<MediaCategory, number>; files: number; bytes: number }>();
-function summaryOf(disk: DiskRecord): { tally: Record<MediaCategory, number>; files: number; bytes: number } {
+const summaryCache = new WeakMap<DiskRecord["files"], DiskRecord["summary"] & object>();
+
+function summaryOf(disk: DiskRecord): { summary: NonNullable<DiskRecord["summary"]>; partial: boolean } {
+  if (disk.summary) return { summary: disk.summary, partial: false };
   const cached = summaryCache.get(disk.files);
-  if (cached) return cached;
-  const tally = { torrent: 0, game: 0, media: 0, series: 0, installer: 0, music: 0, software: 0, documents: 0 };
-  let bytes = 0;
-  for (const file of disk.files) {
-    if (file.kind !== "file" || file.name === "sklad-catalog.json") continue;
-    if (file.size > 0) bytes += file.size;
-    for (const category of file.categories) tally[category] += 1;
+  if (cached) return { summary: cached, partial: false };
+  const reported = disk.reportedRecords ?? 0;
+  // The file list is not in memory yet, or it is too large to total inside this request.
+  if ((disk.files.length === 0 && reported > 0) || disk.files.length > 50_000 || disk.pendingRevision) {
+    return {
+      summary: {
+        fileCount: reported || disk.files.length,
+        indexedBytes: 0,
+        categoryCounts: { torrent: 0, game: 0, media: 0, series: 0, installer: 0, music: 0, software: 0, documents: 0 },
+      },
+      partial: true,
+    };
   }
-  const summary = { tally, files: fileCount(disk.files), bytes };
+  const summary = summarizeIndexed(disk.files);
+  disk.summary = summary;
   summaryCache.set(disk.files, summary);
-  return summary;
+  return { summary, partial: false };
 }
 
 export function toView(disks: readonly DiskRecord[]): DiskView[] {
   const byId = new Map(disks.map((disk) => [disk.id, disk]));
   return disks.map((disk) => {
-    const summary = summaryOf(disk);
+    const { summary, partial } = summaryOf(disk);
     return {
       id: disk.id,
       label: disk.label,
@@ -60,9 +71,10 @@ export function toView(disks: readonly DiskRecord[]): DiskView[] {
       possibleClone: disk.possibleClone,
       clonePeerLabels: disk.cloneOfIds.map((id) => byId.get(id)?.label).filter((label): label is string => Boolean(label)),
       scan: disk.scan,
-      categoryCounts: summary.tally,
-      fileCount: summary.files,
-      indexedBytes: summary.bytes,
+      categoryCounts: summary.categoryCounts,
+      fileCount: partial ? (disk.reportedRecords || summary.fileCount) : summary.fileCount,
+      indexedBytes: summary.indexedBytes,
+      sizesReady: !partial,
     };
   });
 }
@@ -81,7 +93,14 @@ export async function getShelf(): Promise<ShelfResponse> {
   return withLock(async () => {
     const config = await readAgentConfig();
     const libraries = await loadLibraries();
-    const stored = await readCatalog();
+    const remembered = liveDisks();
+    const heavy = config.mode === "agents" && !remembered && (await catalogFileBytes()) > HEAVY_CATALOG_BYTES;
+    if (heavy) startLegacyCatalogMigrate();
+    const stored = remembered
+      ? { version: 1 as const, seeded: true, disks: remembered }
+      : heavy
+        ? { version: 1 as const, seeded: true, disks: [] as DiskRecord[] }
+        : await readCatalog();
     const now = new Date().toISOString();
     if (config.mode === "mock") {
       const base = stored?.seeded ? stored.disks : buildMockCatalog(libraries);
@@ -89,32 +108,51 @@ export async function getShelf(): Promise<ShelfResponse> {
       await save(disks, true);
       return present(disks, "mock", []);
     }
-    const { observations, errors } = await pollAgents(config.agents, stored?.disks ?? []);
+    const { observations, errors, deferred } = await pollAgents(config.agents, stored?.disks ?? []);
     const disks = reconcileCatalog(stored?.disks ?? [], observations, libraries, now);
+    setLiveDisks(disks);
+    if (deferred.length > 0) scheduleIndexIngest(deferred, libraries);
     const changed = !stored || disks.length !== stored.disks.length || disks.some((disk) => {
       const before = stored.disks.find((item) => item.id === disk.id);
       return !before || before.files !== disk.files;
     });
-    if (changed) await writeCatalogChanges({ version: 1, seeded: true, disks }, stored);
-    else cacheCatalog({ version: 1, seeded: true, disks });
+    const large = disks.some((disk) => disk.files.length > 20_000 || Boolean(disk.fileStore));
+    if (!heavy && changed && !large) await writeCatalogChanges({ version: 1, seeded: true, disks }, stored);
+    else if (!heavy && changed && large) void persistLargeCatalog(disks);
+    else if (!heavy) cacheCatalog({ version: 1, seeded: true, disks });
     return present(disks, "agents", errors);
   });
 }
 
+async function disksForRead(): Promise<DiskRecord[]> {
+  const live = liveDisks();
+  if (live) return live;
+  const stored = await readCatalog();
+  if (stored) {
+    setLiveDisks(stored.disks);
+    return stored.disks;
+  }
+  await getShelf();
+  return liveDisks() ?? [];
+}
+
 export async function searchShelf(query: string, limit = 100): Promise<SearchResponse> {
   // Search the ready local tree: never queue behind an agent poll or disk scan.
-  let stored = await readCatalog();
-  if (!stored) { await getShelf(); stored = await readCatalog(); }
-  return { query, hits: searchDisks(stored?.disks ?? [], query, Math.min(1000, Math.max(1, Math.floor(limit) || 100))) };
+  const disks = await disksForRead();
+  const { ensureDiskFiles } = await import("@/addons/drives/store");
+  for (const disk of disks) await ensureDiskFiles(disk);
+  return { query, hits: searchDisks(disks, query, Math.min(1000, Math.max(1, Math.floor(limit) || 100))) };
 }
 
 export async function browseShelf(diskId: string | null, relativePath = "", cursor = 0, limit = 200) {
-  let stored = await readCatalog();
-  if (!stored) {
-    await getShelf();
-    stored = await readCatalog();
+  const disks = await disksForRead();
+  if (diskId) {
+    const disk = disks.find((item) => item.id === diskId);
+    if (disk) {
+      const { ensureDiskFiles } = await import("@/addons/drives/store");
+      await ensureDiskFiles(disk);
+    }
   }
-  const disks = stored?.disks ?? [];
   const { browseDisk, browseRoots } = await import("@/addons/drives/browse");
   if (!diskId) return browseRoots(disks, limit, cursor);
   return browseDisk(disks, diskId, relativePath, limit, cursor);

@@ -24,6 +24,7 @@ function view(partial: Partial<DiskView> & Pick<DiskView, "id" | "label" | "last
     scan: partial.scan ?? { status: "error", strategy: "walk", progress: 0, message: "Индексация прервалась.", elevated: false },
     fileCount: partial.fileCount ?? 0,
     indexedBytes: 0,
+    sizesReady: partial.sizesReady ?? true,
     categoryCounts: { torrent: 0, game: 0, media: 0, series: 0, installer: 0, music: 0, software: 0, documents: 0 },
     ...partial,
   };

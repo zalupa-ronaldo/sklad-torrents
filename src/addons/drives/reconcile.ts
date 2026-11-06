@@ -219,7 +219,12 @@ export function reconcileCatalog(
       });
       disk.files = applied.files;
       disk.scan = applied.scan;
-      if (volume.index?.revision) disk.indexRevision = volume.index.revision;
+      if (typeof volume.index?.recordCount === "number") disk.reportedRecords = volume.index.recordCount;
+      if (volume.index?.deferred && volume.index.revision) disk.pendingRevision = volume.index.revision;
+      else if (volume.index?.revision && !volume.index.deferred) {
+        disk.indexRevision = volume.index.revision;
+        disk.pendingRevision = undefined;
+      }
       seenIds.add(disk.id);
     }
     seen.set(observation.hostId, seenIds);

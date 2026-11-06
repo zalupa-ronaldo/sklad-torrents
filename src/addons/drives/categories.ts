@@ -90,40 +90,68 @@ export function categoriesFor(
   return CATEGORIES.filter((category) => found.has(category));
 }
 
+type PreparedFile = Omit<IndexedFile, "categories">;
+
+function prepareRaw(file: RawIndexedFile): PreparedFile | null {
+  const relativePath = normalizeRelative(file.relativePath);
+  if (!relativePath && file.name !== "") return null;
+  const name = file.name.trim() || relativePath.split("/").pop() || relativePath;
+  const allocated = typeof file.allocated === "number" && Number.isFinite(file.allocated) && file.allocated >= 0 ? file.allocated : undefined;
+  const onDisk = typeof file.onDisk === "number" && Number.isFinite(file.onDisk) && file.onDisk >= 0 ? file.onDisk : undefined;
+  const compression = file.compression === "wof" || file.compression === "ntfs" ? file.compression : undefined;
+  if (!relativePath && name === "") return null;
+  return {
+    relativePath,
+    name,
+    kind: file.kind === "dir" ? "dir" : "file",
+    size: Number.isFinite(file.size) && file.size > 0 ? file.size : 0,
+    ...(allocated != null ? { allocated } : {}),
+    ...(onDisk != null ? { onDisk } : {}),
+    ...(compression ? { compression } : {}),
+    mtimeMs: Number.isFinite(file.mtimeMs) ? file.mtimeMs : 0,
+    sidecarCategory: asCategory(file.sidecarCategory),
+  };
+}
+
+function finishPrepared(file: PreparedFile, map: ReadonlyMap<string, MediaCategory>, rules: readonly LibraryRule[], style: PathStyle, mountPath: string): IndexedFile {
+  const sidecar = file.sidecarCategory ?? sidecarFor(file.relativePath, map);
+  return {
+    ...file,
+    sidecarCategory: sidecar,
+    categories: [...new Set([...categoriesFor(file.relativePath, joinDisplay(style, mountPath, file.relativePath), rules, sidecar), ...inferFile(file.relativePath, file.kind)])],
+  };
+}
+
 export function toIndexedFiles(
   raw: readonly RawIndexedFile[],
   rules: readonly LibraryRule[],
   style: PathStyle,
   mountPath: string,
 ): IndexedFile[] {
-  const prepared = raw
-    .map((file) => {
-      const relativePath = normalizeRelative(file.relativePath);
-      if (!relativePath && file.name !== "") return null;
-      const name = file.name.trim() || relativePath.split("/").pop() || relativePath;
-      const allocated = typeof file.allocated === "number" && Number.isFinite(file.allocated) && file.allocated >= 0 ? file.allocated : undefined;
-      const onDisk = typeof file.onDisk === "number" && Number.isFinite(file.onDisk) && file.onDisk >= 0 ? file.onDisk : undefined;
-      const compression = file.compression === "wof" || file.compression === "ntfs" ? file.compression : undefined;
-      return {
-        relativePath,
-        name,
-        kind: file.kind === "dir" ? "dir" : "file",
-        size: Number.isFinite(file.size) && file.size > 0 ? file.size : 0,
-        ...(allocated != null ? { allocated } : {}),
-        ...(onDisk != null ? { onDisk } : {}),
-        ...(compression ? { compression } : {}),
-        mtimeMs: Number.isFinite(file.mtimeMs) ? file.mtimeMs : 0,
-        sidecarCategory: asCategory(file.sidecarCategory),
-      };
-    })
-    .filter((file): file is Omit<IndexedFile, "categories"> => file !== null && (file.relativePath.length > 0 || file.kind === "dir"));
+  const prepared = raw.map(prepareRaw).filter((file): file is PreparedFile => file !== null && (file.relativePath.length > 0 || file.kind === "dir"));
   const map = sidecarMap(prepared);
-  return prepared.map((file) => {
-    const sidecar = file.sidecarCategory ?? sidecarFor(file.relativePath, map);
-    return {
-      ...file,
-      sidecarCategory: sidecar,
-      categories: [...new Set([...categoriesFor(file.relativePath, joinDisplay(style, mountPath, file.relativePath), rules, sidecar), ...inferFile(file.relativePath, file.kind)])],
-    };
-  });
+  return prepared.map((file) => finishPrepared(file, map, rules, style, mountPath));
+}
+
+/** Same classification as toIndexedFiles, but returns to the event loop between batches. */
+export async function classifyFilesYielding(
+  raw: readonly RawIndexedFile[],
+  rules: readonly LibraryRule[],
+  style: PathStyle,
+  mountPath: string,
+  batchSize = 4_000,
+): Promise<IndexedFile[]> {
+  const prepared: PreparedFile[] = [];
+  for (let i = 0; i < raw.length; i += 1) {
+    const file = prepareRaw(raw[i]!);
+    if (file && (file.relativePath.length > 0 || file.kind === "dir")) prepared.push(file);
+    if (i > 0 && i % batchSize === 0) await new Promise((resolve) => setImmediate(resolve));
+  }
+  const map = sidecarMap(prepared);
+  const out: IndexedFile[] = new Array(prepared.length);
+  for (let i = 0; i < prepared.length; i += 1) {
+    out[i] = finishPrepared(prepared[i]!, map, rules, style, mountPath);
+    if (i > 0 && i % batchSize === 0) await new Promise((resolve) => setImmediate(resolve));
+  }
+  return out;
 }

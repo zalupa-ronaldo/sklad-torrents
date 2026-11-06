@@ -55,6 +55,8 @@ export interface IndexPayload {
   strategy?: IndexStrategy;
   files?: RawIndexedFile[];
   delta?: IndexDelta;
+  /** Large snapshot is downloaded off the shelf request. Not sent by the agent. */
+  deferred?: boolean;
 }
 
 export interface ScanState {
@@ -98,6 +100,19 @@ export interface DiskRecord {
   cloneOfIds: string[];
   scan: ScanState;
   files: IndexedFile[];
+  /** Exact totals from one pass over files. Shelf reads this and does not walk the array. */
+  summary?: DiskSummary;
+  /** Agent record count before the local file list is ready. Not a substitute for summary.indexedBytes. */
+  reportedRecords?: number;
+  pendingRevision?: string;
+  /** NDJSON file holding files when the catalog is too large to stringify in one string. */
+  fileStore?: string;
+}
+
+export interface DiskSummary {
+  fileCount: number;
+  indexedBytes: number;
+  categoryCounts: Record<MediaCategory, number>;
 }
 
 export interface ObservedVolume {
@@ -163,6 +178,8 @@ export interface DiskView {
   fileCount: number;
   /** Sum of indexed file sizes. Folder totals in the browser are derived from the same bytes. */
   indexedBytes: number;
+  /** False while a large index is still being totaled. Zero then is not a measured size. */
+  sizesReady: boolean;
   categoryCounts: Record<MediaCategory, number>;
 }
 

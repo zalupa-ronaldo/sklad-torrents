@@ -328,6 +328,7 @@ export function Dashboard() {
         categories: [],
         fileCount: disk.fileCount,
         dirCount: 0,
+        sizesReady: disk.sizesReady,
       }));
   }, [browse, stripDisks]);
 
@@ -680,8 +681,8 @@ export function Dashboard() {
                     <span className="text-muted-foreground">{open && diskActive ? "▾" : "▸"}</span>
                     <span className={cn("size-1.5 rounded-full", entry.online ? "bg-seed" : "bg-muted-foreground")} />
                     <span className="min-w-0 flex-1 truncate font-medium">{entry.name}</span>
-                    <span className="shrink-0 text-[10px] tabular-nums text-muted-foreground" title={entry.fileCount === 0 ? "Индекс ещё не построен" : folderHint(entry.size, entry.fileCount, entry.onDisk)}>
-                      {entry.fileCount === 0 ? "нет индекса" : formatBytes(entry.size)}
+                    <span className="shrink-0 text-[10px] tabular-nums text-muted-foreground" title={entry.sizesReady === false ? "Считаем объём индекса" : entry.fileCount === 0 ? "Индекс ещё не построен" : folderHint(entry.size, entry.fileCount, entry.onDisk)}>
+                      {entry.sizesReady === false ? "считаем" : entry.fileCount === 0 ? "нет индекса" : formatBytes(entry.size)}
                     </span>
                   </button>
                   {open && diskActive

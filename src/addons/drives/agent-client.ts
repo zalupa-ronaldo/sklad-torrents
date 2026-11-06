@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { normalizeSerial, normalizeUuid } from "@/addons/drives/identity";
+import { indexFetchPlan } from "@/addons/drives/shelf-plan";
 import type { AgentEndpoint, DiskRecord, HostObservation, IndexPayload, RawIndexedFile } from "@/addons/drives/types";
 import { DriveError } from "@/addons/drives/types";
 
@@ -36,7 +37,15 @@ function assertHttpUrl(value: string): string {
   return url.toString().replace(/\/$/, "");
 }
 
-export async function pollAgent(agent: AgentEndpoint, known: readonly DiskRecord[] = []): Promise<HostObservation> {
+export interface DeferredSnapshot {
+  agent: AgentEndpoint;
+  serial: string;
+  volumeUuid: string;
+  revision: string;
+  recordCount: number;
+}
+
+export async function pollAgent(agent: AgentEndpoint, known: readonly DiskRecord[] = [], deferred: DeferredSnapshot[] = []): Promise<HostObservation> {
   const base = assertHttpUrl(agent.url);
   const response = await fetch(`${base}/v1/volumes?metadata=1`, {
     cache: "no-store",
@@ -52,12 +61,33 @@ export async function pollAgent(agent: AgentEndpoint, known: readonly DiskRecord
     const existing = known.find((disk) => normalizeSerial(disk.serial) === normalizeSerial(volume.serial ?? "") && normalizeUuid(disk.volumeUuid) === normalizeUuid(volume.volumeUuid ?? ""));
     // Compatibility with an already-running older Mac agent until its next restart.
     if (index?.files && !index.revision) index.revision = `legacy:${createHash("sha256").update(JSON.stringify(index.files)).digest("hex")}`;
-    if (index?.revision && existing?.indexRevision === index.revision) { delete index.files; delete index.delta; }
-    if (!index?.revision || index.state !== "complete" || index.files) continue;
-    const prior = known.find((disk) => normalizeSerial(disk.serial) === normalizeSerial(volume.serial ?? "") && normalizeUuid(disk.volumeUuid) === normalizeUuid(volume.volumeUuid ?? ""));
-    if (prior?.indexRevision === index.revision) continue;
-    // Bootstrap from the panel's exact existing tree, imported into this agent.
-    if (prior && !prior.indexRevision && index.revision === `restored:${prior.files.length}` && index.recordCount === prior.files.length) continue;
+    const plan = indexFetchPlan({
+      state: index?.state,
+      revision: index?.revision,
+      recordCount: index?.recordCount ?? (index?.files ? index.files.length : 0),
+      knownRevision: existing?.indexRevision,
+      pendingRevision: existing?.pendingRevision,
+    });
+    if (plan === "none" || plan === "skip") {
+      if (index) { delete index.files; delete index.delta; }
+      continue;
+    }
+    const prior = existing;
+    if (prior && !prior.indexRevision && index?.revision === `restored:${prior.files.length}` && index.recordCount === prior.files.length) continue;
+    if (plan === "defer" && index?.revision) {
+      index.deferred = true;
+      delete index.files;
+      delete index.delta;
+      deferred.push({
+        agent,
+        serial: String(volume.serial ?? ""),
+        volumeUuid: String(volume.volumeUuid ?? ""),
+        revision: index.revision,
+        recordCount: index.recordCount ?? 0,
+      });
+      continue;
+    }
+    if (!index?.revision) continue;
     const files: RawIndexedFile[] = [];
     const expected = index.recordCount ?? 0;
     while (files.length < expected) {
@@ -118,13 +148,15 @@ function isRawFile(value: unknown): value is RawIndexedFile {
 export async function pollAgents(agents: readonly AgentEndpoint[], known: readonly DiskRecord[] = []): Promise<{
   observations: HostObservation[];
   errors: { hostName: string; message: string }[];
+  deferred: DeferredSnapshot[];
 }> {
   const observations: HostObservation[] = [];
   const errors: { hostName: string; message: string }[] = [];
+  const deferred: DeferredSnapshot[] = [];
   await Promise.all(
     agents.map(async (agent) => {
       try {
-        observations.push(await pollAgent(agent, known));
+        observations.push(await pollAgent(agent, known, deferred));
       } catch (error) {
         errors.push({
           hostName: agent.name,
@@ -133,5 +165,5 @@ export async function pollAgents(agents: readonly AgentEndpoint[], known: readon
       }
     }),
   );
-  return { observations, errors };
+  return { observations, errors, deferred };
 }
