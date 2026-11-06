@@ -101,6 +101,18 @@ export async function searchShelf(query: string, limit = 100): Promise<SearchRes
   return { query, hits: searchDisks(stored?.disks ?? [], query, Math.min(1000, Math.max(1, Math.floor(limit) || 100))) };
 }
 
+export async function browseShelf(diskId: string | null, relativePath = "", cursor = 0, limit = 200) {
+  let stored = await readCatalog();
+  if (!stored) {
+    await getShelf();
+    stored = await readCatalog();
+  }
+  const disks = stored?.disks ?? [];
+  const { browseDisk, browseRoots } = await import("@/addons/drives/browse");
+  if (!diskId) return browseRoots(disks, limit, cursor);
+  return browseDisk(disks, diskId, relativePath, limit, cursor);
+}
+
 export async function renameDisk(id: string, label: string): Promise<DiskView> {
   const next = label.trim();
   if (!next) throw new DriveError(400, "Укажите имя диска.");
