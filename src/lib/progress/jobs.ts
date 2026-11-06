@@ -39,6 +39,12 @@ async function registerLocalsendJobs(): Promise<void> {
   } catch {
     // The progress page still lists the other engines if LocalSend failed to load.
   }
+  try {
+    const { registerTransferProgress } = await import("@/addons/drives/transfer/jobs");
+    registerTransferProgress();
+  } catch {
+    // Disk copy source is optional.
+  }
 }
 
 export async function getJob(id: string, now = Date.now()): Promise<JobSnapshot | null> {
@@ -64,6 +70,12 @@ export async function performJobAction(
     const { controlJob } = await import("@/lib/jobs/queue");
     await controlJob(id.slice("localsend__".length), action);
     return action === "cancel" ? { notice: "Остановка LocalSend запрошена. Файл не удаляется." } : {};
+  }
+  if (id.startsWith("transfer__")) {
+    if (action !== "cancel") throw new QbittorrentError("validation", "Копирование можно только отменить.");
+    const { cancelTransferJob } = await import("@/addons/drives/transfer/jobs");
+    if (!cancelTransferJob(id)) throw new QbittorrentError("validation", "Задачу нельзя отменить.");
+    return { notice: "Копирование остановлено. Исходный файл не удалялся." };
   }
   const parsed = parseJobId(id);
   if (parsed.kind === "local" && parsed.id.startsWith("kernel__")) {

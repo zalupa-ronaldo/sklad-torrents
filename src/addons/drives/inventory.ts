@@ -1,5 +1,6 @@
 import { mountPathsOf, online } from "@/addons/drives/reconcile";
 import type { DiskRecord, DiskView } from "@/addons/drives/types";
+import { formatBytes } from "@/lib/format";
 
 const HIDDEN_LABEL = /^(efi|recovery|preboot|update|vm|xart|hardware|iscpreboot)$/i;
 const HIDDEN_MOUNT = /\/system\/volumes\/|efi|recovery|preboot|iscpreboot|xarts?|(^|\/)hardware$/i;
@@ -50,6 +51,33 @@ export function displayDiskName(disk: Pick<DiskView, "label" | "volumeName" | "l
   const volume = (disk.volumeName || "").trim();
   if (volume && volume !== "Без имени" && !/�/.test(volume)) return volume;
   return path || "Диск";
+}
+
+
+/** Removable USB / flash-style volumes (FAT on /Volumes or Windows removable letters). */
+export function isRemovableDisk(disk: Pick<DiskView, "filesystem" | "lastMountPath" | "mountPaths" | "totalBytes" | "label" | "volumeName">): boolean {
+  const fs = (disk.filesystem || "").toLowerCase();
+  const fatLike = /msdos|fat32|\bfat\b|exfat|vfat/.test(fs);
+  const mounts = [...(disk.mountPaths ?? []), disk.lastMountPath].filter(Boolean);
+  if (fatLike && mounts.some((path) => path.startsWith("/Volumes/"))) return true;
+  if (fatLike && disk.totalBytes > 0 && disk.totalBytes < 128_000_000_000) return true;
+  return false;
+}
+
+/** "12 ТБ · S:" / "Флешка · 16 ГБ · NO NAME 1" — capacity from real totalBytes only. */
+export function displayDiskTitle(disk: Pick<DiskView, "label" | "volumeName" | "lastMountPath" | "mountPaths" | "totalBytes" | "filesystem">): string {
+  const name = displayDiskName(disk);
+  const capacity = disk.totalBytes > 0 ? formatBytes(disk.totalBytes) : "";
+  const flash = isRemovableDisk(disk) ? "Флешка · " : "";
+  if (capacity && name) return `${flash}${capacity} · ${name}`;
+  return `${flash}${name || capacity || "Диск"}`;
+}
+
+/** Picker line with free space: "16 ГБ · NO NAME 1 — свободно 14,2 ГБ". */
+export function displayDiskPickerLabel(disk: Pick<DiskView, "label" | "volumeName" | "lastMountPath" | "mountPaths" | "totalBytes" | "freeBytes" | "filesystem">): string {
+  const title = displayDiskTitle(disk);
+  if (disk.freeBytes > 0) return `${title} — свободно ${formatBytes(disk.freeBytes)}`;
+  return title;
 }
 
 /** @deprecated use isStripDisk / isBrowsableDisk */

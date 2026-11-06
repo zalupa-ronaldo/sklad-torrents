@@ -7,7 +7,8 @@ import { AddTorrentDialog } from "@/components/add-torrent-dialog";
 import { HostDialog } from "@/components/host-dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { displayDiskName, isStripDisk } from "@/addons/drives/inventory";
+import { displayDiskName, displayDiskPickerLabel, displayDiskTitle, isStripDisk } from "@/addons/drives/inventory";
+import type { TransferDestination, TransferJob } from "@/addons/drives/transfer/jobs";
 import type { BrowseEntry, BrowseResponse } from "@/addons/drives/browse";
 import type { DiskView, MediaCategory, SearchHit, SearchResponse, ShelfResponse } from "@/addons/drives/types";
 import { api } from "@/lib/api-client";
@@ -54,6 +55,11 @@ export function Dashboard() {
   const [addOpen, setAddOpen] = useState(false);
   const [hostEditor, setHostEditor] = useState<HostView | null | "new">(null);
   const [treeOpen, setTreeOpen] = useState<Record<string, boolean>>({});
+  const [copyOpen, setCopyOpen] = useState(false);
+  const [destinations, setDestinations] = useState<TransferDestination[]>([]);
+  const [copyBusy, setCopyBusy] = useState(false);
+  const [copyNotice, setCopyNotice] = useState<string | null>(null);
+  const [copyJob, setCopyJob] = useState<TransferJob | null>(null);
 
   const refreshMeta = useCallback(async () => {
     try {
@@ -97,12 +103,62 @@ export function Dashboard() {
   }, []);
 
   useEffect(() => {
+    if (!copyJob || (copyJob.status !== "running" && copyJob.status !== "queued")) return;
+    const timer = window.setInterval(() => {
+      void (async () => {
+        try {
+          const data = await api<{ job: TransferJob }>(`/api/files/copy/${copyJob.id}`);
+          setCopyJob(data.job);
+          if (data.job.status === "completed" || data.job.status === "error" || data.job.status === "cancelled") {
+            void refreshMeta();
+          }
+        } catch {
+          // keep last status
+        }
+      })();
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [copyJob, refreshMeta]);
+
+
+  useEffect(() => {
+    const want = (window as unknown as { __skladSelect?: string }).__skladSelect;
+    if (!want || !browse?.entries?.length) return;
+    const hit = browse.entries.find((entry) => entry.name === want || entry.relativePath.endsWith(want));
+    if (hit) {
+      setSelected(hit);
+      delete (window as unknown as { __skladSelect?: string }).__skladSelect;
+      const params = new URLSearchParams(window.location.search);
+      if (params.get("copy") === "1") {
+        window.setTimeout(() => {
+          void (async () => {
+            try {
+              const data = await api<{ destinations: TransferDestination[] }>(`/api/files/destinations?diskId=${encodeURIComponent(hit.diskId)}`);
+              setDestinations(data.destinations);
+              setCopyOpen(true);
+            } catch {
+              // ignore for screenshot helper
+            }
+          })();
+        }, 300);
+      }
+    }
+  }, [browse]);
+
+  useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const startDisk = params.get("diskId");
     const startPath = params.get("path") || "";
+    const selectName = params.get("select");
     const kick = window.setTimeout(() => {
       void refreshMeta();
-      void loadBrowse(startDisk, startPath);
+      void (async () => {
+        await loadBrowse(startDisk, startPath);
+        if (selectName) {
+          // selection applied in a follow-up effect once browse arrives
+          (window as unknown as { __skladSelect?: string }).__skladSelect = selectName;
+        }
+      })();
     }, 0);
     const timer = window.setInterval(() => {
       if (document.visibilityState === "visible") void refreshMeta();
@@ -146,9 +202,9 @@ export function Dashboard() {
       .filter((disk) => disk.fileCount > 0)
       .map((disk) => ({
         diskId: disk.id,
-        diskLabel: displayDiskName(disk),
+        diskLabel: displayDiskTitle(disk),
         online: disk.online,
-        name: displayDiskName(disk),
+        name: displayDiskTitle(disk),
         relativePath: "",
         displayPath: disk.mountPaths[0] || disk.lastMountPath,
         kind: "dir" as const,
@@ -294,6 +350,62 @@ export function Dashboard() {
   const scanJobs = stripDisks
     .filter((disk) => disk.scan.status === "running" || disk.scan.status === "paused")
     .slice(0, 4);
+
+
+  const selectedFile =
+    selected && "kind" in selected && selected.kind === "file" && "relativePath" in selected
+      ? (selected as BrowseEntry)
+      : null;
+  const selectedOnline = selectedFile?.online === true;
+  const selectedOnMac =
+    selectedFile &&
+    stripDisks.some((disk) => disk.id === selectedFile.diskId && (disk.lastHostId === "mac-mini" || disk.mountPaths.some((path) => path.startsWith("/"))));
+
+  async function openCopyPicker() {
+    if (!selectedFile) return;
+    setCopyNotice(null);
+    setCopyBusy(true);
+    try {
+      const data = await api<{ destinations: TransferDestination[] }>(`/api/files/destinations?diskId=${encodeURIComponent(selectedFile.diskId)}`);
+      setDestinations(data.destinations);
+      setCopyOpen(true);
+    } catch (error) {
+      setCopyNotice(error instanceof Error ? error.message : "Не удалось загрузить назначения");
+    } finally {
+      setCopyBusy(false);
+    }
+  }
+
+  async function startCopy(destinationId: string) {
+    if (!selectedFile) return;
+    setCopyBusy(true);
+    setCopyNotice(null);
+    try {
+      if (destinationId === "browser") {
+        const url = `/api/files/download?diskId=${encodeURIComponent(selectedFile.diskId)}&path=${encodeURIComponent(selectedFile.relativePath)}`;
+        window.location.href = url;
+        setCopyOpen(false);
+        setCopyNotice("Скачивание через браузер запущено");
+        return;
+      }
+      const result = await api<{ job: TransferJob }>("/api/files/copy", {
+        method: "POST",
+        body: JSON.stringify({
+          diskId: selectedFile.diskId,
+          path: selectedFile.relativePath,
+          destinationId,
+        }),
+      });
+      setCopyJob(result.job);
+      setCopyOpen(false);
+      setCopyNotice(`Копирование · ${result.job.title}`);
+      void refreshMeta();
+    } catch (error) {
+      setCopyNotice(error instanceof Error ? error.message : "Копирование не запустилось");
+    } finally {
+      setCopyBusy(false);
+    }
+  }
 
   return (
     <div className="flex h-dvh flex-col bg-background">
@@ -554,7 +666,39 @@ export function Dashboard() {
             <div className="border-t p-2 text-[11px]">
               <div className="font-medium">{selected.name}</div>
               <div className="mt-1 break-all font-mono text-[10px] text-muted-foreground">{selected.displayPath}</div>
-              {"size" in selected ? <div className="mt-1 text-muted-foreground">{formatBytes(selected.size)}</div> : null}
+              {"size" in selected ? (
+                <div className="mt-1 text-muted-foreground">
+                  {selected.size > 0
+                    ? formatBytes(selected.size)
+                    : selected.kind === "file"
+                      ? "Размер в индексе неизвестен — возьмём с диска"
+                      : formatBytes(0)}
+                </div>
+              ) : null}
+              {selectedFile ? (
+                <div className="mt-2 space-y-1.5">
+                  <Button
+                    type="button"
+                    size="sm"
+                    className="h-8 w-full text-xs font-semibold"
+                    disabled={!selectedOnline || copyBusy}
+                    title={selectedOnline ? "Скопировать файл на другой диск или в Загрузки" : "Нужен подключённый диск"}
+                    onClick={() => void openCopyPicker()}
+                  >
+                    {selectedOnline ? "Копировать" : "Нужен подключённый диск"}
+                  </Button>
+                  {copyNotice ? <p className="text-[10px] text-muted-foreground">{copyNotice}</p> : null}
+                  {copyJob ? (
+                    <p className="text-[10px] text-muted-foreground">
+                      {copyJob.status === "completed" && copyJob.verified
+                        ? `Готово · SHA совпал · ${copyJob.destPath || ""}`
+                        : copyJob.status === "error"
+                          ? copyJob.error
+                          : `${copyJob.status} · ${formatBytes(copyJob.bytesDone)}${copyJob.bytesTotal ? ` / ${formatBytes(copyJob.bytesTotal)}` : ""}`}
+                    </p>
+                  ) : null}
+                </div>
+              ) : null}
             </div>
           ) : null}
         </aside>
@@ -573,13 +717,59 @@ export function Dashboard() {
             title={disk.mountPaths[0] || disk.lastMountPath}
           >
             <span className={cn("size-1.5 rounded-full", disk.online ? "bg-seed" : "bg-muted-foreground")} />
-            <span className="font-medium">{displayDiskName(disk)}</span>
+            <span className="font-medium">{displayDiskTitle(disk)}</span>
             <span className="text-muted-foreground">
               {formatBytes(disk.freeBytes)} / {formatBytes(disk.totalBytes)}
             </span>
           </button>
         ))}
       </footer>
+
+
+      {copyOpen ? (
+        <div className="fixed inset-0 z-50 grid place-items-center bg-black/60 p-4" role="dialog" aria-modal="true" aria-label="Куда копировать">
+          <div className="w-full max-w-md rounded-lg border bg-background shadow-xl">
+            <div className="border-b px-3 py-2">
+              <div className="text-sm font-semibold">Куда копировать</div>
+              <div className="truncate text-[11px] text-muted-foreground">{selectedFile?.name}</div>
+            </div>
+            <div className="max-h-[60vh] space-y-3 overflow-auto p-3">
+              {["Этот браузер", "Mac mini", "Windows PC"].map((group) => {
+                const items = destinations.filter((item) => {
+                  if (group === "Этот браузер") return item.hostName === "Этот браузер";
+                  if (group === "Mac mini") return item.hostName === "Mac mini" || item.hostId === "mac-mini";
+                  return item.hostName.toLowerCase().includes("windows") || item.hostId === "windows-pc";
+                });
+                if (!items.length) return null;
+                return (
+                  <div key={group}>
+                    <div className="mb-1 text-[10px] font-semibold tracking-wide text-muted-foreground uppercase">{group}</div>
+                    <div className="space-y-1">
+                      {items.map((item) => (
+                        <button
+                          key={item.id}
+                          type="button"
+                          disabled={!item.online || copyBusy}
+                          onClick={() => void startCopy(item.id)}
+                          className="flex w-full flex-col rounded-md border px-2 py-1.5 text-left text-xs hover:bg-muted/50 disabled:opacity-50"
+                        >
+                          <span className="font-medium">{item.label}</span>
+                          <span className="truncate font-mono text-[10px] text-muted-foreground">{item.detail}</span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+            <div className="flex justify-end gap-2 border-t px-3 py-2">
+              <Button type="button" variant="outline" size="sm" onClick={() => setCopyOpen(false)}>
+                Отмена
+              </Button>
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       <AddTorrentDialog
         open={addOpen}

@@ -1,8 +1,11 @@
-import { readFile, writeFile, rename, mkdir } from "node:fs/promises";
+import { createReadStream, createWriteStream, existsSync, statSync } from "node:fs";
+import { readFile, writeFile, rename, mkdir, open as openFs } from "node:fs/promises";
 import path from "node:path";
+import { pipeline } from "node:stream/promises";
+import { Transform } from "node:stream";
 import { gzip, gunzip } from "node:zlib";
 import { promisify } from "node:util";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 
 import { executeIndexPlan } from "../../src/addons/drives/execute-index.ts";
@@ -37,9 +40,56 @@ interface AgentEvent {
   strategy?: string;
 }
 
+
 function volumeKey(volume: { serial: string; volumeUuid: string }): string {
   return `${volume.serial}|${volume.volumeUuid}`;
 }
+
+/** Relative path only: no abs, no .., no NUL. Slash-normalized. */
+function safeRelativePath(raw: string | null): string | null {
+  if (!raw) return null;
+  let value = String(raw).replace(/\\/g, "/").trim();
+  if (!value || value.includes("\0")) return null;
+  if (path.posix.isAbsolute(value) || path.win32.isAbsolute(value)) return null;
+  if (/^[A-Za-z]:/.test(value)) return null;
+  const parts = value.split("/").filter((part) => part.length > 0);
+  if (!parts.length || parts.some((part) => part === "." || part === "..")) return null;
+  return parts.join("/");
+}
+
+function isExcludedLetter(letter: string | null | undefined): boolean {
+  return String(letter || "").toUpperCase() === "Z";
+}
+
+function resolveVolumeFile(
+  volumes: TrackedVolume[],
+  serial: string | null,
+  uuid: string | null,
+  relativeRaw: string | null,
+  os: HostOs,
+): { absolute: string; relative: string; volume: TrackedVolume } | { error: string; status: number } {
+  if (!uuid) return { error: "Нужен uuid тома.", status: 400 };
+  // APFS often has an empty serial — match uuid, and serial when the client sent one.
+  const volume = volumes.find((item) => item.volumeUuid === uuid && (!serial || item.serial === serial));
+  if (!volume) return { error: "Том не подключён на этом хосте.", status: 404 };
+  if (isExcludedLetter(volume.letter) || volume.mountPaths.some((mount) => /^z:\\/i.test(mount))) {
+    return { error: "Том Z недоступен для чтения и записи.", status: 403 };
+  }
+  const relative = safeRelativePath(relativeRaw);
+  if (!relative) return { error: "Путь должен быть относительным внутри тома.", status: 400 };
+  const mount = volume.mountPaths[0];
+  if (!mount) return { error: "У тома нет точки монтирования.", status: 409 };
+  const joined = os === "win32"
+    ? path.win32.resolve(mount, ...relative.split("/"))
+    : path.posix.resolve(mount, ...relative.split("/"));
+  const root = os === "win32" ? path.win32.resolve(mount) : path.posix.resolve(mount);
+  const relToRoot = os === "win32" ? path.win32.relative(root, joined) : path.posix.relative(root, joined);
+  if (!relToRoot || relToRoot.startsWith("..") || path.isAbsolute(relToRoot)) {
+    return { error: "Путь выходит за корень тома.", status: 400 };
+  }
+  return { absolute: joined, relative, volume };
+}
+
 
 function send(response: ServerResponse, status: number, body: unknown) {
   response.writeHead(status, {
@@ -263,6 +313,112 @@ export function startAgent(options: {
       send(response, 200, { events: events.filter((event) => event.id > since) });
       return;
     }
+
+    if (request.method === "GET" && url.pathname === "/v1/file/stat") {
+      const resolved = resolveVolumeFile(volumes, url.searchParams.get("serial"), url.searchParams.get("uuid"), url.searchParams.get("path"), options.os);
+      if ("error" in resolved) { send(response, resolved.status, { error: resolved.error }); return; }
+      try {
+        const info = statSync(resolved.absolute);
+        if (!info.isFile()) { send(response, 404, { error: "Это не файл." }); return; }
+        send(response, 200, {
+          ok: true,
+          size: info.size,
+          mtimeMs: info.mtimeMs,
+          relativePath: resolved.relative,
+          mountPath: resolved.volume.mountPaths[0] || "",
+        });
+      } catch {
+        send(response, 404, { error: "Файл не найден на томе." });
+      }
+      return;
+    }
+    if (request.method === "GET" && url.pathname === "/v1/file/content") {
+      const resolved = resolveVolumeFile(volumes, url.searchParams.get("serial"), url.searchParams.get("uuid"), url.searchParams.get("path"), options.os);
+      if ("error" in resolved) { send(response, resolved.status, { error: resolved.error }); return; }
+      let info;
+      try {
+        info = statSync(resolved.absolute);
+      } catch {
+        send(response, 404, { error: "Файл не найден на томе." });
+        return;
+      }
+      if (!info.isFile()) { send(response, 404, { error: "Это не файл." }); return; }
+      const hash = createHash("sha256");
+      const stream = createReadStream(resolved.absolute);
+      response.writeHead(200, {
+        "content-type": "application/octet-stream",
+        "content-length": String(info.size),
+        "cache-control": "no-store",
+        "x-sklad-relative-path": encodeURIComponent(resolved.relative),
+        "x-sklad-size": String(info.size),
+      });
+      stream.on("data", (chunk) => hash.update(chunk));
+      stream.on("error", () => {
+        if (!response.headersSent) send(response, 500, { error: "Чтение файла прервалось." });
+        else response.destroy();
+      });
+      stream.on("end", () => {
+        try { response.setHeader("x-sklad-sha256", hash.digest("hex")); } catch { /* headers already flushed */ }
+      });
+      // Expose digest via trailer-like side channel: panel also hashes the body.
+      // After stream ends, write nothing more — panel computes its own SHA of bytes received.
+      stream.pipe(response);
+      return;
+    }
+    if (request.method === "PUT" && url.pathname === "/v1/file/content") {
+      const resolved = resolveVolumeFile(volumes, url.searchParams.get("serial"), url.searchParams.get("uuid"), url.searchParams.get("path"), options.os);
+      if ("error" in resolved) { send(response, resolved.status, { error: resolved.error }); return; }
+      // Refuse overwrite unless explicit
+      const overwrite = url.searchParams.get("overwrite") === "1";
+      if (existsSync(resolved.absolute) && !overwrite) {
+        send(response, 409, { error: "Файл уже есть. Перезапись не включена." });
+        return;
+      }
+      const dir = options.os === "win32" ? path.win32.dirname(resolved.absolute) : path.posix.dirname(resolved.absolute);
+      const tmp = `${resolved.absolute}.sklad-part`;
+      void (async () => {
+        try {
+          await mkdir(dir, { recursive: true });
+          const hash = createHash("sha256");
+          let bytes = 0;
+          const hasher = new Transform({
+            transform(chunk, _enc, cb) {
+              hash.update(chunk);
+              bytes += chunk.length;
+              cb(null, chunk);
+            },
+          });
+          await pipeline(request, hasher, createWriteStream(tmp));
+          const digest = hash.digest("hex");
+          // Independent verify: re-hash the written temp file
+          const verify = createHash("sha256");
+          const fd = await openFs(tmp, "r");
+          try {
+            const stream = fd.createReadStream();
+            for await (const chunk of stream) verify.update(chunk);
+          } finally {
+            await fd.close();
+          }
+          const writtenDigest = verify.digest("hex");
+          if (writtenDigest !== digest) {
+            try { await rename(tmp, `${tmp}.bad`); } catch { /* keep tmp */ }
+            send(response, 500, { error: "Контрольная сумма записи не совпала." });
+            return;
+          }
+          await rename(tmp, resolved.absolute);
+          send(response, 200, {
+            ok: true,
+            bytes,
+            sha256: writtenDigest,
+            relativePath: resolved.relative,
+          });
+        } catch (error) {
+          send(response, 500, { error: error instanceof Error ? error.message : "Запись не удалась." });
+        }
+      })();
+      return;
+    }
+
     send(response, 404, { error: "Неизвестный путь агента." });
   });
 
