@@ -10,6 +10,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 
 import { executeIndexPlan } from "../../src/addons/drives/execute-index.ts";
 import { selectIndexStrategy } from "../../src/addons/drives/strategy.ts";
+import { normalizeSerial, normalizeUuid } from "../../src/addons/drives/identity.ts";
 import type { CollectedVolume, HostOs, IndexPayload } from "../../src/addons/drives/types.ts";
 import { readNtfsLetter, readUsn } from "./indexers.mts";
 import { walkTree } from "./walk.mts";
@@ -69,8 +70,16 @@ function resolveVolumeFile(
   os: HostOs,
 ): { absolute: string; relative: string; volume: TrackedVolume } | { error: string; status: number } {
   if (!uuid) return { error: "Нужен uuid тома.", status: 400 };
-  // APFS often has an empty serial — match uuid, and serial when the client sent one.
-  const volume = volumes.find((item) => item.volumeUuid === uuid && (!serial || item.serial === serial));
+  // APFS may have empty serial. Windows may report \\?\Volume{uuid}\ while the panel stores bare uuid.
+  const wantUuid = normalizeUuid(uuid);
+  const wantSerial = serial ? normalizeSerial(serial) : "";
+  if (!wantUuid) return { error: "Нужен uuid тома.", status: 400 };
+  const volume = volumes.find((item) => {
+    if (normalizeUuid(item.volumeUuid) !== wantUuid) return false;
+    if (!wantSerial) return true;
+    const have = normalizeSerial(item.serial);
+    return !have || have === wantSerial;
+  });
   if (!volume) return { error: "Том не подключён на этом хосте.", status: 404 };
   if (isExcludedLetter(volume.letter) || volume.mountPaths.some((mount) => /^z:\\/i.test(mount))) {
     return { error: "Том Z недоступен для чтения и записи.", status: 403 };
@@ -375,10 +384,15 @@ export function startAgent(options: {
         return;
       }
       const dir = options.os === "win32" ? path.win32.dirname(resolved.absolute) : path.posix.dirname(resolved.absolute);
+      const root = options.os === "win32"
+        ? path.win32.resolve(resolved.volume.mountPaths[0] || "")
+        : path.posix.resolve(resolved.volume.mountPaths[0] || "");
       const tmp = `${resolved.absolute}.sklad-part`;
       void (async () => {
         try {
-          await mkdir(dir, { recursive: true });
+          // Windows rejects mkdir on the drive root (EPERM on "S:\\").
+          const resolvedDir = options.os === "win32" ? path.win32.resolve(dir) : path.posix.resolve(dir);
+          if (resolvedDir !== root) await mkdir(dir, { recursive: true });
           const hash = createHash("sha256");
           let bytes = 0;
           const hasher = new Transform({
