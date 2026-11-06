@@ -478,6 +478,29 @@ Volume Free Space:         1.2 TB (1200000000000 Bytes)
     expect(sized.find((entry) => entry.name === "sparse.bin")?.size).toBe(0);
     expect(sized.find((entry) => entry.name === "sparse.bin")?.allocated).toBeUndefined();
     expect(sized.find((entry) => entry.name === "big.mkv")).toMatchObject({ size: 9_000, allocated: 12_288 });
+    const wof = filesFromRecords(
+      [
+        makeRecord({
+          parent: 5,
+          name: "pack.bin",
+          size: 0,
+          data: { size: 10_000, allocated: 10_000 },
+          wof: { size: 2_000, allocated: 4_096 },
+        }),
+        makeRecord({
+          parent: 5,
+          name: "tagged.bin",
+          size: 0,
+          data: { size: 10_000, allocated: 10_000 },
+          reparseWof: true,
+        }),
+      ],
+      1024,
+      512,
+    );
+    expect(wof.find((entry) => entry.name === "pack.bin")).toMatchObject({ size: 10_000, allocated: 10_000, onDisk: 2_000, compression: "wof" });
+    expect(wof.find((entry) => entry.name === "tagged.bin")?.onDisk).toBeUndefined();
+    expect(wof.find((entry) => entry.name === "tagged.bin")?.compression).toBe("wof");
     expect(decodeRunlist(Buffer.from([0x11, 0x04, 0x0a, 0x00]))).toEqual([{ lcn: 10, length: 4 }]);
     const delta = parseFsutilUsn("File name: Cinema/movie.mkv\nReason: 0x80000100\n");
     expect(delta.complete).toBe(true);
@@ -493,6 +516,8 @@ function makeRecord(options: {
   /** Non-zero base file reference: this record is an extension of that MFT index. */
   base?: number;
   data?: { size: number; allocated: number; resident?: boolean };
+  wof?: { size: number; allocated: number };
+  reparseWof?: boolean;
 }): Buffer {
   const record = Buffer.alloc(1024);
   record.write("FILE", 0, "latin1");
@@ -536,6 +561,30 @@ function makeRecord(options: {
       record.writeBigUInt64LE(BigInt(options.data.size), cursor + 0x30);
       cursor += length;
     }
+  }
+  if (options.wof) {
+    const name = Buffer.from("WofCompressedData", "utf16le");
+    const nameOffset = 0x40;
+    const length = Math.ceil((nameOffset + name.length) / 8) * 8;
+    record.writeUInt32LE(0x80, cursor);
+    record.writeUInt32LE(length, cursor + 4);
+    record.writeUInt8(1, cursor + 8);
+    record.writeUInt8(name.length / 2, cursor + 9);
+    record.writeUInt16LE(nameOffset, cursor + 0x0a);
+    record.writeBigUInt64LE(BigInt(options.wof.allocated), cursor + 0x28);
+    record.writeBigUInt64LE(BigInt(options.wof.size), cursor + 0x30);
+    name.copy(record, cursor + nameOffset);
+    cursor += length;
+  }
+  if (options.reparseWof) {
+    const length = 0x18 + 8;
+    record.writeUInt32LE(0xc0, cursor);
+    record.writeUInt32LE(length, cursor + 4);
+    record.writeUInt8(0, cursor + 8);
+    record.writeUInt32LE(8, cursor + 0x10);
+    record.writeUInt16LE(0x18, cursor + 0x14);
+    record.writeUInt32LE(0x80000017, cursor + 0x18);
+    cursor += length;
   }
   record.writeUInt32LE(0xffffffff, cursor);
   return record;

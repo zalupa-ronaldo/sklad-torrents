@@ -1,3 +1,4 @@
+import { resolveOnDisk } from "@/addons/drives/ondisk";
 import type { RawIndexedFile } from "@/addons/drives/types";
 
 export interface NtfsGeometry {
@@ -22,11 +23,19 @@ export interface ParsedName {
   /** Unnamed $DATA real size, or null when the record has no unnamed data attribute. */
   dataSize: number | null;
   dataAllocated: number | null;
+  /** Real size of WofCompressedData. Null when that named stream was not in the record. */
+  wofBytes: number | null;
+  wofTag: boolean;
+  ntfsCompressed: boolean;
 }
 
 const FILE_NAME = 0x30;
 const DATA = 0x80;
+const REPARSE = 0xc0;
 const END = 0xffffffff;
+const WOF_TAG = 0x80000017;
+const WOF_STREAM = "WofCompressedData";
+const NTFS_COMPRESSED = 0x0001;
 
 export function parseBootSector(boot: Buffer): NtfsGeometry | null {
   if (boot.length < 512) return null;
@@ -104,18 +113,38 @@ function u64(buf: Buffer, offset: number): number {
   return Number(value);
 }
 
-/** Unnamed $DATA stream. Named streams (ADS) are not the file the browser shows. */
-function readUnnamedData(record: Buffer, offset: number, length: number, nonResident: boolean): { size: number; allocated: number } | null {
-  if (offset + 10 > record.length) return null;
-  if (record.readUInt8(offset + 9) !== 0) return null;
+function attributeName(record: Buffer, offset: number, length: number): string {
+  if (offset + 0x0c > record.length) return "";
+  const chars = record.readUInt8(offset + 9);
+  if (chars === 0) return "";
+  const nameOffset = record.readUInt16LE(offset + 0x0a);
+  const start = offset + nameOffset;
+  const bytes = chars * 2;
+  if (nameOffset <= 0 || start + bytes > offset + length || start + bytes > record.length) return "";
+  return record.toString("utf16le", start, start + bytes);
+}
+
+/** $DATA size fields. `name` is empty for the main stream and WofCompressedData for CompactGUI. */
+function readDataStream(record: Buffer, offset: number, length: number, nonResident: boolean): { name: string; size: number; allocated: number; compressed: boolean } | null {
+  if (offset + 0x10 > record.length) return null;
+  const name = attributeName(record, offset, length);
+  const compressed = offset + 0x0e <= record.length && (record.readUInt16LE(offset + 0x0c) & NTFS_COMPRESSED) !== 0;
   if (!nonResident) {
     if (length < 0x18 || offset + 0x14 > record.length) return null;
     const valueLength = record.readUInt32LE(offset + 0x10);
     if (valueLength > length) return null;
-    return { size: valueLength, allocated: valueLength };
+    return { name, size: valueLength, allocated: valueLength, compressed };
   }
   if (length < 0x40 || offset + 0x38 > record.length) return null;
-  return { size: u64(record, offset + 0x30), allocated: u64(record, offset + 0x28) };
+  return { name, size: u64(record, offset + 0x30), allocated: u64(record, offset + 0x28), compressed };
+}
+
+function readReparseTag(record: Buffer, offset: number, length: number, nonResident: boolean): number | null {
+  if (nonResident || length < 0x18 || offset + 0x1c > record.length) return null;
+  const valueLength = record.readUInt32LE(offset + 0x10);
+  const valueOffset = record.readUInt16LE(offset + 0x14);
+  if (valueLength < 4 || offset + valueOffset + 4 > record.length) return null;
+  return record.readUInt32LE(offset + valueOffset);
 }
 
 export function parseRecord(record: Buffer, index: number, bytesPerSector: number): ParsedName | null {
@@ -129,6 +158,9 @@ export function parseRecord(record: Buffer, index: number, bytesPerSector: numbe
   let best: { parent: number; name: string; namespace: number; size: number; mtimeMs: number; rank: number } | null = null;
   let dataSize: number | null = null;
   let dataAllocated: number | null = null;
+  let wofBytes: number | null = null;
+  let wofTag = false;
+  let ntfsCompressed = false;
   while (offset + 8 <= record.length) {
     const type = record.readUInt32LE(offset);
     if (type === END || type === 0) break;
@@ -157,16 +189,24 @@ export function parseRecord(record: Buffer, index: number, bytesPerSector: numbe
         }
       }
     } else if (type === DATA) {
-      const data = readUnnamedData(record, offset, length, nonResident);
-      // One file can list the same stream twice; the header size is the whole stream, so keep the larger.
-      if (data && (dataSize == null || data.size > dataSize)) {
-        dataSize = data.size;
-        dataAllocated = data.allocated;
+      const data = readDataStream(record, offset, length, nonResident);
+      if (data && data.name === WOF_STREAM && (wofBytes == null || data.size > wofBytes)) {
+        // CompactGUI stores the compressed payload here. Its length is the occupied WOF size.
+        wofBytes = data.size;
+      } else if (data && data.name === "") {
+        if (data.compressed) ntfsCompressed = true;
+        if (dataSize == null || data.size > dataSize) {
+          dataSize = data.size;
+          dataAllocated = data.allocated;
+        }
       }
+    } else if (type === REPARSE) {
+      const tag = readReparseTag(record, offset, length, nonResident);
+      if (tag === WOF_TAG) wofTag = true;
     }
     offset += length;
   }
-  if (!best && dataSize == null) return null;
+  if (!best && dataSize == null && wofBytes == null && !wofTag) return null;
   return {
     parent: best?.parent ?? 0,
     name: best?.name ?? "",
@@ -179,6 +219,9 @@ export function parseRecord(record: Buffer, index: number, bytesPerSector: numbe
     hasName: best != null,
     dataSize,
     dataAllocated,
+    wofBytes,
+    wofTag,
+    ntfsCompressed,
   };
 }
 
@@ -226,6 +269,9 @@ function preferData(target: ParsedName, extra: ParsedName): void {
     target.dataSize = extra.dataSize;
     target.dataAllocated = extra.dataAllocated;
   }
+  if (extra.wofBytes != null && (target.wofBytes == null || extra.wofBytes > target.wofBytes)) target.wofBytes = extra.wofBytes;
+  target.wofTag = target.wofTag || extra.wofTag;
+  target.ntfsCompressed = target.ntfsCompressed || extra.ntfsCompressed;
   if (!target.hasName && extra.hasName) {
     target.hasName = true;
     target.name = extra.name;
@@ -258,6 +304,15 @@ export function filesFromParsed(entries: readonly ParsedName[]): RawIndexedFile[
     const relativePath = resolvePath(entry, bases);
     if (!relativePath) continue;
     const size = entry.directory ? 0 : (entry.dataSize ?? entry.size);
+    const measured = entry.directory
+      ? null
+      : resolveOnDisk({
+          size,
+          allocated: entry.dataAllocated,
+          wofBytes: entry.wofBytes,
+          wofUnmeasured: entry.wofTag && entry.wofBytes == null,
+          ntfsCompressed: entry.ntfsCompressed,
+        });
     const file: RawIndexedFile = {
       relativePath,
       name: entry.name,
@@ -266,6 +321,8 @@ export function filesFromParsed(entries: readonly ParsedName[]): RawIndexedFile[
       mtimeMs: entry.mtimeMs,
     };
     if (!entry.directory && entry.dataAllocated != null) file.allocated = entry.dataAllocated;
+    if (measured?.onDisk != null) file.onDisk = measured.onDisk;
+    if (measured?.compression) file.compression = measured.compression;
     files.push(file);
   }
   return files;

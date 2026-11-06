@@ -7,6 +7,8 @@ import { AddTorrentDialog } from "@/components/add-torrent-dialog";
 import { HostDialog } from "@/components/host-dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { compactExplanation, COMPACT_ALGORITHMS } from "@/addons/drives/compact-target";
+import { savingsOf } from "@/addons/drives/ondisk";
 import { displayDiskName, displayDiskPickerLabel, displayDiskTitle, isStripDisk } from "@/addons/drives/inventory";
 import type { TransferDestination, TransferJob } from "@/addons/drives/transfer/jobs";
 import type { BrowseEntry, BrowseResponse } from "@/addons/drives/browse";
@@ -17,7 +19,7 @@ import { cn } from "@/lib/utils";
 import type { DashboardPayload, HostView } from "@/lib/qbittorrent/types";
 import type { ProgressPayload } from "@/lib/progress/jobs";
 
-type SortKey = "size" | "name" | "mtime" | "type";
+type SortKey = "size" | "ondisk" | "name" | "mtime" | "type";
 
 const CATEGORY_CHIPS: { id: "all" | MediaCategory; label: string }[] = [
   { id: "all", label: "Все" },
@@ -45,10 +47,69 @@ function formatSizeShare(size: number, scopeBytes: number): string {
   return `${bytes} · ${formatPercent(share)}`;
 }
 
-function folderHint(size: number, fileCount: number, allocated: number | null): string {
+function folderHint(size: number, fileCount: number, onDisk: number | null): string {
   const parts = [formatBytes(size), `${fileCount.toLocaleString("ru-RU")} ф.`];
-  if (allocated != null) parts.push(`выделено ${formatBytes(allocated)}`);
+  if (onDisk == null) parts.push("на диске неизвестно");
+  else parts.push(`на диске ${formatBytes(onDisk)}`);
+  const saved = savingsOf(size, onDisk);
+  if (saved) parts.push(`экономия ${formatBytes(saved.bytes)} · ${formatPercent(saved.ratio)}`);
   return parts.join(" · ");
+}
+
+function compareKnownDesc(a: number | null, b: number | null): number {
+  if (a == null && b == null) return 0;
+  if (a == null) return 1;
+  if (b == null) return -1;
+  return b - a;
+}
+
+function OnDiskCell({
+  size,
+  onDisk,
+  compression,
+  canCompress,
+  onCompress,
+}: {
+  size: number | null;
+  onDisk: number | null;
+  compression: "wof" | "ntfs" | "mixed" | null;
+  canCompress: boolean;
+  onCompress: () => void;
+}) {
+  const saved = savingsOf(size, onDisk);
+  const used = size != null && onDisk != null && size > 0 ? Math.max(0, Math.min(1, onDisk / size)) : null;
+  const kind = compression === "wof" || compression === "mixed" ? "CompactGUI/WOF" : compression === "ntfs" ? "сжатие NTFS" : null;
+  const title = onDisk == null
+    ? "Занятое место неизвестно. Длина файла не считается экономией."
+    : [formatBytes(onDisk), kind, saved ? `экономия ${formatBytes(saved.bytes)}` : "экономии нет"].filter(Boolean).join(" · ");
+  return (
+    <div className="ml-auto flex w-[9.5rem] flex-col items-end gap-0.5" title={title}>
+      <span className="tabular-nums">{onDisk == null || size == null ? "—" : formatBytes(onDisk)}</span>
+      {saved ? (
+        <span className="text-[10px] tabular-nums text-emerald-400/90">−{formatBytes(saved.bytes)} · {formatPercent(saved.ratio)}</span>
+      ) : onDisk != null && size != null ? (
+        <span className="text-[10px] text-muted-foreground">без экономии</span>
+      ) : (
+        <span className="text-[10px] text-muted-foreground">нет данных</span>
+      )}
+      {used != null ? (
+        <span className="h-1 w-full overflow-hidden rounded-full bg-zinc-800">
+          <span
+            className="block h-full"
+            style={{
+              width: `${Math.max(used === 0 ? 0 : 4, used * 100)}%`,
+              background: saved ? "linear-gradient(90deg, #34d399, #fbbf24)" : "#71717a",
+            }}
+          />
+        </span>
+      ) : null}
+      {canCompress ? (
+        <button type="button" className="h-5 rounded border border-border px-1.5 text-[10px] hover:bg-muted" onClick={(event) => { event.stopPropagation(); onCompress(); }}>
+          Сжать
+        </button>
+      ) : null}
+    </div>
+  );
 }
 
 export function Dashboard() {
@@ -74,6 +135,12 @@ export function Dashboard() {
   const [copyBusy, setCopyBusy] = useState(false);
   const [copyNotice, setCopyNotice] = useState<string | null>(null);
   const [copyJob, setCopyJob] = useState<TransferJob | null>(null);
+  const [compactTarget, setCompactTarget] = useState<BrowseEntry | null>(null);
+  const [compactAlgorithm, setCompactAlgorithm] = useState<(typeof COMPACT_ALGORITHMS)[number]>("XPRESS16K");
+  const [compactAck, setCompactAck] = useState(false);
+  const [compactBusy, setCompactBusy] = useState(false);
+  const [compactNote, setCompactNote] = useState<string | null>(null);
+  const [compactJobId, setCompactJobId] = useState<string | null>(null);
 
   const refreshMeta = useCallback(async () => {
     try {
@@ -115,6 +182,30 @@ export function Dashboard() {
       setBrowseLoading(false);
     }
   }, []);
+
+  useEffect(() => {
+    if (!compactJobId) return;
+    const timer = window.setInterval(() => {
+      void (async () => {
+        try {
+          const job = await api<{ state: string; message: string; error: string | null }>(`/api/drives/compact?id=${encodeURIComponent(compactJobId)}`);
+          if (job.state === "completed") {
+            setCompactNote(job.message);
+            setCompactJobId(null);
+            void loadBrowse(diskId, path);
+            void refreshMeta();
+          } else if (job.state === "failed") {
+            setCompactNote(job.error || job.message);
+            setCompactJobId(null);
+          }
+        } catch (error) {
+          setCompactNote(error instanceof Error ? error.message : "Статус сжатия недоступен.");
+          setCompactJobId(null);
+        }
+      })();
+    }, 1500);
+    return () => window.clearInterval(timer);
+  }, [compactJobId, diskId, path, loadBrowse, refreshMeta]);
 
   useEffect(() => {
     if (!copyJob || (copyJob.status !== "running" && copyJob.status !== "queued")) return;
@@ -224,6 +315,8 @@ export function Dashboard() {
         kind: "dir" as const,
         size: disk.indexedBytes,
         allocated: null,
+        onDisk: null,
+        compression: null,
         mtimeMs: 0,
         extension: "",
         categories: [],
@@ -243,6 +336,8 @@ export function Dashboard() {
           extension: hit.kind === "dir" ? "" : (hit.name.split(".").pop() || "").toLowerCase(),
           size: null as number | null,
           allocated: null as number | null,
+          onDisk: null as number | null,
+          compression: null,
           fileCount: 0,
           mtimeMs: 0,
           diskLabel: hit.label,
@@ -260,7 +355,8 @@ export function Dashboard() {
       if (sortKey === "name") return a.name.localeCompare(b.name, "ru");
       if (sortKey === "mtime") return (b.mtimeMs || 0) - (a.mtimeMs || 0);
       if (sortKey === "type") return (a.extension || a.kind).localeCompare(b.extension || b.kind) || b.size - a.size || b.fileCount - a.fileCount;
-      return b.size - a.size || (b.allocated ?? 0) - (a.allocated ?? 0) || b.fileCount - a.fileCount || a.name.localeCompare(b.name, "ru");
+      if (sortKey === "ondisk") return compareKnownDesc(a.onDisk, b.onDisk) || b.size - a.size || a.name.localeCompare(b.name, "ru");
+      return b.size - a.size || compareKnownDesc(a.onDisk, b.onDisk) || b.fileCount - a.fileCount || a.name.localeCompare(b.name, "ru");
     });
     return sorted.map((entry) => ({
       key: `${entry.diskId}:${entry.relativePath}`,
@@ -269,6 +365,8 @@ export function Dashboard() {
       extension: entry.extension,
       size: entry.size,
       allocated: entry.allocated,
+      onDisk: entry.onDisk,
+      compression: entry.compression,
       fileCount: entry.fileCount,
       mtimeMs: entry.mtimeMs,
       diskLabel: entry.diskLabel,
@@ -277,6 +375,13 @@ export function Dashboard() {
       raw: entry,
     }));
   }, [browse, hits, query, libFilter, sortKey]);
+
+  function openCompact(entry: BrowseEntry) {
+    setCompactTarget(entry);
+    setCompactAck(false);
+    setCompactNote(null);
+    setCompactJobId(null);
+  }
 
   function openEntry(entry: BrowseEntry) {
     if (entry.kind !== "dir") {
@@ -423,6 +528,49 @@ export function Dashboard() {
     }
   }
 
+  const compactDisk = compactTarget ? stripDisks.find((disk) => disk.id === compactTarget.diskId) ?? null : null;
+  const compactOs = compactDisk && (compactDisk.mountPaths.some((path) => path.startsWith("/")) || compactDisk.lastMountPath.startsWith("/"))
+    ? "darwin" as const
+    : compactDisk && (/^[A-Za-z]:\\/.test(compactDisk.lastMountPath) || compactDisk.mountPaths.some((path) => /^[A-Za-z]:\\/.test(path)))
+      ? "win32" as const
+      : null;
+  const compactBlock = compactTarget
+    ? compactExplanation({
+        kind: compactTarget.kind,
+        online: compactTarget.online,
+        os: compactOs,
+        filesystem: compactDisk?.filesystem || "",
+        displayPath: compactTarget.displayPath,
+      })
+    : null;
+
+  async function submitCompact() {
+    if (!compactTarget || compactBlock || !compactAck) return;
+    setCompactBusy(true);
+    setCompactNote(null);
+    try {
+      const result = await api<{ id: string; state: string; message: string; error: string | null }>("/api/drives/compact", {
+        method: "POST",
+        body: JSON.stringify({
+          diskId: compactTarget.diskId,
+          path: compactTarget.relativePath,
+          algorithm: compactAlgorithm,
+          confirm: true,
+        }),
+      });
+      if (result.state === "failed") {
+        setCompactNote(result.error || result.message);
+        return;
+      }
+      setCompactJobId(result.id);
+      setCompactNote(result.message);
+    } catch (error) {
+      setCompactNote(error instanceof Error ? error.message : "Сжатие не запускалось.");
+    } finally {
+      setCompactBusy(false);
+    }
+  }
+
   return (
     <div className="flex h-dvh flex-col bg-background">
       <header className="flex flex-wrap items-center gap-2 border-b px-3 py-2">
@@ -507,7 +655,7 @@ export function Dashboard() {
                     <span className="text-muted-foreground">{open && diskActive ? "▾" : "▸"}</span>
                     <span className={cn("size-1.5 rounded-full", entry.online ? "bg-seed" : "bg-muted-foreground")} />
                     <span className="min-w-0 flex-1 truncate font-medium">{entry.name}</span>
-                    <span className="shrink-0 text-[10px] tabular-nums text-muted-foreground" title={folderHint(entry.size, entry.fileCount, entry.allocated)}>
+                    <span className="shrink-0 text-[10px] tabular-nums text-muted-foreground" title={folderHint(entry.size, entry.fileCount, entry.onDisk)}>
                       {formatBytes(entry.size)}
                     </span>
                   </button>
@@ -524,7 +672,7 @@ export function Dashboard() {
                         >
                           <Folder className="size-3 shrink-0 text-amber-400" />
                           <span className="min-w-0 flex-1 truncate">{child.name}</span>
-                          <span className="shrink-0 text-[10px] tabular-nums text-muted-foreground" title={folderHint(child.size, child.fileCount, child.allocated)}>
+                          <span className="shrink-0 text-[10px] tabular-nums text-muted-foreground" title={folderHint(child.size, child.fileCount, child.onDisk)}>
                             {formatBytes(child.size)}
                           </span>
                         </button>
@@ -565,6 +713,7 @@ export function Dashboard() {
               onChange={(event) => setSortKey(event.target.value as SortKey)}
             >
               <option value="size">Размер</option>
+              <option value="ondisk">На диске</option>
               <option value="name">Имя</option>
               <option value="type">Тип</option>
               <option value="mtime">Изменён</option>
@@ -578,8 +727,8 @@ export function Dashboard() {
                 <tr className="border-b">
                   <th className="px-2 py-1.5 font-medium">Имя</th>
                   <th className="w-16 px-2 py-1.5 font-medium">Тип</th>
-                  <th className="w-40 px-2 py-1.5 text-right font-medium">Размер</th>
-                  <th className="w-24 px-2 py-1.5 text-right font-medium">Выделено</th>
+                  <th className="w-36 px-2 py-1.5 text-right font-medium">Размер</th>
+                  <th className="w-40 px-2 py-1.5 text-right font-medium">На диске</th>
                   <th className="w-32 px-2 py-1.5 font-medium">Изменён</th>
                   <th className="px-2 py-1.5 font-medium">Путь</th>
                 </tr>
@@ -629,12 +778,20 @@ export function Dashboard() {
                         <td className="px-2 py-1 text-muted-foreground">{row.kind === "dir" ? "папка" : row.extension || "файл"}</td>
                         <td
                           className="px-2 py-1 text-right whitespace-nowrap tabular-nums"
-                          title={row.kind === "dir" && row.size != null ? folderHint(row.size, row.fileCount, row.allocated) : undefined}
+                          title={row.kind === "dir" && row.size != null ? folderHint(row.size, row.fileCount, row.onDisk) : undefined}
                         >
                           {row.size == null ? "—" : formatSizeShare(row.size, query.trim() ? 0 : browse?.scopeBytes ?? 0)}
                         </td>
-                        <td className="px-2 py-1 text-right whitespace-nowrap tabular-nums text-muted-foreground">
-                          {row.allocated == null ? "—" : formatBytes(row.allocated)}
+                        <td className="px-2 py-1 text-right">
+                          <OnDiskCell
+                            size={row.size}
+                            onDisk={row.onDisk}
+                            compression={row.compression}
+                            canCompress={row.kind === "dir" && "relativePath" in row.raw}
+                            onCompress={() => {
+                              if ("diskId" in row.raw && row.kind === "dir") openCompact(row.raw as BrowseEntry);
+                            }}
+                          />
                         </td>
                         <td className="px-2 py-1 text-muted-foreground">{formatMtime(row.mtimeMs)}</td>
                         <td className="max-w-[280px] truncate px-2 py-1 font-mono text-[10px] text-muted-foreground" title={row.path}>
@@ -685,8 +842,11 @@ export function Dashboard() {
               <div className="mt-1 break-all font-mono text-[10px] text-muted-foreground">{selected.displayPath}</div>
               {"size" in selected ? (
                 <div className="mt-1 space-y-0.5 text-muted-foreground">
-                  <div>{formatBytes(selected.size)}</div>
-                  {selected.allocated != null ? <div>Выделено {formatBytes(selected.allocated)}</div> : null}
+                  <div>Размер {formatBytes(selected.size)}</div>
+                  <div>{selected.onDisk == null ? "На диске неизвестно" : `На диске ${formatBytes(selected.onDisk)}`}</div>
+                  {savingsOf(selected.size, selected.onDisk) ? (
+                    <div>Экономия {formatBytes(savingsOf(selected.size, selected.onDisk)!.bytes)} · {formatPercent(savingsOf(selected.size, selected.onDisk)!.ratio)}</div>
+                  ) : null}
                   {selected.kind === "dir" ? <div>{selected.fileCount.toLocaleString("ru-RU")} файлов</div> : null}
                 </div>
               ) : null}
@@ -740,6 +900,51 @@ export function Dashboard() {
         ))}
       </footer>
 
+
+      {compactTarget ? (
+        <div className="fixed inset-0 z-50 grid place-items-center bg-black/60 p-4" role="dialog" aria-modal="true" aria-label="Сжать папку">
+          <div className="w-full max-w-md rounded-lg border bg-background shadow-xl">
+            <div className="border-b px-3 py-2">
+              <div className="text-sm font-semibold">Сжать</div>
+              <div className="mt-1 break-all font-mono text-[10px] text-muted-foreground">{compactTarget.displayPath}</div>
+            </div>
+            <div className="space-y-3 p-3 text-xs">
+              {compactBlock ? (
+                <p>{compactBlock}</p>
+              ) : (
+                <>
+                  <p>Windows compact.exe, алгоритм WOF. Папка и режим ниже. Системные каталоги сервер отклонит.</p>
+                  <label className="block space-y-1">
+                    <span className="text-muted-foreground">Алгоритм</span>
+                    <select
+                      className="h-8 w-full rounded border border-input bg-transparent px-2"
+                      value={compactAlgorithm}
+                      onChange={(event) => setCompactAlgorithm(event.target.value as (typeof COMPACT_ALGORITHMS)[number])}
+                    >
+                      {COMPACT_ALGORITHMS.map((item) => (
+                        <option key={item} value={item}>{item}</option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="flex items-start gap-2">
+                    <input type="checkbox" className="mt-0.5" checked={compactAck} onChange={(event) => setCompactAck(event.target.checked)} />
+                    <span>Сжать именно «{compactTarget.name}» алгоритмом {compactAlgorithm}. Файлы на диске изменятся.</span>
+                  </label>
+                </>
+              )}
+              {compactNote ? <p className="text-muted-foreground">{compactNote}</p> : null}
+            </div>
+            <div className="flex justify-end gap-2 border-t px-3 py-2">
+              <Button type="button" variant="outline" size="sm" onClick={() => setCompactTarget(null)}>Закрыть</Button>
+              {compactBlock ? null : (
+                <Button type="button" size="sm" disabled={!compactAck || compactBusy || Boolean(compactJobId)} onClick={() => void submitCompact()}>
+                  {compactBusy ? "Запуск…" : "Сжать эту папку"}
+                </Button>
+              )}
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       {copyOpen ? (
         <div className="fixed inset-0 z-50 grid place-items-center bg-black/60 p-4" role="dialog" aria-modal="true" aria-label="Куда копировать">

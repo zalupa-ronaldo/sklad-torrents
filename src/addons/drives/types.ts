@@ -15,8 +15,12 @@ export interface RawIndexedFile {
   name: string;
   kind: "file" | "dir";
   size: number;
-  /** Bytes reserved on disk (NTFS allocated length). Absent when the scanner did not see $DATA. */
+  /** Allocated length of the unnamed $DATA stream. Not the WOF compressed size. */
   allocated?: number;
+  /** Bytes occupied on disk when the scanner measured them. Absent means unknown, not zero. */
+  onDisk?: number;
+  /** Set only when compression itself was identified. */
+  compression?: "wof" | "ntfs";
   mtimeMs: number;
   sidecarCategory?: MediaCategory | null;
 }
@@ -26,8 +30,11 @@ export interface IndexedFile {
   name: string;
   kind: "file" | "dir";
   size: number;
-  /** Bytes reserved on disk. Absent when the index only knows the logical size. */
+  /** Allocated length of the unnamed $DATA stream. Not the WOF compressed size. */
   allocated?: number;
+  /** Measured size on disk. Absent means unknown, not zero. */
+  onDisk?: number;
+  compression?: "wof" | "ntfs";
   mtimeMs: number;
   sidecarCategory: MediaCategory | null;
   categories: MediaCategory[];

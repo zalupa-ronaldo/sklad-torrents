@@ -1,3 +1,4 @@
+import { spawn } from "node:child_process";
 import { createReadStream, createWriteStream, existsSync, statSync } from "node:fs";
 import { readFile, writeFile, rename, mkdir, open as openFs } from "node:fs/promises";
 import path from "node:path";
@@ -8,7 +9,10 @@ import { promisify } from "node:util";
 import { createHash, randomUUID } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 
+import { systemCompactReason } from "../../src/addons/drives/compact-target.ts";
 import { executeIndexPlan } from "../../src/addons/drives/execute-index.ts";
+import { buildCompactArgv, DEFAULT_COMPACT_EXE } from "../../src/addons/media-games/compact.ts";
+import { isCompactAlgorithm } from "../../src/addons/media-games/presets.ts";
 import { selectIndexStrategy } from "../../src/addons/drives/strategy.ts";
 import { normalizeSerial, normalizeUuid } from "../../src/addons/drives/identity.ts";
 import type { CollectedVolume, HostOs, IndexPayload } from "../../src/addons/drives/types.ts";
@@ -113,6 +117,36 @@ function resolveVolumeFile(
 }
 
 
+function readJsonBody(request: IncomingMessage): Promise<Record<string, unknown>> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    let size = 0;
+    request.on("data", (chunk: Buffer) => {
+      size += chunk.length;
+      if (size > 64_000) {
+        reject(new Error("Слишком большой запрос."));
+        request.destroy();
+        return;
+      }
+      chunks.push(chunk);
+    });
+    request.on("end", () => {
+      if (chunks.length === 0) {
+        resolve({});
+        return;
+      }
+      try {
+        const parsed = JSON.parse(Buffer.concat(chunks).toString("utf8")) as unknown;
+        if (!parsed || typeof parsed !== "object") reject(new Error("Пустое тело запроса."));
+        else resolve(parsed as Record<string, unknown>);
+      } catch {
+        reject(new Error("Не удалось разобрать запрос."));
+      }
+    });
+    request.on("error", () => reject(new Error("Не удалось прочитать запрос.")));
+  });
+}
+
 function send(response: ServerResponse, status: number, body: unknown) {
   response.writeHead(status, {
     "content-type": "application/json; charset=utf-8",
@@ -137,6 +171,7 @@ export function startAgent(options: {
   let eventId = 0;
   const running = new Set<string>();
   const rebuiltEmptySizes = new Set<string>();
+  const compactJobs = new Map<string, { id: string; state: "running" | "completed" | "failed"; error: string | null; message: string; path: string; algorithm: string }>();
   let ticking = false;
   let restoreFailed = false;
   const disabled = new Set<string>();
@@ -287,6 +322,67 @@ export function startAgent(options: {
     const url = new URL(request.url || "/", "http://127.0.0.1");
     if (request.method === "GET" && url.pathname === "/v1/health") {
       send(response, 200, { ok: true, hostId: options.hostId, os: options.os, elevated, note });
+      return;
+    }
+    if (request.method === "GET" && url.pathname === "/v1/compact") {
+      const job = compactJobs.get(url.searchParams.get("id") || "");
+      if (!job) { send(response, 404, { error: "Задание сжатия не найдено." }); return; }
+      send(response, 200, job);
+      return;
+    }
+    if (request.method === "POST" && url.pathname === "/v1/compact") {
+      void (async () => {
+        try {
+          const body = await readJsonBody(request);
+          if (body.confirm !== true) { send(response, 400, { error: "Нужно явное подтверждение. Сжатие не запускалось." }); return; }
+          if (options.os !== "win32" || process.platform !== "win32") {
+            send(response, 400, { error: "Сжатие Windows запускается только на самом ПК. Здесь оно не начато." });
+            return;
+          }
+          if (!elevated) { send(response, 403, { error: "Агент без прав администратора. CompactGUI/WOF не запускался." }); return; }
+          const algorithm = String(body.algorithm || "");
+          if (!isCompactAlgorithm(algorithm)) { send(response, 400, { error: "Неизвестный алгоритм. Сжатие не запускалось." }); return; }
+          const resolved = resolveVolumeFile(volumes, String(body.serial || ""), String(body.uuid || ""), String(body.path || ""), options.os);
+          if ("error" in resolved) { send(response, resolved.status, { error: `${resolved.error} Сжатие не запускалось.` }); return; }
+          if (!/ntfs/i.test(resolved.volume.filesystem)) {
+            send(response, 400, { error: "Том не NTFS. Сжатие не запускалось." });
+            return;
+          }
+          const blocked = systemCompactReason(resolved.absolute);
+          if (blocked) { send(response, 400, { error: `${blocked} Сжатие не запускалось.` }); return; }
+          let info;
+          try { info = statSync(resolved.absolute); } catch {
+            send(response, 404, { error: "Папка не найдена на томе. Сжатие не запускалось." });
+            return;
+          }
+          if (!info.isDirectory()) { send(response, 400, { error: "Сжимать можно только папку. Сжатие не запускалось." }); return; }
+          const binary = DEFAULT_COMPACT_EXE;
+          if (!existsSync(binary)) { send(response, 500, { error: "Программа сжатия Windows не найдена. Сжатие не запускалось." }); return; }
+          const argv = buildCompactArgv({ os: "win32", binary, folder: resolved.absolute, algorithm });
+          const id = randomUUID();
+          const job = { id, state: "running" as const, error: null, message: "Сжатие выполняется.", path: resolved.absolute, algorithm };
+          compactJobs.set(id, job);
+          const child = spawn(argv[0], argv.slice(1), { windowsHide: true, stdio: ["ignore", "ignore", "pipe"] });
+          let stderr = "";
+          child.stderr?.on("data", (chunk: Buffer) => {
+            stderr = `${stderr}${chunk.toString("utf8")}`.slice(-500);
+          });
+          child.on("error", () => {
+            compactJobs.set(id, { ...job, state: "failed", error: "Не удалось запустить сжатие Windows.", message: "Сжатие не выполнилось." });
+          });
+          child.on("exit", (code) => {
+            if (code === 0) {
+              compactJobs.set(id, { ...job, state: "completed", error: null, message: "Сжатие завершилось. Размеры обновятся после перечитывания MFT." });
+              void indexVolume(resolved.volume);
+            } else {
+              compactJobs.set(id, { ...job, state: "failed", error: stderr.trim() || `Сжатие завершилось с кодом ${code}.`, message: "Сжатие не выполнилось." });
+            }
+          });
+          send(response, 202, job);
+        } catch (error) {
+          send(response, 400, { error: error instanceof Error ? error.message : "Сжатие не запускалось." });
+        }
+      })();
       return;
     }
     if (request.method === "POST" && url.pathname === "/v1/rescan") {

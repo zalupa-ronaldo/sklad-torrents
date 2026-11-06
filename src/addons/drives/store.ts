@@ -1,4 +1,4 @@
-import { mkdir, readFile, rename, writeFile, stat } from "node:fs/promises";
+import { mkdir, readFile, rename, unlink, writeFile, stat } from "node:fs/promises";
 import path from "node:path";
 
 import { dataDir } from "@/lib/qbittorrent/store";
@@ -67,6 +67,11 @@ export async function writeCatalog(file: CatalogFile): Promise<void> {
   const tmp = `${target}.${process.pid}.tmp`;
   await writeFile(tmp, JSON.stringify(file), "utf8");
   await rename(tmp, target);
+  try {
+    await unlink(`${target}.overlay`);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
   const info = await stat(target);
   const baseStamp = `${info.mtimeMs}:${info.size}`;
   catalogCache.set(target, { stamp: `${baseStamp}|`, baseStamp, file });

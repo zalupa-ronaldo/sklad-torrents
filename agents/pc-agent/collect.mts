@@ -14,7 +14,8 @@ export async function collectWindows(): Promise<{ elevated: boolean; volumes: Co
   }
   const request = { bin: "powershell.exe", args: ["-NoProfile", "-NonInteractive", "-Command", WINDOWS_VOLUME_SCRIPT] };
   assertSpawnAllowed(request);
-  const result = await exec(request.bin, request.args, { timeout: 30_000, windowsHide: true, maxBuffer: 12_000_000 });
+  // A busy PC often needs longer than 30s for the volume script. Keep 120s so a later install does not drop it.
+  const result = await exec(request.bin, request.args, { timeout: 120_000, windowsHide: true, maxBuffer: 12_000_000 });
   const report = JSON.parse(result.stdout) as WindowsVolumeReport;
   const parsed = parseWindowsVolumes(report);
   return { elevated: parsed.elevated, volumes: parsed.volumes, note: "" };

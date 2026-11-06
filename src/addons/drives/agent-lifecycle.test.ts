@@ -89,6 +89,32 @@ it("rebuilds a saved NTFS snapshot once when every file size is zero", async () 
   }
 });
 
+it("does not launch compact.exe when the process is not Windows", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "sklad-agent-compact-"));
+  process.env.SKLAD_AGENT_SNAPSHOT = path.join(directory, "snapshot.gz");
+  vi.mocked(executeIndexPlan).mockResolvedValue({ called: [], payload: { state: "complete", progress: 1, files: [] } });
+  const collect = vi.fn(async () => ({ elevated: true, note: "", volumes: [{ ...volume }] }));
+  const server = startAgent({ port: 0, hostId: "test", hostName: "test", os: "win32", collect, intervalMs: 60_000 });
+  await once(server, "listening");
+  const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  try {
+    await vi.waitFor(() => expect(collect).toHaveBeenCalled());
+    const calls = vi.mocked(executeIndexPlan).mock.calls.length;
+    const response = await fetch(`${base}/v1/compact`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ confirm: true, serial: "test", uuid: "abc", path: "Games/Control", algorithm: "LZX" }),
+    });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ error: expect.stringMatching(/Сжатие Windows/) });
+    expect(vi.mocked(executeIndexPlan).mock.calls.length).toBe(calls);
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await sleep(30);
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 it("client uses matching revisions without downloading or reapplying their tree", async () => {
   const disk = buildMockCatalog([])[0];
   disk.indexRevision = "same";

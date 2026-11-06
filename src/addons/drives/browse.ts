@@ -1,3 +1,4 @@
+import { rollupOnDisk, type CompressionKind, type FolderCompression } from "@/addons/drives/ondisk";
 import { joinDisplay, normalizeRelative, parentRelative } from "@/addons/drives/paths";
 import { displayDiskName, isBrowsableRecord } from "@/addons/drives/inventory";
 import { mountPathsOf, online } from "@/addons/drives/reconcile";
@@ -14,8 +15,11 @@ export interface BrowseEntry {
   kind: "file" | "dir";
   /** Recursive for dirs, file size for files. */
   size: number;
-  /** Unknown allocated → null (UI shows —). */
+  /** Unknown allocated → null (UI shows —). Unnamed $DATA allocation, not WOF usage. */
   allocated: number | null;
+  /** Measured bytes on disk. Null means unknown, not zero and not a saving. */
+  onDisk: number | null;
+  compression: FolderCompression | null;
   mtimeMs: number;
   extension: string;
   categories: MediaCategory[];
@@ -45,12 +49,14 @@ interface FolderNode {
   size: number;
   /** Null until at least one descendant reports an allocated length. */
   allocated: number | null;
+  onDisk: number | null;
+  compression: FolderCompression | null;
   fileCount: number;
   dirCount: number;
   mtimeMs: number;
   categories: Set<MediaCategory>;
   dirs: Map<string, FolderNode>;
-  files: { name: string; relativePath: string; size: number; allocated: number | null; mtimeMs: number; categories: MediaCategory[]; extension: string }[];
+  files: { name: string; relativePath: string; size: number; allocated: number | null; onDisk: number | null; compression: CompressionKind | null; mtimeMs: number; categories: MediaCategory[]; extension: string }[];
 }
 
 interface DiskTree {
@@ -78,6 +84,8 @@ function emptyNode(name: string, relativePath: string): FolderNode {
     relativePath,
     size: 0,
     allocated: null,
+    onDisk: null,
+    compression: null,
     fileCount: 0,
     dirCount: 0,
     mtimeMs: 0,
@@ -124,6 +132,8 @@ export function buildDiskTree(disk: DiskRecord): DiskTree {
         relativePath: relative,
         size: file.size > 0 ? file.size : 0,
         allocated: typeof file.allocated === "number" ? file.allocated : null,
+        onDisk: typeof file.onDisk === "number" ? file.onDisk : null,
+        compression: file.compression === "wof" || file.compression === "ntfs" ? file.compression : null,
         mtimeMs: file.mtimeMs || 0,
         categories: file.categories,
         extension: extensionOf(name, "file"),
@@ -165,8 +175,14 @@ export function buildDiskTree(disk: DiskRecord): DiskTree {
       if (child.mtimeMs > mtimeMs) mtimeMs = child.mtimeMs;
       for (const category of child.categories) node.categories.add(category);
     }
+    const disk = rollupOnDisk([
+      ...node.files.map((file) => ({ size: file.size, onDisk: file.onDisk, compression: file.compression })),
+      ...[...node.dirs.values()].map((child) => ({ size: child.size, onDisk: child.onDisk, compression: child.compression })),
+    ]);
     node.size = size;
     node.allocated = allocatedKnown ? allocated : null;
+    node.onDisk = disk.onDisk;
+    node.compression = disk.compression;
     node.fileCount = fileCount;
     node.dirCount = dirCount;
     node.mtimeMs = mtimeMs;
@@ -221,6 +237,8 @@ function listChildren(disk: DiskRecord, relativePath: string): BrowseEntry[] {
       kind: "dir" as const,
       size: child.size,
       allocated: child.allocated,
+      onDisk: child.onDisk,
+      compression: child.compression,
       mtimeMs: child.mtimeMs,
       extension: "",
       categories: [...child.categories].slice(0, 6),
@@ -237,6 +255,8 @@ function listChildren(disk: DiskRecord, relativePath: string): BrowseEntry[] {
       kind: "file" as const,
       size: file.size,
       allocated: file.allocated,
+      onDisk: file.onDisk,
+      compression: file.compression,
     mtimeMs: file.mtimeMs,
     extension: file.extension,
     categories: file.categories,
@@ -275,6 +295,8 @@ export function browseRoots(disks: readonly DiskRecord[], limit = 200, cursor = 
       kind: "dir",
       size: tree.root.size,
       allocated: tree.root.allocated,
+      onDisk: tree.root.onDisk,
+      compression: tree.root.compression,
       mtimeMs: tree.root.mtimeMs,
       extension: "",
       categories: [...tree.root.categories].slice(0, 6),

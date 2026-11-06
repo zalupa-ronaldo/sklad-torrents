@@ -74,6 +74,23 @@ describe("browse aggregates", () => {
     expect(page.scopeBytes).toBe(5_030);
   });
 
+  it("does not invent folder savings when one file has no measured on-disk size", () => {
+    const mixed: IndexedFile[] = [
+      { relativePath: "Games/a.bin", name: "a.bin", kind: "file", size: 1_000, onDisk: 400, compression: "wof", mtimeMs: 1, sidecarCategory: null, categories: [] },
+      { relativePath: "Games/b.bin", name: "b.bin", kind: "file", size: 1_000, mtimeMs: 1, sidecarCategory: null, categories: [] },
+    ];
+    const page = browseDisk([disk({ files: mixed })], "disk-s", "");
+    expect(page.entries[0]?.size).toBe(2_000);
+    expect(page.entries[0]?.onDisk).toBeNull();
+    const known: IndexedFile[] = [
+      { relativePath: "Games/a.bin", name: "a.bin", kind: "file", size: 1_000, onDisk: 400, compression: "wof", mtimeMs: 1, sidecarCategory: null, categories: [] },
+      { relativePath: "Games/b.bin", name: "b.bin", kind: "file", size: 1_000, onDisk: 1_000, mtimeMs: 1, sidecarCategory: null, categories: [] },
+    ];
+    const summed = browseDisk([disk({ indexRevision: "known", files: known })], "disk-s", "");
+    expect(summed.entries[0]?.onDisk).toBe(1_400);
+    expect(summed.entries[0]?.compression).toBe("wof");
+  });
+
   it("exposes disk roots including C: and skips empty Z:", () => {
     const c = disk({
       id: "disk-c",
