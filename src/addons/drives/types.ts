@@ -1,6 +1,6 @@
 export type HostOs = "darwin" | "win32";
 export type PathStyle = "posix" | "win32";
-export type MediaCategory = "torrent" | "game" | "media";
+export type MediaCategory = "torrent" | "game" | "media" | "series" | "installer" | "music" | "software" | "documents";
 export type IndexStrategy = "mft-usn" | "walk";
 export type ScanStatus = "idle" | "running" | "paused" | "complete" | "error";
 export type DriveMode = "mock" | "agents";

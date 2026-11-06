@@ -10,7 +10,7 @@ const TIMEOUT_MS = 8_000;
 /**
  * Speaks the qBittorrent WebUI API (v2). qBittorrent 4.x uses pause/resume;
  * qBittorrent 5 (WebAPI >= 2.11) renamed those to stop/start.
- * Requests always send Referer/Origin so CSRF protection can stay enabled.
+ * Requests always send Referer; Origin is omitted so API clients are not blocked by CSRF origin checks.
  */
 export class HttpQbittorrentClient implements QbittorrentClient {
   readonly kind = "http" as const;
@@ -39,15 +39,16 @@ export class HttpQbittorrentClient implements QbittorrentClient {
   async probe(): Promise<QbProbe> {
     if (this.probeCache && Date.now() - this.probeCache.at < 60_000) return this.probeCache.value;
     await this.ready();
+    // app/version and webapiVersion are plain text in real qBittorrent; preferences stays JSON.
     const [appVersion, webapiVersion, prefs] = await Promise.all([
-      this.getJson<string>("/api/v2/app/version"),
-      this.getJson<string>("/api/v2/app/webapiVersion"),
+      this.getText("/api/v2/app/version"),
+      this.getText("/api/v2/app/webapiVersion"),
       this.getJson<{ save_path?: string }>("/api/v2/app/preferences"),
     ]);
-    this.webapiVersion = String(webapiVersion);
+    this.webapiVersion = webapiVersion;
     const value = {
-      appVersion: String(appVersion),
-      webapiVersion: String(webapiVersion),
+      appVersion,
+      webapiVersion,
       defaultSavePath: String(prefs.save_path ?? ""),
     };
     this.probeCache = { at: Date.now(), value };
@@ -155,8 +156,8 @@ export class HttpQbittorrentClient implements QbittorrentClient {
 
   private async webapi(): Promise<string> {
     if (this.webapiVersion) return this.webapiVersion;
-    const version = await this.getJson<string>("/api/v2/app/webapiVersion");
-    this.webapiVersion = String(version);
+    const version = await this.getText("/api/v2/app/webapiVersion");
+    this.webapiVersion = version;
     return this.webapiVersion;
   }
 
@@ -180,14 +181,39 @@ export class HttpQbittorrentClient implements QbittorrentClient {
       retry: false,
     });
     const text = (await res.text()).trim();
-    if (!res.ok || /^fails\.?$/i.test(text) || (text && !/^ok\.?$/i.test(text))) {
+    // Classic WebUI returns "Ok." / "Fails."; qBittorrent 5 may answer 204 with an empty body and SID cookie.
+    const accepted = res.ok && (!text || /^ok\.?$/i.test(text));
+    if (!accepted || /^fails\.?$/i.test(text)) {
       this.cookie = null;
       throw new QbittorrentError("auth", "qBittorrent отклонил логин или пароль Web UI.");
     }
     this.authed = true;
   }
 
+  private async getText(path: string): Promise<string> {
+    const trimmed = await this.readOkBody(path);
+    // Real qBittorrent returns plain text; the fake adapter may wrap a JSON string.
+    if (trimmed.startsWith("\"")) {
+      try {
+        const parsed = JSON.parse(trimmed);
+        if (typeof parsed === "string") return parsed;
+      } catch {
+        // fall through to plain text
+      }
+    }
+    return trimmed;
+  }
+
   private async getJson<T>(path: string): Promise<T> {
+    const trimmed = await this.readOkBody(path);
+    try {
+      return JSON.parse(trimmed) as T;
+    } catch {
+      throw new QbittorrentError("api", "qBittorrent вернул не JSON.");
+    }
+  }
+
+  private async readOkBody(path: string): Promise<string> {
     const res = await this.request(path);
     const text = await res.text();
     if (res.status === 403) {
@@ -207,11 +233,7 @@ export class HttpQbittorrentClient implements QbittorrentClient {
         "Ответ не похож на Web API qBittorrent. Нужен корень Web UI, например http://127.0.0.1:8080",
       );
     }
-    try {
-      return JSON.parse(trimmed) as T;
-    } catch {
-      throw new QbittorrentError("api", "qBittorrent вернул не JSON.");
-    }
+    return trimmed;
   }
 
   private async form(path: string, fields: Record<string, string>): Promise<void> {
@@ -256,12 +278,13 @@ export class HttpQbittorrentClient implements QbittorrentClient {
   ): Promise<Response> {
     const headers = new Headers();
     headers.set("Referer", `${this.root}/`);
-    headers.set("Origin", this.origin);
+    // qBittorrent accepts its WebUI origin; an omitted Origin is also accepted for API clients.
+    // Do not force an Origin when the server has CSRF origin checks enabled.
     if (this.cookie) headers.set("Cookie", this.cookie);
     let body = init.body ?? null;
     if (init.form) {
-      headers.set("Content-Type", "application/x-www-form-urlencoded;charset=UTF-8");
-      body = new URLSearchParams(init.form).toString();
+      headers.set("Content-Type", "application/x-www-form-urlencoded");
+      body = new URLSearchParams(init.form);
     }
     let res: Response;
     try {
@@ -298,7 +321,7 @@ export class HttpQbittorrentClient implements QbittorrentClient {
     const cookies = listed.length > 0 ? listed : [res.headers.get("set-cookie") || ""];
     for (const cookie of cookies) {
       const pair = cookie.split(";")[0]?.trim();
-      if (pair?.startsWith("SID=")) this.cookie = pair;
+      if (pair && /^(?:SID|QBT_SID_\d+)=/.test(pair)) this.cookie = pair;
     }
   }
 }

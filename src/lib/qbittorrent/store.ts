@@ -44,7 +44,7 @@ export function toPublic(host: HostRecord): HostPublic {
 
 export async function loadHosts(): Promise<HostRecord[]> {
   const custom = await readCustomHosts();
-  return [...demoHosts(), ...custom];
+  return process.env.SKLAD_REAL_ONLY === "1" ? custom : [...demoHosts(), ...custom];
 }
 
 export async function getHost(id: string): Promise<HostRecord | null> {

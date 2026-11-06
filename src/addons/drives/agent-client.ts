@@ -38,7 +38,7 @@ export async function pollAgent(agent: AgentEndpoint): Promise<HostObservation> 
   const base = assertHttpUrl(agent.url);
   const response = await fetch(`${base}/v1/volumes`, {
     cache: "no-store",
-    signal: AbortSignal.timeout(5000),
+    signal: AbortSignal.timeout(120000),
   });
   if (!response.ok) {
     throw new DriveError(502, `${agent.name}: агент ответил ${response.status}.`);

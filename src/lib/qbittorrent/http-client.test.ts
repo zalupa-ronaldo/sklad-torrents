@@ -53,7 +53,7 @@ describe("qBittorrent HTTP adapter", () => {
     });
     const info = fake.calls.find((call) => call.path.startsWith("/api/v2/torrents/info"));
     expect(info?.referer).toBe(`${fake.url}/`);
-    expect(info?.origin).toBe(fake.url);
+    expect(info?.origin).toBe("");
     expect(info?.cookie).toContain("SID=sid-a");
     const files = await client.listFiles(HASH);
     expect(files[0].name).toBe("Fixture Movie/movie.mkv");

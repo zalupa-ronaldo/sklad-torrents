@@ -20,7 +20,7 @@ function withLock<T>(fn: () => Promise<T>): Promise<T> {
 }
 
 function counts(disk: DiskRecord): Record<MediaCategory, number> {
-  const tally = { torrent: 0, game: 0, media: 0 };
+  const tally = { torrent: 0, game: 0, media: 0, series: 0, installer: 0, music: 0, software: 0, documents: 0 };
   for (const file of disk.files) {
     if (file.kind !== "file" || file.name === "sklad-catalog.json") continue;
     for (const category of file.categories) tally[category] += 1;

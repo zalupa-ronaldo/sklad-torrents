@@ -17,7 +17,9 @@ export function searchDisks(disks: readonly DiskRecord[], query: string, limit =
     for (const file of disk.files) {
       if (file.name === "sklad-catalog.json") continue;
       const blob = `${file.name} ${file.relativePath}`.toLowerCase();
-      if (!blob.includes(needle)) continue;
+      const categoryNeedles: Record<string,string[]> = { фильм:["media"], фильмы:["media"], кино:["media"], сериал:["series"], сериалы:["series"], игра:["game"], игры:["game"], установщик:["installer"], установщики:["installer"], музыка:["music"], софт:["software"], программы:["software"], документы:["documents"], торрент:["torrent"] };
+      const categoryHit = (categoryNeedles[needle] ?? []).some((category) => file.categories.includes(category as never));
+      if (!blob.includes(needle) && !categoryHit) continue;
       hits.push({
         diskId: disk.id,
         label: disk.label,

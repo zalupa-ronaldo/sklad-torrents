@@ -232,7 +232,7 @@ export async function readNtfsVolume(
   readAt: (offset: number, length: number) => Promise<Buffer>,
   options?: { maxRecords?: number },
 ): Promise<{ files: RawIndexedFile[]; complete: boolean }> {
-  const maxRecords = options?.maxRecords ?? 200_000;
+  const maxRecords = options?.maxRecords ?? 5_000_000;
   const boot = await readBlock(readAt, 0, 512);
   const geometry = parseBootSector(boot);
   if (!geometry) return { files: [], complete: false };

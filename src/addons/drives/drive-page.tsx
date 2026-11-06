@@ -15,7 +15,12 @@ import { toast } from "sonner";
 const CATEGORY_LABEL: Record<MediaCategory, string> = {
   torrent: "торрент",
   game: "игра",
-  media: "медиа",
+  media: "фильм",
+  series: "сериал",
+  installer: "установщик",
+  music: "музыка",
+  software: "софт",
+  documents: "документы",
 };
 
 function formatWhen(iso: string): string {
@@ -142,7 +147,7 @@ export function DrivePage() {
                 setSearching(true);
               }
             }}
-            placeholder="Файл на любом диске, даже если он на полке"
+            placeholder="Файл, фильм, сериал, игра, установщик, музыка…"
             className="pl-8"
             aria-label="Поиск по полке дисков"
           />
