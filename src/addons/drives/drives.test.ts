@@ -462,6 +462,22 @@ Volume Free Space:         1.2 TB (1200000000000 Bytes)
     });
     expect(read.complete).toBe(true);
     expect(read.files.some((entry) => entry.relativePath === "Cinema/movie.mkv")).toBe(true);
+    const sized = filesFromRecords(
+      [
+        makeRecord({ parent: 5, name: "movie.mkv", size: 0, data: { size: 5_000, allocated: 8_192 } }),
+        makeRecord({ parent: 5, name: "note.txt", size: 99, data: { size: 4, allocated: 4, resident: true } }),
+        makeRecord({ parent: 5, name: "sparse.bin", size: 0 }),
+        makeRecord({ parent: 5, name: "big.mkv", size: 0 }),
+        makeRecord({ name: "", base: 3, data: { size: 9_000, allocated: 12_288 } }),
+      ],
+      1024,
+      512,
+    );
+    expect(sized.find((entry) => entry.name === "movie.mkv")).toMatchObject({ size: 5_000, allocated: 8_192 });
+    expect(sized.find((entry) => entry.name === "note.txt")).toMatchObject({ size: 4, allocated: 4 });
+    expect(sized.find((entry) => entry.name === "sparse.bin")?.size).toBe(0);
+    expect(sized.find((entry) => entry.name === "sparse.bin")?.allocated).toBeUndefined();
+    expect(sized.find((entry) => entry.name === "big.mkv")).toMatchObject({ size: 9_000, allocated: 12_288 });
     expect(decodeRunlist(Buffer.from([0x11, 0x04, 0x0a, 0x00]))).toEqual([{ lcn: 10, length: 4 }]);
     const delta = parseFsutilUsn("File name: Cinema/movie.mkv\nReason: 0x80000100\n");
     expect(delta.complete).toBe(true);
@@ -469,28 +485,59 @@ Volume Free Space:         1.2 TB (1200000000000 Bytes)
   });
 });
 
-function makeRecord(options: { parent: number; name: string; directory?: boolean; size?: number }): Buffer {
+function makeRecord(options: {
+  parent?: number;
+  name: string;
+  directory?: boolean;
+  size?: number;
+  /** Non-zero base file reference: this record is an extension of that MFT index. */
+  base?: number;
+  data?: { size: number; allocated: number; resident?: boolean };
+}): Buffer {
   const record = Buffer.alloc(1024);
   record.write("FILE", 0, "latin1");
   record.writeUInt16LE(0x30, 4);
   record.writeUInt16LE(1, 6);
   record.writeUInt16LE(0x38, 0x14);
   record.writeUInt16LE(options.directory ? 0x03 : 0x01, 0x16);
-  const name = Buffer.from(options.name, "utf16le");
-  const valueLength = 0x42 + name.length;
-  const padded = Math.ceil((0x18 + valueLength) / 8) * 8;
-  const offset = 0x38;
-  record.writeUInt32LE(0x30, offset);
-  record.writeUInt32LE(padded, offset + 4);
-  record.writeUInt32LE(valueLength, offset + 0x10);
-  record.writeUInt16LE(0x18, offset + 0x14);
-  const value = offset + 0x18;
-  record.writeUInt32LE(options.parent, value);
-  record.writeBigUInt64LE(BigInt(options.size ?? 0), value + 0x30);
-  record.writeUInt8(options.name.length, value + 0x40);
-  record.writeUInt8(1, value + 0x41);
-  name.copy(record, value + 0x42);
-  record.writeUInt32LE(0xffffffff, offset + padded);
+  if (options.base) record.writeUInt32LE(options.base, 0x20);
+  let cursor = 0x38;
+  if (options.name) {
+    const name = Buffer.from(options.name, "utf16le");
+    const valueLength = 0x42 + name.length;
+    const padded = Math.ceil((0x18 + valueLength) / 8) * 8;
+    record.writeUInt32LE(0x30, cursor);
+    record.writeUInt32LE(padded, cursor + 4);
+    record.writeUInt32LE(valueLength, cursor + 0x10);
+    record.writeUInt16LE(0x18, cursor + 0x14);
+    const value = cursor + 0x18;
+    record.writeUInt32LE(options.parent ?? 0, value);
+    record.writeBigUInt64LE(BigInt(options.size ?? 0), value + 0x30);
+    record.writeUInt8(options.name.length, value + 0x40);
+    record.writeUInt8(1, value + 0x41);
+    name.copy(record, value + 0x42);
+    cursor += padded;
+  }
+  if (options.data) {
+    if (options.data.resident) {
+      const length = 0x18;
+      record.writeUInt32LE(0x80, cursor);
+      record.writeUInt32LE(length, cursor + 4);
+      record.writeUInt8(0, cursor + 8);
+      record.writeUInt32LE(options.data.size, cursor + 0x10);
+      record.writeUInt16LE(0x18, cursor + 0x14);
+      cursor += length;
+    } else {
+      const length = 0x40;
+      record.writeUInt32LE(0x80, cursor);
+      record.writeUInt32LE(length, cursor + 4);
+      record.writeUInt8(1, cursor + 8);
+      record.writeBigUInt64LE(BigInt(options.data.allocated), cursor + 0x28);
+      record.writeBigUInt64LE(BigInt(options.data.size), cursor + 0x30);
+      cursor += length;
+    }
+  }
+  record.writeUInt32LE(0xffffffff, cursor);
   return record;
 }
 

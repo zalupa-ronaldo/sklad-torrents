@@ -1,4 +1,5 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { gzipSync } from "node:zlib";
 import os from "node:os";
 import path from "node:path";
 import { once } from "node:events";
@@ -39,6 +40,53 @@ it("retains an in-flight volume across collection ticks, publishes pages, and ne
     expect(page.files[0].name).toBe("a.txt");
     expect((await fetch(`${base}/v1/files?serial=test&uuid=abc&revision=old`)).status).toBe(409);
   } finally { await new Promise<void>((resolve) => server.close(() => resolve())); await sleep(30); await rm(directory, { recursive: true, force: true }); }
+});
+
+it("rebuilds a saved NTFS snapshot once when every file size is zero", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "sklad-agent-sizes-"));
+  const snapshotPath = path.join(directory, "snapshot.gz");
+  process.env.SKLAD_AGENT_SNAPSHOT = snapshotPath;
+  await writeFile(snapshotPath, gzipSync(JSON.stringify({
+    volumes: [{
+      ...volume,
+      index: {
+        state: "complete",
+        progress: 1,
+        strategy: "mft-usn",
+        revision: "old-zero",
+        files: [{ relativePath: "Windows/notepad.exe", name: "notepad.exe", kind: "file", size: 0, mtimeMs: 0 }],
+      },
+      indexedAt: Date.now(),
+      usnStart: null,
+      freeAtIndex: volume.freeBytes,
+    }],
+  })));
+  let finish!: (value: Awaited<ReturnType<typeof executeIndexPlan>>) => void;
+  vi.mocked(executeIndexPlan).mockReturnValue(new Promise((resolve) => { finish = resolve; }) as ReturnType<typeof executeIndexPlan>);
+  const collect = vi.fn(async () => ({ elevated: true, note: "", volumes: [{ ...volume }] }));
+  const server = startAgent({ port: 0, hostId: "test", hostName: "test", os: "win32", collect, intervalMs: 10 });
+  await once(server, "listening");
+  try {
+    await vi.waitFor(() => expect(executeIndexPlan).toHaveBeenCalledOnce());
+    finish({
+      called: ["readMft"],
+      payload: {
+        state: "complete",
+        progress: 1,
+        strategy: "mft-usn",
+        files: [{ relativePath: "Windows/notepad.exe", name: "notepad.exe", kind: "file", size: 280_000, mtimeMs: 0 }],
+      },
+    });
+    await sleep(120);
+    expect(executeIndexPlan).toHaveBeenCalledOnce();
+    const metadata = await (await fetch(`http://127.0.0.1:${(server.address() as AddressInfo).port}/v1/volumes?metadata=1`)).json();
+    expect(metadata.volumes[0].index.recordCount).toBe(1);
+    expect(metadata.volumes[0].index.state).toBe("complete");
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await sleep(30);
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 it("client uses matching revisions without downloading or reapplying their tree", async () => {

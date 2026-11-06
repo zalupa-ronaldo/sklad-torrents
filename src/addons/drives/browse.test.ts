@@ -54,6 +54,24 @@ describe("browse aggregates", () => {
     expect(page.entries[0]?.name).toBe("Hades");
     expect(page.entries[0]?.size).toBe(200);
     expect(page.entries.map((e) => e.name)).toContain("RimWorld");
+    expect(page.scopeBytes).toBe(350);
+  });
+
+  it("sorts folders by summed bytes, not by how many files they contain", () => {
+    const mixed: IndexedFile[] = [
+      { relativePath: "small/a.bin", name: "a.bin", kind: "file", size: 10, mtimeMs: 1, sidecarCategory: null, categories: [] },
+      { relativePath: "small/b.bin", name: "b.bin", kind: "file", size: 10, mtimeMs: 1, sidecarCategory: null, categories: [] },
+      { relativePath: "small/c.bin", name: "c.bin", kind: "file", size: 10, mtimeMs: 1, sidecarCategory: null, categories: [] },
+      { relativePath: "big/movie.mkv", name: "movie.mkv", kind: "file", size: 5_000, allocated: 8_192, mtimeMs: 1, sidecarCategory: null, categories: [] },
+    ];
+    const page = browseDisk([disk({ files: mixed })], "disk-s", "");
+    expect(page.entries.map((entry) => entry.name)).toEqual(["big", "small"]);
+    expect(page.entries[0]?.size).toBe(5_000);
+    expect(page.entries[0]?.allocated).toBe(8_192);
+    expect(page.entries[0]?.fileCount).toBe(1);
+    expect(page.entries[1]?.size).toBe(30);
+    expect(page.entries[1]?.fileCount).toBe(3);
+    expect(page.scopeBytes).toBe(5_030);
   });
 
   it("exposes disk roots including C: and skips empty Z:", () => {

@@ -46,6 +46,19 @@ function volumeKey(volume: { serial: string; volumeUuid: string }): string {
   return `${volume.serial}|${volume.volumeUuid}`;
 }
 
+/** MFT snapshots that stored only $FILE_NAME lengths are all zeros. One rebuild picks up $DATA sizes. */
+function snapshotHasNoSizes(index: IndexPayload | null | undefined): boolean {
+  const files = index?.files;
+  if (!files || files.length === 0) return false;
+  let sawFile = false;
+  for (const file of files) {
+    if (file.kind === "dir") continue;
+    sawFile = true;
+    if (typeof file.size === "number" && file.size > 0) return false;
+  }
+  return sawFile;
+}
+
 /** Relative path only: no abs, no .., no NUL. Slash-normalized. */
 function safeRelativePath(raw: string | null): string | null {
   if (!raw) return null;
@@ -123,6 +136,7 @@ export function startAgent(options: {
   const events: AgentEvent[] = [];
   let eventId = 0;
   const running = new Set<string>();
+  const rebuiltEmptySizes = new Set<string>();
   let ticking = false;
   let restoreFailed = false;
   const disabled = new Set<string>();
@@ -153,9 +167,10 @@ export function startAgent(options: {
     if (events.length > 400) events.shift();
   }
 
-  async function indexVolume(volume: TrackedVolume) {
+  async function indexVolume(volume: TrackedVolume, sizeRebuild = false) {
     const key = volumeKey(volume);
     if (running.has(key) || disabled.has((volume.letter ?? "").toUpperCase())) return;
+    if (sizeRebuild) rebuiltEmptySizes.add(key);
     running.add(key);
     const previousIndex = volume.index;
     volume.index = {
@@ -259,9 +274,12 @@ export function startAgent(options: {
     for (const volume of volumes) {
       // Complete snapshots do not expire. Free-space changes are not proof of a
       // pathname change; never turn a UI refresh into another full MFT read.
+      // A snapshot whose every file is 0 bytes is the old $FILE_NAME reader and is rebuilt once.
+      const key = volumeKey(volume);
+      const rebuildSizes = snapshotHasNoSizes(volume.index) && !rebuiltEmptySizes.has(key);
       const needs = !restoreFailed && !disabled.has((volume.letter ?? "").toUpperCase()) && !volume.busy &&
-        (!volume.index || (volume.index.state === "paused" && !volume.index.files));
-      if (needs) void indexVolume(volume);
+        (!volume.index || (volume.index.state === "paused" && !volume.index.files) || rebuildSizes);
+      if (needs) void indexVolume(volume, rebuildSizes);
     }
   }
 

@@ -19,45 +19,52 @@ function withLock<T>(fn: () => Promise<T>): Promise<T> {
   return run;
 }
 
-const summaryCache = new WeakMap<DiskRecord["files"], { tally: Record<MediaCategory, number>; files: number }>();
-function counts(disk: DiskRecord): Record<MediaCategory, number> {
+const summaryCache = new WeakMap<DiskRecord["files"], { tally: Record<MediaCategory, number>; files: number; bytes: number }>();
+function summaryOf(disk: DiskRecord): { tally: Record<MediaCategory, number>; files: number; bytes: number } {
   const cached = summaryCache.get(disk.files);
-  if (cached) return cached.tally;
+  if (cached) return cached;
   const tally = { torrent: 0, game: 0, media: 0, series: 0, installer: 0, music: 0, software: 0, documents: 0 };
+  let bytes = 0;
   for (const file of disk.files) {
     if (file.kind !== "file" || file.name === "sklad-catalog.json") continue;
+    if (file.size > 0) bytes += file.size;
     for (const category of file.categories) tally[category] += 1;
   }
-  summaryCache.set(disk.files, { tally, files: fileCount(disk.files) });
-  return tally;
+  const summary = { tally, files: fileCount(disk.files), bytes };
+  summaryCache.set(disk.files, summary);
+  return summary;
 }
 
 export function toView(disks: readonly DiskRecord[]): DiskView[] {
   const byId = new Map(disks.map((disk) => [disk.id, disk]));
-  return disks.map((disk) => ({
-    id: disk.id,
-    label: disk.label,
-    namedByUser: disk.namedByUser,
-    volumeName: disk.volumeName,
-    serial: disk.serial,
-    volumeUuid: disk.volumeUuid,
-    filesystem: disk.filesystem,
-    totalBytes: disk.totalBytes,
-    freeBytes: disk.freeBytes,
-    online: online(disk),
-    lastSeenAt: disk.lastSeenAt,
-    lastHostId: disk.lastHostId,
-    lastHostName: disk.lastHostName,
-    mountPaths: mountPathsOf(disk),
-    lastMountPath: disk.lastMountPath,
-    priorMountPath: disk.priorMountPath,
-    duplicateMounts: disk.duplicateMounts,
-    possibleClone: disk.possibleClone,
-    clonePeerLabels: disk.cloneOfIds.map((id) => byId.get(id)?.label).filter((label): label is string => Boolean(label)),
-    scan: disk.scan,
-    categoryCounts: counts(disk),
-    fileCount: summaryCache.get(disk.files)!.files,
-  }));
+  return disks.map((disk) => {
+    const summary = summaryOf(disk);
+    return {
+      id: disk.id,
+      label: disk.label,
+      namedByUser: disk.namedByUser,
+      volumeName: disk.volumeName,
+      serial: disk.serial,
+      volumeUuid: disk.volumeUuid,
+      filesystem: disk.filesystem,
+      totalBytes: disk.totalBytes,
+      freeBytes: disk.freeBytes,
+      online: online(disk),
+      lastSeenAt: disk.lastSeenAt,
+      lastHostId: disk.lastHostId,
+      lastHostName: disk.lastHostName,
+      mountPaths: mountPathsOf(disk),
+      lastMountPath: disk.lastMountPath,
+      priorMountPath: disk.priorMountPath,
+      duplicateMounts: disk.duplicateMounts,
+      possibleClone: disk.possibleClone,
+      clonePeerLabels: disk.cloneOfIds.map((id) => byId.get(id)?.label).filter((label): label is string => Boolean(label)),
+      scan: disk.scan,
+      categoryCounts: summary.tally,
+      fileCount: summary.files,
+      indexedBytes: summary.bytes,
+    };
+  });
 }
 
 function present(disks: DiskRecord[], mode: DriveMode, agentErrors: ShelfResponse["agentErrors"]): ShelfResponse {

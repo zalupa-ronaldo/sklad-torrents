@@ -101,11 +101,13 @@ export function toIndexedFiles(
       const relativePath = normalizeRelative(file.relativePath);
       if (!relativePath && file.name !== "") return null;
       const name = file.name.trim() || relativePath.split("/").pop() || relativePath;
+      const allocated = typeof file.allocated === "number" && Number.isFinite(file.allocated) && file.allocated >= 0 ? file.allocated : undefined;
       return {
         relativePath,
         name,
         kind: file.kind === "dir" ? "dir" : "file",
         size: Number.isFinite(file.size) && file.size > 0 ? file.size : 0,
+        ...(allocated != null ? { allocated } : {}),
         mtimeMs: Number.isFinite(file.mtimeMs) ? file.mtimeMs : 0,
         sidecarCategory: asCategory(file.sidecarCategory),
       };

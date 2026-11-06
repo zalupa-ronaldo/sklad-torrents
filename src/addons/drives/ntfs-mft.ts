@@ -11,10 +11,17 @@ export interface ParsedName {
   parent: number;
   name: string;
   namespace: number;
+  /** Logical size from $FILE_NAME. Windows often leaves this at 0; $DATA is authoritative. */
   size: number;
   mtimeMs: number;
   directory: boolean;
   index: number;
+  /** Base MFT record. Equals `index` when this record is the base. */
+  base: number;
+  hasName: boolean;
+  /** Unnamed $DATA real size, or null when the record has no unnamed data attribute. */
+  dataSize: number | null;
+  dataAllocated: number | null;
 }
 
 const FILE_NAME = 0x30;
@@ -91,13 +98,37 @@ function fileRef(buf: Buffer, offset: number): number {
   return buf.readUInt32LE(offset) + buf.readUInt16LE(offset + 4) * 0x1_0000_0000;
 }
 
+function u64(buf: Buffer, offset: number): number {
+  const value = buf.readBigUInt64LE(offset);
+  if (value > BigInt(Number.MAX_SAFE_INTEGER)) return Number.MAX_SAFE_INTEGER;
+  return Number(value);
+}
+
+/** Unnamed $DATA stream. Named streams (ADS) are not the file the browser shows. */
+function readUnnamedData(record: Buffer, offset: number, length: number, nonResident: boolean): { size: number; allocated: number } | null {
+  if (offset + 10 > record.length) return null;
+  if (record.readUInt8(offset + 9) !== 0) return null;
+  if (!nonResident) {
+    if (length < 0x18 || offset + 0x14 > record.length) return null;
+    const valueLength = record.readUInt32LE(offset + 0x10);
+    if (valueLength > length) return null;
+    return { size: valueLength, allocated: valueLength };
+  }
+  if (length < 0x40 || offset + 0x38 > record.length) return null;
+  return { size: u64(record, offset + 0x30), allocated: u64(record, offset + 0x28) };
+}
+
 export function parseRecord(record: Buffer, index: number, bytesPerSector: number): ParsedName | null {
-  if (!applyFixup(record, bytesPerSector)) return null;
+  if (record.length < 0x28 || !applyFixup(record, bytesPerSector)) return null;
   const flags = record.readUInt16LE(0x16);
   if ((flags & 0x01) === 0) return null;
   const directory = (flags & 0x02) !== 0;
+  const baseWord = record.readBigUInt64LE(0x20);
+  const baseRef = Number(baseWord & 0xffffffffffffn);
   let offset = record.readUInt16LE(0x14);
-  let best: ParsedName | null = null;
+  let best: { parent: number; name: string; namespace: number; size: number; mtimeMs: number; rank: number } | null = null;
+  let dataSize: number | null = null;
+  let dataAllocated: number | null = null;
   while (offset + 8 <= record.length) {
     const type = record.readUInt32LE(offset);
     if (type === END || type === 0) break;
@@ -112,24 +143,43 @@ export function parseRecord(record: Buffer, index: number, bytesPerSector: numbe
         const chars = value.readUInt8(0x40);
         const namespace = value.readUInt8(0x41);
         if (0x42 + chars * 2 <= value.length) {
-          const parsed: ParsedName = {
-            parent: fileRef(value, 0),
-            name: value.toString("utf16le", 0x42, 0x42 + chars * 2),
-            namespace,
-            size: Number(value.readBigUInt64LE(0x30)),
-            mtimeMs: filetimeToMs(value, 0x10),
-            directory,
-            index,
-          };
           const rank = namespace === 1 || namespace === 3 ? 2 : namespace === 0 ? 1 : 0;
-          const bestRank = best ? (best.namespace === 1 || best.namespace === 3 ? 2 : best.namespace === 0 ? 1 : 0) : -1;
-          if (rank >= bestRank) best = parsed;
+          if (!best || rank >= best.rank) {
+            best = {
+              parent: fileRef(value, 0),
+              name: value.toString("utf16le", 0x42, 0x42 + chars * 2),
+              namespace,
+              size: u64(value, 0x30),
+              mtimeMs: filetimeToMs(value, 0x10),
+              rank,
+            };
+          }
         }
+      }
+    } else if (type === DATA) {
+      const data = readUnnamedData(record, offset, length, nonResident);
+      // One file can list the same stream twice; the header size is the whole stream, so keep the larger.
+      if (data && (dataSize == null || data.size > dataSize)) {
+        dataSize = data.size;
+        dataAllocated = data.allocated;
       }
     }
     offset += length;
   }
-  return best;
+  if (!best && dataSize == null) return null;
+  return {
+    parent: best?.parent ?? 0,
+    name: best?.name ?? "",
+    namespace: best?.namespace ?? 0,
+    size: best?.size ?? 0,
+    mtimeMs: best?.mtimeMs ?? 0,
+    directory,
+    index,
+    base: baseWord === 0n ? index : baseRef,
+    hasName: best != null,
+    dataSize,
+    dataAllocated,
+  };
 }
 
 function takeMftRuns(record: Buffer, bytesPerSector: number): Buffer | null {
@@ -171,6 +221,56 @@ function resolvePath(entry: ParsedName, byIndex: ReadonlyMap<number, ParsedName>
   return parts.join("/");
 }
 
+function preferData(target: ParsedName, extra: ParsedName): void {
+  if (extra.dataSize != null && (target.dataSize == null || extra.dataSize > target.dataSize)) {
+    target.dataSize = extra.dataSize;
+    target.dataAllocated = extra.dataAllocated;
+  }
+  if (!target.hasName && extra.hasName) {
+    target.hasName = true;
+    target.name = extra.name;
+    target.parent = extra.parent;
+    target.namespace = extra.namespace;
+    target.size = extra.size;
+    target.mtimeMs = extra.mtimeMs;
+    target.directory = target.directory || extra.directory;
+  }
+}
+
+/**
+ * Extension records (base file reference ≠ 0) hold $DATA that did not fit in the base.
+ * Their size is attached to the base so a fragmented file is not reported as 0 bytes.
+ */
+export function filesFromParsed(entries: readonly ParsedName[]): RawIndexedFile[] {
+  const bases = new Map<number, ParsedName>();
+  const extras: ParsedName[] = [];
+  for (const entry of entries) {
+    if (entry.base !== entry.index) extras.push(entry);
+    else bases.set(entry.index, entry);
+  }
+  for (const extra of extras) {
+    const base = bases.get(extra.base);
+    if (base) preferData(base, extra);
+  }
+  const files: RawIndexedFile[] = [];
+  for (const entry of bases.values()) {
+    if (!entry.hasName) continue;
+    const relativePath = resolvePath(entry, bases);
+    if (!relativePath) continue;
+    const size = entry.directory ? 0 : (entry.dataSize ?? entry.size);
+    const file: RawIndexedFile = {
+      relativePath,
+      name: entry.name,
+      kind: entry.directory ? "dir" : "file",
+      size,
+      mtimeMs: entry.mtimeMs,
+    };
+    if (!entry.directory && entry.dataAllocated != null) file.allocated = entry.dataAllocated;
+    files.push(file);
+  }
+  return files;
+}
+
 export function filesFromRecords(records: Buffer[], recordSize: number, bytesPerSector: number): RawIndexedFile[] {
   const entries: ParsedName[] = [];
   records.forEach((record, index) => {
@@ -178,20 +278,7 @@ export function filesFromRecords(records: Buffer[], recordSize: number, bytesPer
     const parsed = parseRecord(Buffer.from(slice), index, bytesPerSector);
     if (parsed) entries.push(parsed);
   });
-  const byIndex = new Map(entries.map((entry) => [entry.index, entry]));
-  const files: RawIndexedFile[] = [];
-  for (const entry of entries) {
-    const relativePath = resolvePath(entry, byIndex);
-    if (!relativePath) continue;
-    files.push({
-      relativePath,
-      name: entry.name,
-      kind: entry.directory ? "dir" : "file",
-      size: entry.directory ? 0 : entry.size,
-      mtimeMs: entry.mtimeMs,
-    });
-  }
-  return files;
+  return filesFromParsed(entries);
 }
 
 async function readBlock(
@@ -280,18 +367,5 @@ export async function readNtfsVolume(
 }
 
 function filesFromRecordsFromEntries(entries: ParsedName[]): RawIndexedFile[] {
-  const byIndex = new Map(entries.map((entry) => [entry.index, entry]));
-  const files: RawIndexedFile[] = [];
-  for (const entry of entries) {
-    const relativePath = resolvePath(entry, byIndex);
-    if (!relativePath) continue;
-    files.push({
-      relativePath,
-      name: entry.name,
-      kind: entry.directory ? "dir" : "file",
-      size: entry.directory ? 0 : entry.size,
-      mtimeMs: entry.mtimeMs,
-    });
-  }
-  return files;
+  return filesFromParsed(entries);
 }

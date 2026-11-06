@@ -31,6 +31,8 @@ export interface BrowseResponse {
   parentPath: string | null;
   displayPath: string;
   entries: BrowseEntry[];
+  /** Byte total of the listed folder (or of every disk root). Percents use this, not file counts. */
+  scopeBytes: number;
   nextCursor: number | null;
   total: number;
   roots: boolean;
@@ -41,12 +43,14 @@ interface FolderNode {
   name: string;
   relativePath: string;
   size: number;
+  /** Null until at least one descendant reports an allocated length. */
+  allocated: number | null;
   fileCount: number;
   dirCount: number;
   mtimeMs: number;
   categories: Set<MediaCategory>;
   dirs: Map<string, FolderNode>;
-  files: { name: string; relativePath: string; size: number; mtimeMs: number; categories: MediaCategory[]; extension: string }[];
+  files: { name: string; relativePath: string; size: number; allocated: number | null; mtimeMs: number; categories: MediaCategory[]; extension: string }[];
 }
 
 interface DiskTree {
@@ -73,6 +77,7 @@ function emptyNode(name: string, relativePath: string): FolderNode {
     name,
     relativePath,
     size: 0,
+    allocated: null,
     fileCount: 0,
     dirCount: 0,
     mtimeMs: 0,
@@ -118,6 +123,7 @@ export function buildDiskTree(disk: DiskRecord): DiskTree {
         name,
         relativePath: relative,
         size: file.size > 0 ? file.size : 0,
+        allocated: typeof file.allocated === "number" ? file.allocated : null,
         mtimeMs: file.mtimeMs || 0,
         categories: file.categories,
         extension: extensionOf(name, "file"),
@@ -133,11 +139,19 @@ export function buildDiskTree(disk: DiskRecord): DiskTree {
 
   function rollup(node: FolderNode): void {
     let size = 0;
+    let allocated = 0;
+    let allocatedKnown = false;
     let fileCount = 0;
     let dirCount = node.dirs.size;
     let mtimeMs = node.mtimeMs;
+    const addAllocated = (value: number | null) => {
+      if (value == null) return;
+      allocated += value;
+      allocatedKnown = true;
+    };
     for (const file of node.files) {
       size += file.size;
+      addAllocated(file.allocated);
       fileCount += 1;
       if (file.mtimeMs > mtimeMs) mtimeMs = file.mtimeMs;
       for (const category of file.categories) node.categories.add(category);
@@ -145,12 +159,14 @@ export function buildDiskTree(disk: DiskRecord): DiskTree {
     for (const child of node.dirs.values()) {
       rollup(child);
       size += child.size;
+      addAllocated(child.allocated);
       fileCount += child.fileCount;
       dirCount += child.dirCount;
       if (child.mtimeMs > mtimeMs) mtimeMs = child.mtimeMs;
       for (const category of child.categories) node.categories.add(category);
     }
     node.size = size;
+    node.allocated = allocatedKnown ? allocated : null;
     node.fileCount = fileCount;
     node.dirCount = dirCount;
     node.mtimeMs = mtimeMs;
@@ -204,7 +220,7 @@ function listChildren(disk: DiskRecord, relativePath: string): BrowseEntry[] {
       displayPath: joinDisplay(disk.pathStyle, mount, child.relativePath),
       kind: "dir" as const,
       size: child.size,
-      allocated: null,
+      allocated: child.allocated,
       mtimeMs: child.mtimeMs,
       extension: "",
       categories: [...child.categories].slice(0, 6),
@@ -218,9 +234,9 @@ function listChildren(disk: DiskRecord, relativePath: string): BrowseEntry[] {
     name: file.name,
     relativePath: file.relativePath,
     displayPath: joinDisplay(disk.pathStyle, mount, file.relativePath),
-    kind: "file" as const,
-    size: file.size,
-    allocated: null,
+      kind: "file" as const,
+      size: file.size,
+      allocated: file.allocated,
     mtimeMs: file.mtimeMs,
     extension: file.extension,
     categories: file.categories,
@@ -258,7 +274,7 @@ export function browseRoots(disks: readonly DiskRecord[], limit = 200, cursor = 
       displayPath: mount || name,
       kind: "dir",
       size: tree.root.size,
-      allocated: null,
+      allocated: tree.root.allocated,
       mtimeMs: tree.root.mtimeMs,
       extension: "",
       categories: [...tree.root.categories].slice(0, 6),
@@ -267,6 +283,7 @@ export function browseRoots(disks: readonly DiskRecord[], limit = 200, cursor = 
     });
   }
   entries.sort((a, b) => b.size - a.size || b.fileCount - a.fileCount || a.name.localeCompare(b.name, "ru"));
+  const scopeBytes = entries.reduce((sum, entry) => sum + entry.size, 0);
   const slice = entries.slice(Math.max(0, cursor), Math.max(0, cursor) + Math.min(500, Math.max(1, limit)));
   return {
     diskId: null,
@@ -276,6 +293,7 @@ export function browseRoots(disks: readonly DiskRecord[], limit = 200, cursor = 
     parentPath: null,
     displayPath: "Диски",
     entries: slice,
+    scopeBytes,
     nextCursor: cursor + slice.length < entries.length ? cursor + slice.length : null,
     total: entries.length,
     roots: true,
@@ -299,6 +317,7 @@ export function browseDisk(
   }
   const parent = slash(relativePath);
   const tree = buildDiskTree(disk);
+  const folder = findNode(tree.root, parent);
   const all = listChildren(disk, parent);
   const slice = all.slice(Math.max(0, cursor), Math.max(0, cursor) + Math.min(500, Math.max(1, limit)));
   const name = displayDiskName({
@@ -315,6 +334,7 @@ export function browseDisk(
     parentPath: parent ? parentRelative(parent) : null,
     displayPath: joinDisplay(disk.pathStyle as PathStyle, mount, parent) || name,
     entries: slice,
+    scopeBytes: folder?.size ?? 0,
     nextCursor: cursor + slice.length < all.length ? cursor + slice.length : null,
     total: all.length,
     roots: false,

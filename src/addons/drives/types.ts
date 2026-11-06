@@ -15,6 +15,8 @@ export interface RawIndexedFile {
   name: string;
   kind: "file" | "dir";
   size: number;
+  /** Bytes reserved on disk (NTFS allocated length). Absent when the scanner did not see $DATA. */
+  allocated?: number;
   mtimeMs: number;
   sidecarCategory?: MediaCategory | null;
 }
@@ -24,6 +26,8 @@ export interface IndexedFile {
   name: string;
   kind: "file" | "dir";
   size: number;
+  /** Bytes reserved on disk. Absent when the index only knows the logical size. */
+  allocated?: number;
   mtimeMs: number;
   sidecarCategory: MediaCategory | null;
   categories: MediaCategory[];
@@ -150,6 +154,8 @@ export interface DiskView {
   clonePeerLabels: string[];
   scan: ScanState;
   fileCount: number;
+  /** Sum of indexed file sizes. Folder totals in the browser are derived from the same bytes. */
+  indexedBytes: number;
   categoryCounts: Record<MediaCategory, number>;
 }
 

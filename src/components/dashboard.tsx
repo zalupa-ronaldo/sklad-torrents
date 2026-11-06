@@ -12,7 +12,7 @@ import type { TransferDestination, TransferJob } from "@/addons/drives/transfer/
 import type { BrowseEntry, BrowseResponse } from "@/addons/drives/browse";
 import type { DiskView, MediaCategory, SearchHit, SearchResponse, ShelfResponse } from "@/addons/drives/types";
 import { api } from "@/lib/api-client";
-import { formatBytes } from "@/lib/format";
+import { formatBytes, formatPercent } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import type { DashboardPayload, HostView } from "@/lib/qbittorrent/types";
 import type { ProgressPayload } from "@/lib/progress/jobs";
@@ -35,6 +35,20 @@ function formatMtime(ms: number): string {
   const date = new Date(ms);
   if (Number.isNaN(date.getTime())) return "—";
   return new Intl.DateTimeFormat("ru-RU", { dateStyle: "short", timeStyle: "short" }).format(date);
+}
+
+/** Logical size plus share of the open folder. Share is bytes / folder bytes, never a file count. */
+function formatSizeShare(size: number, scopeBytes: number): string {
+  const bytes = formatBytes(size);
+  if (!(scopeBytes > 0)) return bytes;
+  const share = size <= 0 ? 0 : Math.min(1, size / scopeBytes);
+  return `${bytes} · ${formatPercent(share)}`;
+}
+
+function folderHint(size: number, fileCount: number, allocated: number | null): string {
+  const parts = [formatBytes(size), `${fileCount.toLocaleString("ru-RU")} ф.`];
+  if (allocated != null) parts.push(`выделено ${formatBytes(allocated)}`);
+  return parts.join(" · ");
 }
 
 export function Dashboard() {
@@ -208,7 +222,7 @@ export function Dashboard() {
         relativePath: "",
         displayPath: disk.mountPaths[0] || disk.lastMountPath,
         kind: "dir" as const,
-        size: 0,
+        size: disk.indexedBytes,
         allocated: null,
         mtimeMs: 0,
         extension: "",
@@ -229,6 +243,7 @@ export function Dashboard() {
           extension: hit.kind === "dir" ? "" : (hit.name.split(".").pop() || "").toLowerCase(),
           size: null as number | null,
           allocated: null as number | null,
+          fileCount: 0,
           mtimeMs: 0,
           diskLabel: hit.label,
           path: hit.path,
@@ -245,7 +260,7 @@ export function Dashboard() {
       if (sortKey === "name") return a.name.localeCompare(b.name, "ru");
       if (sortKey === "mtime") return (b.mtimeMs || 0) - (a.mtimeMs || 0);
       if (sortKey === "type") return (a.extension || a.kind).localeCompare(b.extension || b.kind) || b.size - a.size || b.fileCount - a.fileCount;
-      return b.size - a.size || b.fileCount - a.fileCount || a.name.localeCompare(b.name, "ru");
+      return b.size - a.size || (b.allocated ?? 0) - (a.allocated ?? 0) || b.fileCount - a.fileCount || a.name.localeCompare(b.name, "ru");
     });
     return sorted.map((entry) => ({
       key: `${entry.diskId}:${entry.relativePath}`,
@@ -254,6 +269,7 @@ export function Dashboard() {
       extension: entry.extension,
       size: entry.size,
       allocated: entry.allocated,
+      fileCount: entry.fileCount,
       mtimeMs: entry.mtimeMs,
       diskLabel: entry.diskLabel,
       path: entry.displayPath,
@@ -491,7 +507,9 @@ export function Dashboard() {
                     <span className="text-muted-foreground">{open && diskActive ? "▾" : "▸"}</span>
                     <span className={cn("size-1.5 rounded-full", entry.online ? "bg-seed" : "bg-muted-foreground")} />
                     <span className="min-w-0 flex-1 truncate font-medium">{entry.name}</span>
-                    <span className="text-[10px] text-muted-foreground">{entry.size ? formatBytes(entry.size) : entry.fileCount ? `${entry.fileCount}` : ""}</span>
+                    <span className="shrink-0 text-[10px] tabular-nums text-muted-foreground" title={folderHint(entry.size, entry.fileCount, entry.allocated)}>
+                      {formatBytes(entry.size)}
+                    </span>
                   </button>
                   {open && diskActive
                     ? childDirs.map((child) => (
@@ -506,8 +524,8 @@ export function Dashboard() {
                         >
                           <Folder className="size-3 shrink-0 text-amber-400" />
                           <span className="min-w-0 flex-1 truncate">{child.name}</span>
-                          <span className="text-[10px] text-muted-foreground">
-                            {child.size ? formatBytes(child.size) : child.fileCount ? `${child.fileCount}` : ""}
+                          <span className="shrink-0 text-[10px] tabular-nums text-muted-foreground" title={folderHint(child.size, child.fileCount, child.allocated)}>
+                            {formatBytes(child.size)}
                           </span>
                         </button>
                       ))
@@ -560,7 +578,7 @@ export function Dashboard() {
                 <tr className="border-b">
                   <th className="px-2 py-1.5 font-medium">Имя</th>
                   <th className="w-16 px-2 py-1.5 font-medium">Тип</th>
-                  <th className="w-24 px-2 py-1.5 text-right font-medium">Размер</th>
+                  <th className="w-40 px-2 py-1.5 text-right font-medium">Размер</th>
                   <th className="w-24 px-2 py-1.5 text-right font-medium">Выделено</th>
                   <th className="w-32 px-2 py-1.5 font-medium">Изменён</th>
                   <th className="px-2 py-1.5 font-medium">Путь</th>
@@ -609,16 +627,15 @@ export function Dashboard() {
                           </button>
                         </td>
                         <td className="px-2 py-1 text-muted-foreground">{row.kind === "dir" ? "папка" : row.extension || "файл"}</td>
-                        <td className="px-2 py-1 text-right tabular-nums">
-                          {row.size == null
-                            ? "—"
-                            : row.size > 0
-                              ? formatBytes(row.size)
-                              : row.kind === "dir" && "fileCount" in row.raw && (row.raw as BrowseEntry).fileCount > 0
-                                ? <span title="В индексе размер 0"><span className="text-muted-foreground">{(row.raw as BrowseEntry).fileCount.toLocaleString("ru-RU")} ф.</span></span>
-                                : formatBytes(0)}
+                        <td
+                          className="px-2 py-1 text-right whitespace-nowrap tabular-nums"
+                          title={row.kind === "dir" && row.size != null ? folderHint(row.size, row.fileCount, row.allocated) : undefined}
+                        >
+                          {row.size == null ? "—" : formatSizeShare(row.size, query.trim() ? 0 : browse?.scopeBytes ?? 0)}
                         </td>
-                        <td className="px-2 py-1 text-right tabular-nums text-muted-foreground">—</td>
+                        <td className="px-2 py-1 text-right whitespace-nowrap tabular-nums text-muted-foreground">
+                          {row.allocated == null ? "—" : formatBytes(row.allocated)}
+                        </td>
                         <td className="px-2 py-1 text-muted-foreground">{formatMtime(row.mtimeMs)}</td>
                         <td className="max-w-[280px] truncate px-2 py-1 font-mono text-[10px] text-muted-foreground" title={row.path}>
                           {row.path}
@@ -667,12 +684,10 @@ export function Dashboard() {
               <div className="font-medium">{selected.name}</div>
               <div className="mt-1 break-all font-mono text-[10px] text-muted-foreground">{selected.displayPath}</div>
               {"size" in selected ? (
-                <div className="mt-1 text-muted-foreground">
-                  {selected.size > 0
-                    ? formatBytes(selected.size)
-                    : selected.kind === "file"
-                      ? "Размер в индексе неизвестен — возьмём с диска"
-                      : formatBytes(0)}
+                <div className="mt-1 space-y-0.5 text-muted-foreground">
+                  <div>{formatBytes(selected.size)}</div>
+                  {selected.allocated != null ? <div>Выделено {formatBytes(selected.allocated)}</div> : null}
+                  {selected.kind === "dir" ? <div>{selected.fileCount.toLocaleString("ru-RU")} файлов</div> : null}
                 </div>
               ) : null}
               {selectedFile ? (
