@@ -9,7 +9,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { compactExplanation, COMPACT_ALGORITHMS } from "@/addons/drives/compact-target";
 import { savingsOf } from "@/addons/drives/ondisk";
-import { displayDiskName, displayDiskPickerLabel, displayDiskTitle, isStripDisk } from "@/addons/drives/inventory";
+import { displayDiskName, displayDiskPickerLabel, displayDiskTitle, visibleShelfDisks } from "@/addons/drives/inventory";
 import type { TransferDestination, TransferJob } from "@/addons/drives/transfer/jobs";
 import type { BrowseEntry, BrowseResponse } from "@/addons/drives/browse";
 import type { DiskView, MediaCategory, SearchHit, SearchResponse, ShelfResponse } from "@/addons/drives/types";
@@ -45,6 +45,11 @@ function formatSizeShare(size: number, scopeBytes: number): string {
   if (!(scopeBytes > 0)) return bytes;
   const share = size <= 0 ? 0 : Math.min(1, size / scopeBytes);
   return `${bytes} · ${formatPercent(share)}`;
+}
+
+function needsManualScan(disk: { online: boolean; fileCount: number; scan: { status: string } }): boolean {
+  if (!disk.online || disk.scan.status === "running") return false;
+  return disk.scan.status === "error" || disk.scan.status === "idle" || disk.fileCount === 0;
 }
 
 function folderHint(size: number, fileCount: number, onDisk: number | null): string {
@@ -141,6 +146,8 @@ export function Dashboard() {
   const [compactBusy, setCompactBusy] = useState(false);
   const [compactNote, setCompactNote] = useState<string | null>(null);
   const [compactJobId, setCompactJobId] = useState<string | null>(null);
+  const [scanBusy, setScanBusy] = useState(false);
+  const [scanNote, setScanNote] = useState<string | null>(null);
 
   const refreshMeta = useCallback(async () => {
     try {
@@ -298,13 +305,12 @@ export function Dashboard() {
   }, [query]);
 
   const stripDisks = useMemo(() => {
-    return (shelf?.disks ?? []).filter(isStripDisk).sort((a, b) => b.fileCount - a.fileCount || a.label.localeCompare(b.label, "ru"));
+    return visibleShelfDisks(shelf?.disks ?? []).sort((a, b) => b.fileCount - a.fileCount || b.totalBytes - a.totalBytes || a.label.localeCompare(b.label, "ru"));
   }, [shelf]);
 
   const treeDisks = useMemo(() => {
     if (browse?.roots) return browse.entries;
     return stripDisks
-      .filter((disk) => disk.fileCount > 0)
       .map((disk) => ({
         diskId: disk.id,
         diskLabel: displayDiskTitle(disk),
@@ -544,6 +550,25 @@ export function Dashboard() {
       })
     : null;
 
+  const currentDisk = diskId ? (stripDisks.find((disk) => disk.id === diskId) ?? shelf?.disks.find((disk) => disk.id === diskId) ?? null) : null;
+
+  async function startRescan(id: string) {
+    setScanBusy(true);
+    setScanNote(null);
+    try {
+      const result = await api<{ message: string }>("/api/drives/rescan", {
+        method: "POST",
+        body: JSON.stringify({ diskId: id }),
+      });
+      setScanNote(result.message);
+      void refreshMeta();
+    } catch (error) {
+      setScanNote(error instanceof Error ? error.message : "Сканирование не запускалось.");
+    } finally {
+      setScanBusy(false);
+    }
+  }
+
   async function submitCompact() {
     if (!compactTarget || compactBlock || !compactAck) return;
     setCompactBusy(true);
@@ -655,8 +680,8 @@ export function Dashboard() {
                     <span className="text-muted-foreground">{open && diskActive ? "▾" : "▸"}</span>
                     <span className={cn("size-1.5 rounded-full", entry.online ? "bg-seed" : "bg-muted-foreground")} />
                     <span className="min-w-0 flex-1 truncate font-medium">{entry.name}</span>
-                    <span className="shrink-0 text-[10px] tabular-nums text-muted-foreground" title={folderHint(entry.size, entry.fileCount, entry.onDisk)}>
-                      {formatBytes(entry.size)}
+                    <span className="shrink-0 text-[10px] tabular-nums text-muted-foreground" title={entry.fileCount === 0 ? "Индекс ещё не построен" : folderHint(entry.size, entry.fileCount, entry.onDisk)}>
+                      {entry.fileCount === 0 ? "нет индекса" : formatBytes(entry.size)}
                     </span>
                   </button>
                   {open && diskActive
@@ -706,6 +731,12 @@ export function Dashboard() {
             <span className="text-[11px] text-muted-foreground">
               {query.trim() ? (searching ? "поиск…" : `${rows.length}`) : browse ? `${browse.total}` : ""}
             </span>
+            {currentDisk && needsManualScan(currentDisk) ? (
+              <Button type="button" variant="outline" size="sm" className="h-7 px-2" disabled={scanBusy} title={currentDisk.scan.message} onClick={() => void startRescan(currentDisk.id)}>
+                {scanBusy ? "Сканирование…" : "Сканировать"}
+              </Button>
+            ) : null}
+            {scanNote ? <span className="max-w-[240px] truncate text-[11px] text-muted-foreground" title={scanNote}>{scanNote}</span> : null}
             <select
               aria-label="Сортировка"
               className="h-7 rounded border border-input bg-transparent px-1 text-[11px]"
@@ -743,7 +774,7 @@ export function Dashboard() {
                 ) : rows.length === 0 ? (
                   <tr>
                     <td colSpan={6} className="px-3 py-8 text-muted-foreground">
-                      {query.trim() ? "Ничего не найдено." : "Папка пуста в снимке каталога."}
+                      {query.trim() ? "Ничего не найдено." : currentDisk?.scan.status === "error" ? currentDisk.scan.message : currentDisk && currentDisk.fileCount === 0 ? "Индекса ещё нет. Сканирование само не запускается." : "Папка пуста в снимке каталога."}
                     </td>
                   </tr>
                 ) : (

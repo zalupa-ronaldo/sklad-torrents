@@ -1,42 +1,110 @@
-import { mountPathsOf, online } from "@/addons/drives/reconcile";
+import { mountPathsOf } from "@/addons/drives/reconcile";
 import type { DiskRecord, DiskView } from "@/addons/drives/types";
 import { formatBytes } from "@/lib/format";
 
-const HIDDEN_LABEL = /^(efi|recovery|preboot|update|vm|xart|hardware|iscpreboot)$/i;
-const HIDDEN_MOUNT = /\/system\/volumes\/|efi|recovery|preboot|iscpreboot|xarts?|(^|\/)hardware$/i;
+const JUNK_NAME = /^(efi|recovery|preboot|update|vm|xart|hardware|iscpreboot)$/i;
+/** Junk APFS helper volumes only. `/System/Volumes/Data` is the user volume and stays visible. */
+const JUNK_MOUNT = /\/system\/volumes\/(preboot|recovery|vm|update|hardware|iscpreboot|xart)(\/|$)|(^|\/)(efi|recovery|preboot|iscpreboot|xarts?|hardware)(\/|$)/i;
 
-/** Volumes shown in the file browser tree. Includes C:/S:/E:/vault. Never Z for live work; snapshot OK if already indexed. */
-export function isBrowsableDisk(disk: Pick<DiskView, "label" | "lastMountPath" | "mountPaths" | "fileCount" | "totalBytes" | "filesystem">): boolean {
-  const mounts = [...(disk.mountPaths ?? []), disk.lastMountPath].filter(Boolean);
-  if (HIDDEN_LABEL.test(disk.label.trim())) return false;
-  if (mounts.length > 0 && mounts.every((path) => HIDDEN_MOUNT.test(path))) return false;
+type DiskFace = {
+  id?: string;
+  label: string;
+  volumeName?: string;
+  lastMountPath: string;
+  mountPaths?: readonly string[];
+  fileCount?: number;
+  totalBytes: number;
+  serial?: string;
+  lastHostId?: string;
+};
+
+function faceMounts(disk: DiskFace): string[] {
+  return [...(disk.mountPaths ?? []), disk.lastMountPath].filter(Boolean);
+}
+
+function faceName(disk: DiskFace): string {
+  return `${disk.volumeName || ""} ${disk.label || ""}`.trim();
+}
+
+export function isDataVolume(disk: DiskFace): boolean {
+  const mounts = faceMounts(disk).map((path) => path.replace(/\\/g, "/"));
+  if (mounts.some((path) => /\/system\/volumes\/data$/i.test(path))) return true;
+  return /macintosh hd\s*-\s*data$/i.test(faceName(disk));
+}
+
+export function isSealedSystemVolume(disk: DiskFace): boolean {
+  if (isDataVolume(disk)) return false;
+  const mounts = faceMounts(disk);
+  if (mounts.some((path) => path === "/")) return true;
+  return /^macintosh hd$/i.test(faceName(disk).trim());
+}
+
+function samePhysicalDisk(left: DiskFace, right: DiskFace): boolean {
+  const serialA = (left.serial || "").trim().toLowerCase();
+  const serialB = (right.serial || "").trim().toLowerCase();
+  if (serialA && serialB && serialA === serialB) return true;
+  return Boolean(left.lastHostId && left.lastHostId === right.lastHostId && isSealedSystemVolume(left) && isDataVolume(right));
+}
+
+/** One SSD must not appear twice: the sealed Macintosh HD is hidden while its Data volume is present. */
+export function hiddenByDataTwin(disk: DiskFace, siblings: readonly DiskFace[]): boolean {
+  if (!isSealedSystemVolume(disk)) return false;
+  return siblings.some((other) => other !== disk && other.id !== disk.id && isDataVolume(other) && samePhysicalDisk(disk, other));
+}
+
+function isJunkVolume(disk: DiskFace): boolean {
+  if (JUNK_NAME.test(disk.label.trim())) return true;
+  if (disk.volumeName && JUNK_NAME.test(disk.volumeName.trim())) return true;
+  const mounts = faceMounts(disk);
+  return mounts.length > 0 && mounts.every((path) => JUNK_MOUNT.test(path));
+}
+
+/** Volumes shown in the file browser. Preboot/VM/Recovery stay hidden. Data and an empty online disk stay. */
+export function isBrowsableDisk(disk: Pick<DiskView, "label" | "volumeName" | "lastMountPath" | "mountPaths" | "fileCount" | "totalBytes" | "filesystem" | "serial" | "lastHostId" | "id">, siblings: readonly DiskFace[] = []): boolean {
+  if (isJunkVolume(disk)) return false;
+  if (hiddenByDataTwin(disk, siblings.length > 0 ? siblings : [disk])) return false;
   // Tiny recovery/EFI slices without a library
   if (disk.totalBytes > 0 && disk.totalBytes < 2_000_000_000 && disk.fileCount === 0) return false;
   return true;
 }
 
-/** Compact bottom strip: meaningful storage, still includes C: if it has indexed files. */
-export function isStripDisk(disk: Pick<DiskView, "label" | "lastMountPath" | "mountPaths" | "fileCount" | "totalBytes" | "online" | "filesystem">): boolean {
-  if (!isBrowsableDisk(disk)) return false;
-  const mounts = [...(disk.mountPaths ?? []), disk.lastMountPath].filter(Boolean);
-  if (mounts.some((path) => /^z:\\/i.test(path))) return disk.fileCount > 0; // shelf only if snapshot exists
+/** Bottom strip and the disk tree. Online capacity is enough; an empty index does not hide the disk. */
+export function isStripDisk(disk: Pick<DiskView, "id" | "label" | "volumeName" | "lastMountPath" | "mountPaths" | "fileCount" | "totalBytes" | "online" | "filesystem" | "serial" | "lastHostId">, siblings: readonly DiskFace[] = []): boolean {
+  if (!isBrowsableDisk(disk, siblings.length > 0 ? siblings : [disk])) return false;
   if (disk.fileCount > 0) return true;
-  // Online capacity strip: skip empty placeholders (0 B / NO NAME with no index)
   if (!disk.online) return false;
   if (disk.totalBytes < 1_000_000_000) return false;
   if (/^NO NAME/i.test(disk.label || "")) return false;
   return true;
 }
 
-export function isBrowsableRecord(disk: DiskRecord): boolean {
+export function visibleShelfDisks<T extends DiskFace & { online?: boolean }>(disks: readonly T[]): T[] {
+  return disks.filter((disk) => isStripDisk(disk as unknown as Parameters<typeof isStripDisk>[0], disks));
+}
+
+export function isBrowsableRecord(disk: DiskRecord, siblings: readonly DiskRecord[] = [disk]): boolean {
   return isBrowsableDisk({
+    id: disk.id,
     label: disk.label,
+    volumeName: disk.volumeName,
     lastMountPath: disk.lastMountPath,
     mountPaths: mountPathsOf(disk),
     fileCount: disk.files.length,
     totalBytes: disk.totalBytes,
     filesystem: disk.filesystem,
-  });
+    serial: disk.serial,
+    lastHostId: disk.lastHostId,
+  }, siblings.map((item) => ({
+    id: item.id,
+    label: item.label,
+    volumeName: item.volumeName,
+    lastMountPath: item.lastMountPath,
+    mountPaths: mountPathsOf(item),
+    fileCount: item.files.length,
+    totalBytes: item.totalBytes,
+    serial: item.serial,
+    lastHostId: item.lastHostId,
+  })));
 }
 
 export function displayDiskName(disk: Pick<DiskView, "label" | "volumeName" | "lastMountPath" | "mountPaths">): string {

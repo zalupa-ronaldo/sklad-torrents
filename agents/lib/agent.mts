@@ -75,8 +75,9 @@ function safeRelativePath(raw: string | null): string | null {
   return parts.join("/");
 }
 
-function isExcludedLetter(letter: string | null | undefined): boolean {
-  return String(letter || "").toUpperCase() === "Z";
+function letterKey(letter: string | null | undefined): string {
+  const value = String(letter || "").replace(":", "").trim().toUpperCase();
+  return /^[A-Z]$/.test(value) ? value : "";
 }
 
 function resolveVolumeFile(
@@ -98,9 +99,6 @@ function resolveVolumeFile(
     return !have || have === wantSerial;
   });
   if (!volume) return { error: "Том не подключён на этом хосте.", status: 404 };
-  if (isExcludedLetter(volume.letter) || volume.mountPaths.some((mount) => /^z:\\/i.test(mount))) {
-    return { error: "Том Z недоступен для чтения и записи.", status: 403 };
-  }
   const relative = safeRelativePath(relativeRaw);
   if (!relative) return { error: "Путь должен быть относительным внутри тома.", status: 400 };
   const mount = volume.mountPaths[0];
@@ -174,7 +172,21 @@ export function startAgent(options: {
   const compactJobs = new Map<string, { id: string; state: "running" | "completed" | "failed"; error: string | null; message: string; path: string; algorithm: string }>();
   let ticking = false;
   let restoreFailed = false;
-  const disabled = new Set<string>();
+  const manualOnly = new Set<string>();
+  const exclude = new Set<string>();
+  function volumeLetter(volume: { letter?: string | null; mountPaths?: string[] }): string {
+    return letterKey(volume.letter) || letterKey((volume.mountPaths?.[0] || "").slice(0, 2));
+  }
+  function isExcludedVolume(volume: { letter?: string | null; mountPaths?: string[]; volumeUuid?: string }): boolean {
+    const letter = volumeLetter(volume);
+    if (letter && exclude.has(letter)) return true;
+    const uuid = normalizeUuid(volume.volumeUuid || "");
+    return Boolean(uuid && exclude.has(uuid));
+  }
+  function isManualVolume(volume: { letter?: string | null; mountPaths?: string[] }): boolean {
+    const letter = volumeLetter(volume);
+    return Boolean(letter && manualOnly.has(letter));
+  }
   const snapshotPath = process.env.SKLAD_AGENT_SNAPSHOT || path.join(process.cwd(), "data", "drive-agent-snapshot.json.gz");
   let persistChain: Promise<unknown> = Promise.resolve();
   function persist() {
@@ -187,8 +199,21 @@ export function startAgent(options: {
   }
   const ready = (async () => {
     try {
-      const data = JSON.parse(await readFile(path.join(process.cwd(), "data", "drive-agent-disabled.json"), "utf8"));
-      for (const letter of data.letters ?? []) disabled.add(String(letter).toUpperCase());
+      const disabledPath = process.env.SKLAD_AGENT_DISABLED || path.join(process.cwd(), "data", "drive-agent-disabled.json");
+      const data = JSON.parse(await readFile(disabledPath, "utf8")) as { letters?: unknown; exclude?: unknown };
+      for (const letter of Array.isArray(data.letters) ? data.letters : []) {
+        const key = letterKey(String(letter));
+        if (key) manualOnly.add(key);
+      }
+      for (const item of Array.isArray(data.exclude) ? data.exclude : []) {
+        const text = String(item).trim();
+        const key = letterKey(text);
+        if (key) exclude.add(key);
+        else {
+          const uuid = normalizeUuid(text);
+          if (uuid) exclude.add(uuid);
+        }
+      }
     } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") note = "Не удалось прочитать исключения дисков."; }
     try {
       const saved = JSON.parse((await promisify(gunzip)(await readFile(snapshotPath))).toString());
@@ -202,9 +227,10 @@ export function startAgent(options: {
     if (events.length > 400) events.shift();
   }
 
-  async function indexVolume(volume: TrackedVolume, sizeRebuild = false) {
+  async function indexVolume(volume: TrackedVolume, sizeRebuild = false, manual = false) {
     const key = volumeKey(volume);
-    if (running.has(key) || disabled.has((volume.letter ?? "").toUpperCase())) return;
+    if (running.has(key) || isExcludedVolume(volume)) return;
+    if (!manual && isManualVolume(volume)) return;
     if (sizeRebuild) rebuiltEmptySizes.add(key);
     running.add(key);
     const previousIndex = volume.index;
@@ -312,10 +338,17 @@ export function startAgent(options: {
       // A snapshot whose every file is 0 bytes is the old $FILE_NAME reader and is rebuilt once.
       const key = volumeKey(volume);
       const rebuildSizes = snapshotHasNoSizes(volume.index) && !rebuiltEmptySizes.has(key);
-      const needs = !restoreFailed && !disabled.has((volume.letter ?? "").toUpperCase()) && !volume.busy &&
+      const needs = !restoreFailed && !isExcludedVolume(volume) && !isManualVolume(volume) && !volume.busy &&
         (!volume.index || (volume.index.state === "paused" && !volume.index.files) || rebuildSizes);
       if (needs) void indexVolume(volume, rebuildSizes);
     }
+  }
+
+  function resolveTracked(serial: string | null, uuid: string | null, relative: string | null) {
+    const resolved = resolveVolumeFile(volumes, serial, uuid, relative, options.os);
+    if ("error" in resolved) return resolved;
+    if (isExcludedVolume(resolved.volume)) return { error: "Том исключён в конфиге агента.", status: 403 as const };
+    return resolved;
   }
 
   const server = createServer((request: IncomingMessage, response: ServerResponse) => {
@@ -342,7 +375,7 @@ export function startAgent(options: {
           if (!elevated) { send(response, 403, { error: "Агент без прав администратора. CompactGUI/WOF не запускался." }); return; }
           const algorithm = String(body.algorithm || "");
           if (!isCompactAlgorithm(algorithm)) { send(response, 400, { error: "Неизвестный алгоритм. Сжатие не запускалось." }); return; }
-          const resolved = resolveVolumeFile(volumes, String(body.serial || ""), String(body.uuid || ""), String(body.path || ""), options.os);
+          const resolved = resolveTracked(String(body.serial || ""), String(body.uuid || ""), String(body.path || ""));
           if ("error" in resolved) { send(response, resolved.status, { error: `${resolved.error} Сжатие не запускалось.` }); return; }
           if (!/ntfs/i.test(resolved.volume.filesystem)) {
             send(response, 400, { error: "Том не NTFS. Сжатие не запускалось." });
@@ -387,15 +420,15 @@ export function startAgent(options: {
     }
     if (request.method === "POST" && url.pathname === "/v1/rescan") {
       const volume = volumes.find((v) => v.serial === url.searchParams.get("serial") && v.volumeUuid === url.searchParams.get("uuid"));
-      if (!volume || disabled.has((volume.letter ?? "").toUpperCase())) { send(response, 404, { error: "Том исключён или недоступен." }); return; }
+      if (!volume || isExcludedVolume(volume)) { send(response, 404, { error: "Том исключён в конфиге агента." }); return; }
       if (running.has(volumeKey(volume)) || volume.busy) { send(response, 409, { error: "Том занят." }); return; }
-      void indexVolume(volume);
+      void indexVolume(volume, false, true);
       send(response, 202, { accepted: true });
       return;
     }
     if (request.method === "GET" && url.pathname === "/v1/files") {
       const volume = volumes.find((v) => v.serial === url.searchParams.get("serial") && v.volumeUuid === url.searchParams.get("uuid"));
-      if (!volume || disabled.has((volume.letter ?? "").toUpperCase())) { send(response, 404, { error: "Том недоступен." }); return; }
+      if (!volume || isExcludedVolume(volume)) { send(response, 404, { error: "Том исключён в конфиге агента." }); return; }
       const index = volume.index;
       if (!index?.files || index.revision !== url.searchParams.get("revision")) { send(response, 409, { error: "Снимок изменился." }); return; }
       const offset = Math.max(0, Math.floor(Number(url.searchParams.get("offset")) || 0));
@@ -410,7 +443,8 @@ export function startAgent(options: {
         os: options.os,
         elevated,
         note,
-        volumes: volumes.filter((volume) => !disabled.has((volume.letter ?? "").toUpperCase())).map((volume) => ({
+        volumes: volumes.filter((volume) => !isExcludedVolume(volume)).map((volume) => ({
+          manualOnly: isManualVolume(volume),
           serial: volume.serial,
           volumeUuid: volume.volumeUuid,
           filesystem: volume.filesystem,
@@ -438,7 +472,7 @@ export function startAgent(options: {
     }
 
     if (request.method === "GET" && url.pathname === "/v1/file/stat") {
-      const resolved = resolveVolumeFile(volumes, url.searchParams.get("serial"), url.searchParams.get("uuid"), url.searchParams.get("path"), options.os);
+      const resolved = resolveTracked(url.searchParams.get("serial"), url.searchParams.get("uuid"), url.searchParams.get("path"));
       if ("error" in resolved) { send(response, resolved.status, { error: resolved.error }); return; }
       try {
         const info = statSync(resolved.absolute);
@@ -456,7 +490,7 @@ export function startAgent(options: {
       return;
     }
     if (request.method === "GET" && url.pathname === "/v1/file/content") {
-      const resolved = resolveVolumeFile(volumes, url.searchParams.get("serial"), url.searchParams.get("uuid"), url.searchParams.get("path"), options.os);
+      const resolved = resolveTracked(url.searchParams.get("serial"), url.searchParams.get("uuid"), url.searchParams.get("path"));
       if ("error" in resolved) { send(response, resolved.status, { error: resolved.error }); return; }
       let info;
       try {
@@ -489,7 +523,7 @@ export function startAgent(options: {
       return;
     }
     if (request.method === "PUT" && url.pathname === "/v1/file/content") {
-      const resolved = resolveVolumeFile(volumes, url.searchParams.get("serial"), url.searchParams.get("uuid"), url.searchParams.get("path"), options.os);
+      const resolved = resolveTracked(url.searchParams.get("serial"), url.searchParams.get("uuid"), url.searchParams.get("path"));
       if ("error" in resolved) { send(response, resolved.status, { error: resolved.error }); return; }
       // Refuse overwrite unless explicit
       const overwrite = url.searchParams.get("overwrite") === "1";

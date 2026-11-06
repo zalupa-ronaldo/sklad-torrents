@@ -272,12 +272,11 @@ function listChildren(disk: DiskRecord, relativePath: string): BrowseEntry[] {
 export function browseRoots(disks: readonly DiskRecord[], limit = 200, cursor = 0): BrowseResponse {
   const entries: BrowseEntry[] = [];
   for (const disk of disks) {
-    if (!isBrowsableRecord(disk)) continue;
+    if (!isBrowsableRecord(disk, disks)) continue;
     const mount = mountOf(disk);
-    const isZ = /^z:\\/i.test(disk.lastMountPath) || /^z:\\/i.test(mount);
-    if (isZ && disk.files.length === 0) continue;
-    // Skip empty indexes (Macintosh HD / NO NAME / blank USB) — keep letter drives with content.
-    if (disk.files.length === 0) continue;
+    const connected = online(disk);
+    // An empty offline placeholder stays out of the tree. A connected disk stays, even with no index.
+    if (disk.files.length === 0 && !connected) continue;
     const tree = buildDiskTree(disk);
     const name = displayDiskName({
       label: disk.label,
@@ -333,10 +332,6 @@ export function browseDisk(
   const disk = disks.find((item) => item.id === diskId);
   if (!disk) throw new DriveError(404, "Диск в каталоге не найден.");
   const mount = mountOf(disk);
-  const isZ = /^z:\\/i.test(disk.lastMountPath) || /^z:\\/i.test(mount);
-  if (isZ && disk.files.length === 0) {
-    throw new DriveError(400, "Снимок Z: пуст. Диск не сканируем.");
-  }
   const parent = slash(relativePath);
   const tree = buildDiskTree(disk);
   const folder = findNode(tree.root, parent);

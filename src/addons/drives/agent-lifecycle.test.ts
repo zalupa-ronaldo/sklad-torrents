@@ -12,7 +12,14 @@ import { buildMockCatalog } from "@/addons/drives/mock-source";
 
 vi.mock("@/addons/drives/execute-index", () => ({ executeIndexPlan: vi.fn() }));
 const savedSnapshot = process.env.SKLAD_AGENT_SNAPSHOT;
-afterEach(() => { if (savedSnapshot === undefined) delete process.env.SKLAD_AGENT_SNAPSHOT; else process.env.SKLAD_AGENT_SNAPSHOT = savedSnapshot; vi.clearAllMocks(); });
+const savedDisabled = process.env.SKLAD_AGENT_DISABLED;
+afterEach(() => {
+  if (savedSnapshot === undefined) delete process.env.SKLAD_AGENT_SNAPSHOT;
+  else process.env.SKLAD_AGENT_SNAPSHOT = savedSnapshot;
+  if (savedDisabled === undefined) delete process.env.SKLAD_AGENT_DISABLED;
+  else process.env.SKLAD_AGENT_DISABLED = savedDisabled;
+  vi.clearAllMocks();
+});
 const volume = { serial: "test", volumeUuid: "abc", filesystem: "NTFS", volumeName: "test", mountPaths: ["C:\\"], totalBytes: 100, freeBytes: 10, busy: false, letter: "C" };
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -82,6 +89,39 @@ it("rebuilds a saved NTFS snapshot once when every file size is zero", async () 
     const metadata = await (await fetch(`http://127.0.0.1:${(server.address() as AddressInfo).port}/v1/volumes?metadata=1`)).json();
     expect(metadata.volumes[0].index.recordCount).toBe(1);
     expect(metadata.volumes[0].index.state).toBe("complete");
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await sleep(30);
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+it("lists a manual-only Z: without starting its index until rescan", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "sklad-agent-manual-"));
+  const disabledPath = path.join(directory, "disabled.json");
+  await writeFile(disabledPath, JSON.stringify({ letters: ["Z"], exclude: [] }));
+  process.env.SKLAD_AGENT_SNAPSHOT = path.join(directory, "snapshot.gz");
+  process.env.SKLAD_AGENT_DISABLED = disabledPath;
+  vi.mocked(executeIndexPlan).mockResolvedValue({
+    called: ["walk"],
+    payload: { state: "complete", progress: 1, files: [{ relativePath: "Windows/a.txt", name: "a.txt", kind: "file", size: 4, mtimeMs: 0 }] },
+  });
+  const zee = { ...volume, serial: "WRA04CK7", volumeUuid: "d5625324-d816-4af6-9504-66b4639e2309", volumeName: "Data", mountPaths: ["Z:\\"], letter: "Z", totalBytes: 4_000_000_000_000 };
+  const collect = vi.fn(async () => ({ elevated: true, note: "", volumes: [{ ...volume }, zee] }));
+  const server = startAgent({ port: 0, hostId: "test", hostName: "test", os: "win32", collect, intervalMs: 60_000 });
+  await once(server, "listening");
+  const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  try {
+    await vi.waitFor(() => expect(executeIndexPlan).toHaveBeenCalledOnce());
+    await sleep(80);
+    expect(executeIndexPlan).toHaveBeenCalledOnce();
+    const body = await (await fetch(`${base}/v1/volumes?metadata=1`)).json();
+    const listed = body.volumes.find((item: { letter?: string }) => item.letter === "Z");
+    expect(listed).toMatchObject({ manualOnly: true, volumeUuid: zee.volumeUuid, totalBytes: zee.totalBytes });
+    expect(listed.index).toBeNull();
+    const rescan = await fetch(`${base}/v1/rescan?serial=${zee.serial}&uuid=${zee.volumeUuid}`, { method: "POST" });
+    expect(rescan.status).toBe(202);
+    await vi.waitFor(() => expect(executeIndexPlan).toHaveBeenCalledTimes(2));
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
     await sleep(30);

@@ -22,7 +22,7 @@ function disk(partial: Partial<DiskRecord> & { files: IndexedFile[] }): DiskReco
     pathStyle: "win32",
     lastMountPath: partial.lastMountPath || "S:\\",
     priorMountPath: "",
-    connectedHosts: [],
+    connectedHosts: partial.connectedHosts ?? [],
     duplicateMounts: false,
     possibleClone: false,
     cloneOfIds: [],
@@ -91,19 +91,28 @@ describe("browse aggregates", () => {
     expect(summed.entries[0]?.compression).toBe("wof");
   });
 
-  it("exposes disk roots including C: and skips empty Z:", () => {
+  it("shows a connected empty disk, including Z:, and skips an offline empty placeholder", () => {
     const c = disk({
       id: "disk-c",
       label: "System",
       lastMountPath: "C:\\",
       files: [{ relativePath: "Users/a.txt", name: "a.txt", kind: "file", size: 1, mtimeMs: 1, sidecarCategory: null, categories: [] }],
     });
-    const z = disk({ id: "disk-z", label: "Data", lastMountPath: "Z:\\", files: [] });
-    const roots = browseRoots([c, disk({ files }), z]);
+    const z = disk({
+      id: "disk-z",
+      label: "Data",
+      lastMountPath: "Z:\\",
+      files: [],
+      connectedHosts: [{ id: "windows-pc", name: "Windows PC", os: "win32", elevated: true, mountPaths: ["Z:\\"] }],
+    });
+    const offline = disk({ id: "disk-off", label: "Spare", lastMountPath: "E:\\", files: [] });
+    const roots = browseRoots([c, disk({ files }), z, offline]);
     const names = roots.entries.map((e) => e.name);
     expect(names).toContain("C:");
     expect(names).toContain("S:");
-    expect(names.some((n) => /^Z:/i.test(n))).toBe(false);
+    expect(names).toContain("Z:");
+    expect(names).not.toContain("E:");
+    expect(browseDisk([z], "disk-z", "").entries).toEqual([]);
   });
 
   it("is case-sensitive on path segments when browsing", () => {
