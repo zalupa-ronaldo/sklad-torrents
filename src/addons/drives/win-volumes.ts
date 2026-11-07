@@ -1,5 +1,6 @@
 import type { CollectedVolume } from "@/addons/drives/types";
-import { normalizeUuid } from "@/addons/drives/identity";
+import { normalizeSerial, normalizeUuid } from "@/addons/drives/identity";
+import { letterKey } from "@/addons/drives/volume-guard";
 
 interface WinDisk {
   Index?: number | string;
@@ -53,7 +54,13 @@ function letterOf(value: string | null | undefined): string {
   return /^[A-Z]$/.test(text) ? text : "";
 }
 
-export function parseWindowsVolumes(report: WindowsVolumeReport): { volumes: CollectedVolume[]; elevated: boolean } {
+export function parseWindowsVolumes(
+  report: WindowsVolumeReport,
+  guard?: { excludeLetters?: readonly string[]; excludeUuids?: readonly string[]; excludeSerials?: readonly string[] },
+): { volumes: CollectedVolume[]; elevated: boolean } {
+  const excludedLetters = new Set((guard?.excludeLetters ?? []).map((item) => letterKey(item)).filter(Boolean));
+  const excludedUuids = new Set((guard?.excludeUuids ?? []).map((item) => normalizeUuid(item)).filter(Boolean));
+  const excludedSerials = new Set((guard?.excludeSerials ?? []).map((item) => normalizeSerial(item)).filter(Boolean));
   const disks = asList(report.disks);
   const serialByDisk = new Map<number, string>();
   for (const disk of disks) {
@@ -74,8 +81,11 @@ export function parseWindowsVolumes(report: WindowsVolumeReport): { volumes: Col
     const uuid = normalizeUuid(volume.UniqueId);
     if (!uuid) continue;
     const letter = letterOf(volume.DriveLetter);
+    if (letter && excludedLetters.has(letter)) continue;
+    if (uuid && excludedUuids.has(uuid)) continue;
     const diskNumber = letter ? diskByLetter.get(letter) : undefined;
     const serial = diskNumber === undefined ? "" : (serialByDisk.get(diskNumber) ?? "");
+    if (serial && excludedSerials.has(normalizeSerial(serial))) continue;
     volumes.push({
       serial,
       volumeUuid: String(volume.UniqueId ?? ""),

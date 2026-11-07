@@ -13,11 +13,14 @@ import { buildMockCatalog } from "@/addons/drives/mock-source";
 vi.mock("@/addons/drives/execute-index", () => ({ executeIndexPlan: vi.fn() }));
 const savedSnapshot = process.env.SKLAD_AGENT_SNAPSHOT;
 const savedDisabled = process.env.SKLAD_AGENT_DISABLED;
+const savedExclude = process.env.SKLAD_EXCLUDE_LETTERS;
 afterEach(() => {
   if (savedSnapshot === undefined) delete process.env.SKLAD_AGENT_SNAPSHOT;
   else process.env.SKLAD_AGENT_SNAPSHOT = savedSnapshot;
   if (savedDisabled === undefined) delete process.env.SKLAD_AGENT_DISABLED;
   else process.env.SKLAD_AGENT_DISABLED = savedDisabled;
+  if (savedExclude === undefined) delete process.env.SKLAD_EXCLUDE_LETTERS;
+  else process.env.SKLAD_EXCLUDE_LETTERS = savedExclude;
   vi.clearAllMocks();
 });
 const volume = { serial: "test", volumeUuid: "abc", filesystem: "NTFS", volumeName: "test", mountPaths: ["C:\\"], totalBytes: 100, freeBytes: 10, busy: false, letter: "C" };
@@ -122,6 +125,141 @@ it("lists a manual-only Z: without starting its index until rescan", async () =>
     const rescan = await fetch(`${base}/v1/rescan?serial=${zee.serial}&uuid=${zee.volumeUuid}`, { method: "POST" });
     expect(rescan.status).toBe(202);
     await vi.waitFor(() => expect(executeIndexPlan).toHaveBeenCalledTimes(2));
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await sleep(30);
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+it("drops excluded Z before resume and does not index C/D/E/F/S again when their snapshots are ready", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "sklad-agent-exclude-"));
+  const disabledPath = path.join(directory, "disabled.json");
+  await writeFile(disabledPath, JSON.stringify({
+    letters: [],
+    exclude: ["Z"],
+    known: [{ letter: "Z", serial: "WRA04CK7", volumeUuid: "d5625324-d816-4af6-9504-66b4639e2309" }],
+  }));
+  process.env.SKLAD_AGENT_DISABLED = disabledPath;
+  const readyIndex = {
+    state: "complete",
+    progress: 1,
+    strategy: "mft-usn",
+    revision: "ready",
+    files: [{ relativePath: "keep/a.txt", name: "a.txt", kind: "file", size: 8, mtimeMs: 0 }],
+  };
+  const disk = (letter: string, serial: string) => ({
+    serial,
+    volumeUuid: `00000000-0000-4000-8000-00000000000${letter.charCodeAt(0) % 10}`,
+    filesystem: "NTFS",
+    volumeName: letter,
+    mountPaths: [`${letter}:\\`],
+    totalBytes: 100,
+    freeBytes: 10,
+    busy: false,
+    letter,
+    indexedAt: Date.now(),
+    usnStart: null,
+    freeAtIndex: 10,
+    index: { ...readyIndex, revision: `ready-${letter}` },
+  });
+  const zee = {
+    ...disk("Z", "WRA04CK7"),
+    volumeUuid: "d5625324-d816-4af6-9504-66b4639e2309",
+    index: { ...readyIndex, state: "running", revision: "z-running", progress: 0.4 },
+  };
+  process.env.SKLAD_AGENT_SNAPSHOT = path.join(directory, "snapshot.gz");
+  await writeFile(process.env.SKLAD_AGENT_SNAPSHOT, gzipSync(JSON.stringify({
+    volumes: [disk("C", "C-SERIAL"), disk("D", "D-SERIAL"), disk("E", "E-SERIAL"), disk("F", "F-SERIAL"), disk("S", "S-SERIAL"), zee],
+  })));
+  vi.mocked(executeIndexPlan).mockResolvedValue({ called: ["readMft"], payload: { state: "complete", progress: 1, files: [] } });
+  const collect = vi.fn(async () => ({
+    elevated: true,
+    note: "",
+    volumes: ["C", "D", "E", "F", "S", "Z"].map((letter) => {
+      const source = letter === "Z" ? zee : disk(letter, `${letter}-SERIAL`);
+      return {
+        serial: source.serial,
+        volumeUuid: source.volumeUuid,
+        filesystem: source.filesystem,
+        volumeName: source.volumeName,
+        mountPaths: source.mountPaths,
+        totalBytes: source.totalBytes,
+        freeBytes: source.freeBytes,
+        busy: source.busy,
+        letter: source.letter,
+      };
+    }),
+  }));
+  const server = startAgent({ port: 0, hostId: "test", hostName: "test", os: "win32", collect, intervalMs: 60_000 });
+  await once(server, "listening");
+  const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  try {
+    await vi.waitFor(() => expect(collect).toHaveBeenCalled());
+    await sleep(80);
+    expect(executeIndexPlan).not.toHaveBeenCalled();
+    const body = await (await fetch(`${base}/v1/volumes?metadata=1`)).json();
+    expect(body.volumes.map((item: { letter?: string }) => item.letter).sort()).toEqual(["C", "D", "E", "F", "S"]);
+    const rescan = await fetch(`${base}/v1/rescan?serial=WRA04CK7&uuid=d5625324-d816-4af6-9504-66b4639e2309`, { method: "POST" });
+    expect(rescan.status).toBe(404);
+    const stat = await fetch(`${base}/v1/file/stat?serial=WRA04CK7&uuid=d5625324-d816-4af6-9504-66b4639e2309&path=keep/a.txt`);
+    expect(stat.status).toBe(404);
+    const files = await fetch(`${base}/v1/files?serial=WRA04CK7&uuid=d5625324-d816-4af6-9504-66b4639e2309&revision=z-running`);
+    expect(files.status).toBe(404);
+    expect(executeIndexPlan).not.toHaveBeenCalled();
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await sleep(30);
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+it("keeps manual-only D listed and rescannable while Z stays excluded", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "sklad-agent-manual-d-"));
+  const disabledPath = path.join(directory, "disabled.json");
+  await writeFile(disabledPath, JSON.stringify({
+    letters: ["D"],
+    exclude: ["Z"],
+    known: [{ letter: "Z", serial: "WRA04CK7", volumeUuid: "d5625324-d816-4af6-9504-66b4639e2309" }],
+  }));
+  process.env.SKLAD_AGENT_SNAPSHOT = path.join(directory, "snapshot.gz");
+  process.env.SKLAD_AGENT_DISABLED = disabledPath;
+  vi.mocked(executeIndexPlan).mockResolvedValue({
+    called: ["readMft"],
+    payload: { state: "complete", progress: 1, strategy: "mft-usn", files: [{ relativePath: "keep/a.txt", name: "a.txt", kind: "file", size: 8, mtimeMs: 0 }] },
+  });
+  const disk = (letter: string) => ({
+    serial: `${letter}-SERIAL`,
+    volumeUuid: `11111111-1111-4111-8111-11111111111${letter.charCodeAt(0) % 10}`,
+    filesystem: "NTFS",
+    volumeName: letter,
+    mountPaths: [`${letter}:\\`],
+    totalBytes: 100,
+    freeBytes: 10,
+    busy: false,
+    letter,
+  });
+  const collect = vi.fn(async () => ({
+    elevated: true,
+    note: "",
+    volumes: [disk("C"), disk("D"), { ...disk("Z"), serial: "WRA04CK7", volumeUuid: "d5625324-d816-4af6-9504-66b4639e2309" }],
+  }));
+  const server = startAgent({ port: 0, hostId: "test", hostName: "test", os: "win32", collect, intervalMs: 60_000 });
+  await once(server, "listening");
+  const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  try {
+    await vi.waitFor(() => expect(executeIndexPlan).toHaveBeenCalledOnce());
+    const body = await (await fetch(`${base}/v1/volumes?metadata=1`)).json();
+    const letters = body.volumes.map((item: { letter?: string }) => item.letter).sort();
+    expect(letters).toEqual(["C", "D"]);
+    expect(body.volumes.find((item: { letter?: string }) => item.letter === "D")).toMatchObject({ manualOnly: true, index: null });
+    const dee = disk("D");
+    const rescan = await fetch(`${base}/v1/rescan?serial=${dee.serial}&uuid=${dee.volumeUuid}`, { method: "POST" });
+    expect(rescan.status).toBe(202);
+    await vi.waitFor(() => expect(executeIndexPlan).toHaveBeenCalledTimes(2));
+    const blocked = await fetch(`${base}/v1/rescan?serial=WRA04CK7&uuid=d5625324-d816-4af6-9504-66b4639e2309`, { method: "POST" });
+    expect(blocked.status).toBe(404);
+    expect(executeIndexPlan).toHaveBeenCalledTimes(2);
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
     await sleep(30);

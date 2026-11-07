@@ -15,6 +15,7 @@ import { buildCompactArgv, DEFAULT_COMPACT_EXE } from "../../src/addons/media-ga
 import { isCompactAlgorithm } from "../../src/addons/media-games/presets.ts";
 import { selectIndexStrategy } from "../../src/addons/drives/strategy.ts";
 import { normalizeSerial, normalizeUuid } from "../../src/addons/drives/identity.ts";
+import { loadVolumeGuard, matchesExcluded, type VolumeGuard } from "../../src/addons/drives/volume-guard.ts";
 import type { CollectedVolume, HostOs, IndexPayload } from "../../src/addons/drives/types.ts";
 import { readNtfsLetter, readUsn } from "./indexers.mts";
 import { walkTree } from "./walk.mts";
@@ -172,20 +173,13 @@ export function startAgent(options: {
   const compactJobs = new Map<string, { id: string; state: "running" | "completed" | "failed"; error: string | null; message: string; path: string; algorithm: string }>();
   let ticking = false;
   let restoreFailed = false;
-  const manualOnly = new Set<string>();
-  const exclude = new Set<string>();
-  function volumeLetter(volume: { letter?: string | null; mountPaths?: string[] }): string {
-    return letterKey(volume.letter) || letterKey((volume.mountPaths?.[0] || "").slice(0, 2));
-  }
-  function isExcludedVolume(volume: { letter?: string | null; mountPaths?: string[]; volumeUuid?: string }): boolean {
-    const letter = volumeLetter(volume);
-    if (letter && exclude.has(letter)) return true;
-    const uuid = normalizeUuid(volume.volumeUuid || "");
-    return Boolean(uuid && exclude.has(uuid));
+  let guard: VolumeGuard = { manualOnly: new Set(), excludeLetters: new Set(), excludeUuids: new Set(), excludeSerials: new Set() };
+  function isExcludedVolume(volume: { letter?: string | null; mountPaths?: string[]; volumeUuid?: string; serial?: string }): boolean {
+    return matchesExcluded(guard, volume);
   }
   function isManualVolume(volume: { letter?: string | null; mountPaths?: string[] }): boolean {
-    const letter = volumeLetter(volume);
-    return Boolean(letter && manualOnly.has(letter));
+    const letter = letterKey(volume.letter) || letterKey((volume.mountPaths?.[0] || "").slice(0, 2));
+    return Boolean(letter && guard.manualOnly.has(letter));
   }
   const snapshotPath = process.env.SKLAD_AGENT_SNAPSHOT || path.join(process.cwd(), "data", "drive-agent-snapshot.json.gz");
   let persistChain: Promise<unknown> = Promise.resolve();
@@ -199,25 +193,14 @@ export function startAgent(options: {
   }
   const ready = (async () => {
     try {
-      const disabledPath = process.env.SKLAD_AGENT_DISABLED || path.join(process.cwd(), "data", "drive-agent-disabled.json");
-      const data = JSON.parse(await readFile(disabledPath, "utf8")) as { letters?: unknown; exclude?: unknown };
-      for (const letter of Array.isArray(data.letters) ? data.letters : []) {
-        const key = letterKey(String(letter));
-        if (key) manualOnly.add(key);
-      }
-      for (const item of Array.isArray(data.exclude) ? data.exclude : []) {
-        const text = String(item).trim();
-        const key = letterKey(text);
-        if (key) exclude.add(key);
-        else {
-          const uuid = normalizeUuid(text);
-          if (uuid) exclude.add(uuid);
-        }
-      }
+      guard = await loadVolumeGuard();
+      process.env.SKLAD_EXCLUDE_LETTERS = [...guard.excludeLetters].join(",");
     } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") note = "Не удалось прочитать исключения дисков."; }
     try {
       const saved = JSON.parse((await promisify(gunzip)(await readFile(snapshotPath))).toString());
-      volumes = (saved.volumes ?? []).map((v: TrackedVolume) => ({ ...v, indexedAt: v.indexedAt || Date.now(), freeAtIndex: v.freeBytes, usnStart: v.usnStart ?? null }));
+      volumes = (saved.volumes ?? [])
+        .filter((volume: TrackedVolume) => !isExcludedVolume(volume))
+        .map((volume: TrackedVolume) => ({ ...volume, indexedAt: volume.indexedAt || Date.now(), freeAtIndex: volume.freeBytes, usnStart: volume.usnStart ?? null }));
     } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") { restoreFailed = true; note = "Снимок повреждён: автоматическое сканирование отключено, нужен ручной запуск."; } }
   })();
 
@@ -310,6 +293,7 @@ export function startAgent(options: {
     const previous = new Map(volumes.map((volume) => [volumeKey(volume), volume]));
     const next: TrackedVolume[] = [];
     for (const volume of collected.volumes) {
+      if (isExcludedVolume(volume)) continue;
       const key = volumeKey(volume);
       const prior = previous.get(key);
       if (!prior) {
