@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { normalizeSerial, normalizeUuid } from "@/addons/drives/identity";
+import { ingestIsActive } from "@/addons/drives/shelf-ingest";
 import { indexFetchPlan } from "@/addons/drives/shelf-plan";
 import type { AgentEndpoint, DiskRecord, HostObservation, IndexPayload, RawIndexedFile } from "@/addons/drives/types";
 import { DriveError } from "@/addons/drives/types";
@@ -71,6 +72,7 @@ export async function pollAgent(agent: AgentEndpoint, known: readonly DiskRecord
       knownRevision: existing?.indexRevision,
       pendingRevision: existing?.pendingRevision,
       localRecords: localRecords(existing),
+      ingestActive: Boolean(index?.revision && ingestIsActive(String(volume.volumeUuid ?? ""), index.revision)),
     });
     if (plan === "none" || plan === "skip") {
       if (index) { delete index.files; delete index.delta; }

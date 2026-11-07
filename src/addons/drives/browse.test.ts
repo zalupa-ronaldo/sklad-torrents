@@ -115,6 +115,23 @@ describe("browse aggregates", () => {
     expect(browseDisk([z], "disk-z", "").entries).toEqual([]);
   });
 
+  it("does not show a pending snapshot root as a finished zero", () => {
+    const data = disk({
+      id: "disk-data",
+      label: "Data",
+      lastMountPath: "/System/Volumes/Data",
+      files: [],
+      connectedHosts: [{ id: "mac-mini", name: "Mac mini", os: "darwin", elevated: false, mountPaths: ["/System/Volumes/Data"] }],
+    });
+    data.reportedRecords = 1_540_488;
+    data.pendingRevision = "snap-data";
+    data.totalBytes = 250_000_000_000;
+    const root = browseRoots([data]).entries.find((entry) => entry.diskId === "disk-data");
+    expect(root?.sizesReady).toBe(false);
+    expect(root?.size).toBeNull();
+    expect(root?.fileCount).toBe(1_540_488);
+  });
+
   it("is case-sensitive on path segments when browsing", () => {
     const mixed: IndexedFile[] = [
       { relativePath: "Games/A.txt", name: "A.txt", kind: "file", size: 1, mtimeMs: 1, sidecarCategory: null, categories: [] },

@@ -89,6 +89,7 @@ export function toView(disks: readonly DiskRecord[]): DiskView[] {
       indexedBytes: summary.indexedBytes,
       sizesReady: !partial,
       sizesKnown: sizesKnown && !partial,
+      ingest: disk.ingest,
     };
   });
 }

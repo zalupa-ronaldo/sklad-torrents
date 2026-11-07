@@ -320,8 +320,14 @@ export function browseRoots(disks: readonly DiskRecord[], limit = 200, cursor = 
     const connected = online(disk);
     // An empty offline placeholder stays out of the tree. A connected disk stays, even with no index.
     if (disk.files.length === 0 && !connected && !disk.summary && !(disk.reportedRecords && disk.reportedRecords > 0)) continue;
-    const summarized = Boolean(disk.summary) && disk.files.length === 0;
-    const tree = summarized ? null : buildDiskTree(disk);
+    const shardReady = (disk.summary?.fileCount ?? 0) > 0 && (disk.shardBytes ?? 0) > 0 && !disk.pendingRevision;
+    const waiting = disk.files.length === 0 && !shardReady && (
+      Boolean(disk.pendingRevision) ||
+      (disk.ingest != null && disk.ingest.phase !== "done") ||
+      (disk.reportedRecords ?? 0) > 0
+    );
+    const summarized = !waiting && Boolean(disk.summary) && disk.files.length === 0 && (disk.summary?.fileCount ?? 0) > 0;
+    const tree = summarized || waiting ? null : buildDiskTree(disk);
     const name = displayDiskName({
       label: disk.label,
       volumeName: disk.volumeName,
@@ -336,7 +342,7 @@ export function browseRoots(disks: readonly DiskRecord[], limit = 200, cursor = 
       relativePath: "",
       displayPath: mount || name,
       kind: "dir",
-      size: tree ? tree.root.size : disk.summary && (disk.summary.unknownSizes ?? 0) > 0 && disk.summary.indexedBytes === 0 ? null : (disk.summary?.indexedBytes ?? 0),
+      size: waiting ? null : tree ? tree.root.size : disk.summary && (disk.summary.unknownSizes ?? 0) > 0 && disk.summary.indexedBytes === 0 ? null : (disk.summary?.indexedBytes ?? 0),
       allocated: tree ? tree.root.allocated : null,
       onDisk: tree ? tree.root.onDisk : null,
       compression: tree ? tree.root.compression : null,
@@ -345,7 +351,7 @@ export function browseRoots(disks: readonly DiskRecord[], limit = 200, cursor = 
       categories: tree ? [...tree.root.categories].slice(0, 6) : [],
       fileCount: tree ? tree.root.fileCount : (disk.summary?.fileCount ?? disk.reportedRecords ?? 0),
       dirCount: tree ? tree.root.dirCount : 0,
-      sizesReady: Boolean(tree) || Boolean(disk.summary),
+      sizesReady: waiting ? false : Boolean(tree) || Boolean(disk.summary && (disk.summary.fileCount > 0 || disk.files.length > 0)),
     });
   }
   entries.sort((a, b) => compareSizeDesc(a.size, b.size) || b.fileCount - a.fileCount || a.name.localeCompare(b.name, "ru"));

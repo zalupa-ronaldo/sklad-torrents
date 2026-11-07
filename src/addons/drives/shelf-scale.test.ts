@@ -42,7 +42,8 @@ describe("million-row shelf", () => {
     expect(indexFetchPlan({ state: undefined, recordCount: 0 })).toBe("none");
     expect(indexFetchPlan({ state: "idle", revision: "z", recordCount: 0 })).toBe("none");
     expect(indexFetchPlan({ state: "complete", revision: "data", recordCount: RECORDS })).toBe("defer");
-    expect(indexFetchPlan({ state: "complete", revision: "data", recordCount: RECORDS, pendingRevision: "data" })).toBe("skip");
+    expect(indexFetchPlan({ state: "complete", revision: "data", recordCount: RECORDS, pendingRevision: "data" })).toBe("defer");
+    expect(indexFetchPlan({ state: "complete", revision: "data", recordCount: RECORDS, pendingRevision: "data", ingestActive: true })).toBe("skip");
     expect(indexFetchPlan({ state: "complete", revision: "small", recordCount: 12 })).toBe("inline");
   });
 

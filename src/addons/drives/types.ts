@@ -113,6 +113,17 @@ export interface DiskRecord {
   shardRevision?: string;
   /** Byte size of fileStore. A non-empty shard is a real index even when the summary was saved as zero. */
   shardBytes?: number;
+  /** Page download of an existing agent snapshot. Absent means no ingest is in flight. */
+  ingest?: IngestProgress;
+}
+
+export interface IngestProgress {
+  phase: "queued" | "page" | "write" | "failed" | "done";
+  pages: number;
+  records: number;
+  expected: number;
+  /** Short status only: HTTP code or a fixed reason. No paths and no file names. */
+  error?: string;
 }
 
 export interface DiskSummary {
@@ -191,6 +202,8 @@ export interface DiskView {
   /** False when file rows exist but their logical sizes were not in the snapshot. */
   sizesKnown?: boolean;
   categoryCounts: Record<MediaCategory, number>;
+  /** Present while a snapshot download is queued, running, or has failed. */
+  ingest?: IngestProgress;
 }
 
 export interface ShelfResponse {
