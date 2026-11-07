@@ -4,6 +4,7 @@ import { copyFile, mkdir, readFile, rename, unlink, writeFile, stat } from "node
 import path from "node:path";
 import { createInterface } from "node:readline";
 
+import { uniqueDisks } from "@/addons/drives/disk-table";
 import { summarizeIndexed } from "@/addons/drives/disk-summary";
 import { mergeVolumeRecords } from "@/addons/drives/reconcile";
 import { recordStage } from "@/addons/drives/stage";
@@ -39,7 +40,7 @@ export function liveDisks(): DiskRecord[] | null {
 }
 
 export function setLiveDisks(disks: DiskRecord[]): void {
-  liveState.disks = disks;
+  liveState.disks = uniqueDisks(disks);
 }
 
 export function clearLiveDisks(): void {
@@ -47,9 +48,67 @@ export function clearLiveDisks(): void {
 }
 
 export function adoptCatalogDisks(incoming: readonly DiskRecord[]): DiskRecord[] {
-  const merged = mergeVolumeRecords([...(liveState.disks ?? []), ...incoming]);
+  const merged = uniqueDisks(mergeVolumeRecords([...(liveState.disks ?? []), ...incoming]));
   liveState.disks = merged;
   return merged;
+}
+
+const resetState = ((globalThis as typeof globalThis & { __skladCatalogReset?: { readyDir: string } }).__skladCatalogReset ??= { readyDir: "" });
+
+/** Fresh catalog from agent snapshots. The previous drives.json is archived, not parsed. */
+export function catalogResetRequested(): boolean {
+  return process.env.SKLAD_CATALOG_RESET === "1";
+}
+
+export function resetMarkerPath(): string {
+  return path.join(dataDir(), "catalog-reset.json");
+}
+
+async function moveAside(source: string, dest: string): Promise<boolean> {
+  try {
+    await stat(source);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
+  }
+  await mkdir(path.dirname(dest), { recursive: true });
+  await rename(source, dest);
+  return true;
+}
+
+/**
+ * Move the active catalog, premigrate file, overlay, and shard directory into archive/.
+ * Runs once per data dir. A later process start does not archive the clean catalog again.
+ */
+export async function ensureCleanCatalog(): Promise<{ archivedTo: string | null }> {
+  if (!catalogResetRequested()) return { archivedTo: null };
+  const dir = dataDir();
+  if (resetState.readyDir === dir) return { archivedTo: null };
+  const marker = resetMarkerPath();
+  try {
+    const saved = JSON.parse(await readFile(marker, "utf8")) as { applied?: boolean };
+    if (saved.applied === true) {
+      resetState.readyDir = dir;
+      return { archivedTo: null };
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const dest = path.join(dataDir(), "archive", stamp);
+  await mkdir(dest, { recursive: true });
+  const root = dataDir();
+  await moveAside(path.join(root, "drives.json"), path.join(dest, "drives.json"));
+  await moveAside(path.join(root, "drives.json.premigrate"), path.join(dest, "drives.json.premigrate"));
+  await moveAside(path.join(root, "drives.json.overlay"), path.join(dest, "drives.json.overlay"));
+  await moveAside(path.join(root, "drive-files"), path.join(dest, "drive-files"));
+  await writeFile(marker, JSON.stringify({ applied: true, archivedTo: dest, at: new Date().toISOString() }));
+  clearLiveDisks();
+  catalogCache.clear();
+  const { clearBrowseCache } = await import("@/addons/drives/browse");
+  clearBrowseCache();
+  resetState.readyDir = dataDir();
+  return { archivedTo: dest };
 }
 
 let writeChain: Promise<unknown> = Promise.resolve();
@@ -88,6 +147,7 @@ export function premigratePath(): string {
 
 /** True when the live catalog or a preserved original is large enough to migrate off the request. */
 export async function catalogNeedsMigrate(): Promise<boolean> {
+  if (catalogResetRequested()) return false;
   const current = await catalogFileBytes();
   const backup = await fileBytes(premigratePath());
   return current > HEAVY_CATALOG_BYTES || (backup > HEAVY_CATALOG_BYTES && backup > current);
@@ -98,6 +158,7 @@ export function cacheCatalog(file: CatalogFile): void {
 }
 
 export async function readCatalog(): Promise<CatalogFile | null> {
+  await ensureCleanCatalog();
   try {
     const target = catalogFilePath();
     const info = await stat(target);
@@ -118,6 +179,9 @@ export async function readCatalog(): Promise<CatalogFile | null> {
     if (!parsed || (parsed.version !== 1 && parsed.version !== 2) || !Array.isArray(parsed.disks)) {
       throw new DriveError(500, "Каталог полки повреждён.");
     }
+    const before = parsed.disks.length;
+    parsed.disks = uniqueDisks(parsed.disks);
+    if (parsed.disks.length !== before) recordStage("catalog-dedupe", 0, before);
     catalogCache.set(target, { stamp, baseStamp, file: parsed });
     return parsed;
   } catch (error) {
@@ -128,6 +192,7 @@ export async function readCatalog(): Promise<CatalogFile | null> {
 }
 
 async function writeCatalogBody(file: CatalogFile): Promise<void> {
+  file = { ...file, disks: uniqueDisks(file.disks) };
   const target = catalogFilePath();
   await mkdir(path.dirname(target), { recursive: true });
   const tmp = uniqueTemp(target);
@@ -236,7 +301,7 @@ export async function attachShardStats(disks: readonly DiskRecord[]): Promise<vo
 }
 
 export async function persistLargeCatalogUnlocked(disks: DiskRecord[]): Promise<void> {
-  const merged = mergeVolumeRecords([...(liveDisks() ?? []), ...disks]);
+  const merged = uniqueDisks(mergeVolumeRecords(uniqueDisks([...(liveDisks() ?? []), ...disks])));
   const dir = path.join(dataDir(), "drive-files");
   await mkdir(dir, { recursive: true });
   for (const disk of merged) {
@@ -254,7 +319,7 @@ export async function persistLargeCatalogUnlocked(disks: DiskRecord[]): Promise<
     disk.summary = summarizeIndexed(disk.files);
     recordStage("shard-write", performance.now() - started, disk.files.length);
   }
-  const installed = mergeVolumeRecords([...(liveDisks() ?? []), ...merged]);
+  const installed = uniqueDisks(merged);
   await writeCatalogBody({
     version: 2,
     seeded: true,

@@ -1,3 +1,4 @@
+import { uniqueDisks } from "@/addons/drives/disk-table";
 import { applyIndexUpdate, emptyScan } from "@/addons/drives/index-apply";
 import { anonymousDiskId, formatUuid, identityKey, normalizeSerial, normalizeUuid, stableDiskId } from "@/addons/drives/identity";
 import type {
@@ -90,7 +91,7 @@ function styleFor(os: HostObservation["os"]): PathStyle {
 function createDisk(volume: ObservedVolume, observation: HostObservation, at: string, mountPaths: string[]): DiskRecord {
   const serialNorm = normalizeSerial(volume.serial);
   const uuidNorm = normalizeUuid(volume.volumeUuid);
-  const id = serialNorm ? stableDiskId(volume.serial, volume.volumeUuid) : anonymousDiskId();
+  const id = uuidNorm ? stableDiskId(volume.serial, volume.volumeUuid) : anonymousDiskId();
   return {
     id,
     serial: volume.serial.trim(),
@@ -199,8 +200,9 @@ export function reconcileCatalog(
       const mountPaths = uniquePaths(volume.mountPaths);
       let disk = findDisk(disks, volume, observation.hostId, seenIds);
       if (!disk) {
-        disk = createDisk(volume, observation, at, mountPaths);
-        disks.push(disk);
+        const created = createDisk(volume, observation, at, mountPaths);
+        disk = disks.find((item) => item.id === created.id) ?? created;
+        if (disk === created) disks.push(disk);
       }
       disk.filesystem = volume.filesystem.trim() || disk.filesystem;
       disk.volumeName = volume.volumeName.trim() || disk.volumeName;
@@ -245,7 +247,7 @@ export function reconcileCatalog(
     });
     disk.duplicateMounts = disk.connectedHosts.some((host) => host.mountPaths.length > 1);
   }
-  const merged = mergeVolumeRecords(disks);
+  const merged = uniqueDisks(mergeVolumeRecords(uniqueDisks(disks)));
   refreshClones(merged);
   return merged;
 }

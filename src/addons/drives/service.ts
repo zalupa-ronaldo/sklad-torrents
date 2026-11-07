@@ -6,7 +6,8 @@ import { loadLibraries } from "@/addons/drives/libraries";
 import { buildMockCatalog, liveObservations } from "@/addons/drives/mock-source";
 import { detachUnreachableHosts, mountPathsOf, online, reconcileCatalog } from "@/addons/drives/reconcile";
 import { searchDisks } from "@/addons/drives/search";
-import { readAgentConfig, readCatalog, writeCatalog, writeCatalogChanges, cacheCatalog, setLiveDisks, liveDisks, catalogNeedsMigrate, persistLargeCatalog, attachShardStats, shardIsCurrent, type CatalogFile } from "@/addons/drives/store";
+import { readAgentConfig, readCatalog, writeCatalog, writeCatalogChanges, cacheCatalog, setLiveDisks, liveDisks, catalogNeedsMigrate, persistLargeCatalog, attachShardStats, shardIsCurrent, ensureCleanCatalog, type CatalogFile } from "@/addons/drives/store";
+import { uniqueDisks } from "@/addons/drives/disk-table";
 import { startLegacyCatalogMigrate } from "@/addons/drives/catalog-migrate";
 import type { DiskRecord, DiskView, DriveMode, HostObservation, SearchResponse, ShelfResponse } from "@/addons/drives/types";
 import { DriveError } from "@/addons/drives/types";
@@ -102,7 +103,19 @@ async function save(disks: DiskRecord[], seeded: boolean): Promise<void> {
   await writeCatalog(file);
 }
 
-export async function getShelf(): Promise<ShelfResponse> {
+let shelfFlight: Promise<ShelfResponse> | null = null;
+
+export function getShelf(): Promise<ShelfResponse> {
+  if (!shelfFlight) {
+    shelfFlight = loadShelf().finally(() => {
+      shelfFlight = null;
+    });
+  }
+  return shelfFlight;
+}
+
+async function loadShelf(): Promise<ShelfResponse> {
+  await ensureCleanCatalog();
   return withLock(async () => {
     const config = await readAgentConfig();
     const libraries = await loadLibraries();
@@ -133,9 +146,10 @@ export async function getShelf(): Promise<ShelfResponse> {
       }),
       config.agents,
     );
-    setLiveDisks(disks);
+    const unique = uniqueDisks(disks);
+    setLiveDisks(unique);
     if (deferred.length > 0) scheduleIndexIngest(deferred, libraries);
-    const changed = !stored || disks.length !== stored.disks.length || disks.some((disk) => {
+    const changed = !stored || unique.length !== stored.disks.length || unique.some((disk) => {
       const before = stored.disks.find((item) => item.id === disk.id);
       if (!before) return true;
       if (before.indexRevision !== disk.indexRevision || before.fileStore !== disk.fileStore || before.shardRevision !== disk.shardRevision) return true;
@@ -143,11 +157,11 @@ export async function getShelf(): Promise<ShelfResponse> {
       if (before.files === disk.files || shardIsCurrent(disk)) return false;
       return true;
     });
-    const large = disks.some((disk) => disk.files.length > 20_000 || Boolean(disk.fileStore));
-    if (!heavy && changed && !large) await writeCatalogChanges({ version: 1, seeded: true, disks }, stored);
-    else if (!heavy && changed && large) void persistLargeCatalog(disks).catch(() => undefined);
-    else if (!heavy) cacheCatalog({ version: 1, seeded: true, disks });
-    return present(disks, "agents", errors);
+    const large = unique.some((disk) => disk.files.length > 20_000 || Boolean(disk.fileStore));
+    if (!heavy && changed && !large) await writeCatalogChanges({ version: 1, seeded: true, disks: unique }, stored);
+    else if (!heavy && changed && large) void persistLargeCatalog(unique).catch(() => undefined);
+    else if (!heavy) cacheCatalog({ version: 1, seeded: true, disks: unique });
+    return present(unique, "agents", errors);
   });
 }
 

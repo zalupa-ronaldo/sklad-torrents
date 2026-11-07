@@ -108,7 +108,7 @@ describe("disk identity", () => {
     expect(new Set(disks.map((disk) => disk.id)).size).toBe(2);
   });
 
-  it("does not merge a missing serial with the same UUID", () => {
+  it("keeps one stable id when the serial is missing and the UUID is the same", () => {
     let disks = reconcileCatalog(
       [],
       [host({ os: "darwin", volumes: [volume({ serial: "", volumeUuid: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee", filesystem: "APFS", mountPaths: ["/Volumes/one"] })] })],
@@ -122,8 +122,8 @@ describe("disk identity", () => {
       libs,
       "2026-03-03T00:00:00.000Z",
     );
-    expect(disks).toHaveLength(2);
-    expect(disks.every((disk) => disk.possibleClone)).toBe(true);
+    expect(disks).toHaveLength(1);
+    expect(disks[0]?.lastMountPath).toBe("/Volumes/two");
     expect(normalizeSerial("")).toBe("");
     expect(normalizeUuid("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee")).toBe(normalizeUuid("{AAAAAAAA-BBBB-4CCC-8DDD-EEEEEEEEEEEE}"));
   });
