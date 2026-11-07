@@ -3,7 +3,7 @@ import { promisify } from "node:util";
 
 import { assertSpawnAllowed } from "../../src/addons/drives/commands.ts";
 import type { CollectedVolume } from "../../src/addons/drives/types.ts";
-import { parseWindowsVolumes, type WindowsVolumeReport } from "../../src/addons/drives/win-volumes.ts";
+import { parseWindowsVolumes, windowsSkipNote, type WindowsVolumeReport } from "../../src/addons/drives/win-volumes.ts";
 import { loadVolumeGuard } from "../../src/addons/drives/volume-guard.ts";
 import { WINDOWS_VOLUME_SCRIPT } from "../../src/addons/drives/win-script.ts";
 
@@ -30,5 +30,6 @@ export async function collectWindows(): Promise<{ elevated: boolean; volumes: Co
     excludeUuids: [...guard.excludeUuids],
     excludeSerials: [...guard.excludeSerials],
   });
-  return { elevated: parsed.elevated, volumes: parsed.volumes, note: "" };
+  // admin is the process token. A missing or denied letter stays in the note and does not clear it.
+  return { elevated: parsed.elevated, volumes: parsed.volumes, note: windowsSkipNote(report, parsed.volumes) };
 }

@@ -27,11 +27,18 @@ interface WinPerf {
   PercentDiskTime?: number | string | null;
 }
 
+export interface WindowsSkip {
+  letter?: string | null;
+  kind?: string | null;
+  message?: string | null;
+}
+
 export interface WindowsVolumeReport {
   disks?: WinDisk[] | WinDisk | null;
   parts?: WinPart[] | WinPart | null;
   vols?: WinVol[] | WinVol | null;
   perf?: WinPerf[] | WinPerf | null;
+  skipped?: WindowsSkip[] | WindowsSkip | null;
   admin?: boolean;
 }
 
@@ -99,4 +106,21 @@ export function parseWindowsVolumes(
     });
   }
   return { volumes, elevated: report.admin === true };
+}
+
+/** Absent and access skips are metadata. They do not change the administrator token. */
+export function windowsSkipNote(report: WindowsVolumeReport, volumes: readonly { letter?: string | null }[]): string {
+  const online = new Set(volumes.map((volume) => letterOf(volume.letter)).filter(Boolean));
+  const absent: string[] = [];
+  const access: string[] = [];
+  for (const row of asList(report.skipped)) {
+    const letter = letterOf(row.letter);
+    if (!letter || online.has(letter)) continue;
+    if (row.kind === "absent") absent.push(letter);
+    else if (row.kind === "access") access.push(letter);
+  }
+  const parts: string[] = [];
+  if (absent.length) parts.push(`В реестре есть буква без тома: ${absent.join(", ")}.`);
+  if (access.length) parts.push(`Нет доступа к тому: ${access.join(", ")}.`);
+  return parts.join(" ");
 }

@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { executeIndexPlan } from "@/addons/drives/execute-index";
 import { normalizeUuid } from "@/addons/drives/identity";
-import { WINDOWS_VOLUME_SCRIPT } from "@/addons/drives/win-script";
+import { ABSENT_VOLUME_ERROR, ACCESS_VOLUME_ERROR, WINDOWS_VOLUME_SCRIPT } from "@/addons/drives/win-script";
 import { parseWindowsVolumes } from "@/addons/drives/win-volumes";
 import { readNtfsLetter, readUsn } from "../../../agents/lib/indexers.mts";
 import {
@@ -70,6 +70,18 @@ describe("volume guard", () => {
     expect(script).toContain("SKLAD_EXCLUDE_LETTERS");
     expect(script).toContain("'HKLM:\\SYSTEM\\MountedDevices'");
     expect(script).toContain("'\\\\DosDevices\\\\([A-Z]):$'");
+    expect(script).toMatch(/\$ErrorActionPreference = 'Continue'/);
+    expect(script).not.toMatch(/\$ErrorActionPreference = 'Stop'/);
+    const token = script.indexOf("WindowsIdentity]::GetCurrent");
+    const loop = script.indexOf("foreach ($letter");
+    const volume = script.indexOf("Get-Volume");
+    expect(token).toBeGreaterThan(0);
+    expect(token).toBeLessThan(loop);
+    expect(script.lastIndexOf("try {", volume)).toBeGreaterThan(loop);
+    expect(script.indexOf("continue", volume)).toBeGreaterThan(volume);
+    expect(script).toContain(ABSENT_VOLUME_ERROR);
+    expect(script).toContain(ACCESS_VOLUME_ERROR);
+    expect(script).not.toMatch(/\$admin = \$false/);
   });
 
   it("refuses Z inside every PowerShell device script before CreateFile", () => {
