@@ -1,3 +1,4 @@
+import { normalizeUuid } from "@/addons/drives/identity";
 import { mountPathsOf } from "@/addons/drives/reconcile";
 import type { DiskRecord, DiskView } from "@/addons/drives/types";
 import { formatBytes } from "@/lib/format";
@@ -22,21 +23,21 @@ function faceMounts(disk: DiskFace): string[] {
   return [...(disk.mountPaths ?? []), disk.lastMountPath].filter(Boolean);
 }
 
-function faceName(disk: DiskFace): string {
-  return `${disk.volumeName || ""} ${disk.label || ""}`.trim();
+function faceNames(disk: DiskFace): string[] {
+  return [disk.volumeName, disk.label].map((value) => (value || "").trim()).filter(Boolean);
 }
 
 export function isDataVolume(disk: DiskFace): boolean {
   const mounts = faceMounts(disk).map((path) => path.replace(/\\/g, "/"));
   if (mounts.some((path) => /\/system\/volumes\/data$/i.test(path))) return true;
-  return /macintosh hd\s*-\s*data$/i.test(faceName(disk));
+  return faceNames(disk).some((name) => /macintosh hd\s*-\s*data$/i.test(name));
 }
 
 export function isSealedSystemVolume(disk: DiskFace): boolean {
   if (isDataVolume(disk)) return false;
   const mounts = faceMounts(disk);
   if (mounts.some((path) => path === "/")) return true;
-  return /^macintosh hd$/i.test(faceName(disk).trim());
+  return faceNames(disk).some((name) => /^macintosh hd$/i.test(name));
 }
 
 function samePhysicalDisk(left: DiskFace, right: DiskFace): boolean {
@@ -80,6 +81,31 @@ export function isStripDisk(disk: Pick<DiskView, "id" | "label" | "volumeName" |
 
 export function visibleShelfDisks<T extends DiskFace & { online?: boolean }>(disks: readonly T[]): T[] {
   return disks.filter((disk) => isStripDisk(disk as unknown as Parameters<typeof isStripDisk>[0], disks));
+}
+
+function preferShelfDisk<T extends DiskFace & { namedByUser?: boolean; fileCount?: number; online?: boolean; label: string }>(left: T, right: T): T {
+  const score = (disk: T) => (disk.namedByUser ? 1_000_000_000 : 0) + (disk.fileCount ?? 0) + (disk.online ? 1 : 0);
+  const rich = score(left) >= score(right) ? left : right;
+  const alias = left.namedByUser ? left : right.namedByUser ? right : null;
+  if (alias && alias !== rich) return { ...rich, label: alias.label, namedByUser: true };
+  return rich;
+}
+
+/** One chip per volume UUID. Capacity and display name are not identity. APFS Data hides its sealed twin. */
+export function dedupeShelfDisks<T extends DiskFace & { volumeUuid?: string; namedByUser?: boolean; fileCount?: number; online?: boolean }>(disks: readonly T[]): T[] {
+  const visible = visibleShelfDisks(disks);
+  const byUuid = new Map<string, T>();
+  const rest: T[] = [];
+  for (const disk of visible) {
+    const uuid = normalizeUuid(disk.volumeUuid || "");
+    if (!uuid) {
+      rest.push(disk);
+      continue;
+    }
+    const prev = byUuid.get(uuid);
+    byUuid.set(uuid, prev ? preferShelfDisk(prev, disk) : disk);
+  }
+  return visibleShelfDisks([...byUuid.values(), ...rest]);
 }
 
 export function isBrowsableRecord(disk: DiskRecord, siblings: readonly DiskRecord[] = [disk]): boolean {

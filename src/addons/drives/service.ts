@@ -4,9 +4,9 @@ import { scheduleIndexIngest } from "@/addons/drives/shelf-ingest";
 import { applyIndexUpdate } from "@/addons/drives/index-apply";
 import { loadLibraries } from "@/addons/drives/libraries";
 import { buildMockCatalog, liveObservations } from "@/addons/drives/mock-source";
-import { mountPathsOf, online, reconcileCatalog } from "@/addons/drives/reconcile";
+import { detachUnreachableHosts, mountPathsOf, online, reconcileCatalog } from "@/addons/drives/reconcile";
 import { searchDisks } from "@/addons/drives/search";
-import { readAgentConfig, readCatalog, writeCatalog, writeCatalogChanges, cacheCatalog, setLiveDisks, liveDisks, catalogFileBytes, HEAVY_CATALOG_BYTES, persistLargeCatalog, type CatalogFile } from "@/addons/drives/store";
+import { readAgentConfig, readCatalog, writeCatalog, writeCatalogChanges, cacheCatalog, setLiveDisks, liveDisks, catalogNeedsMigrate, persistLargeCatalog, attachShardStats, shardIsCurrent, type CatalogFile } from "@/addons/drives/store";
 import { startLegacyCatalogMigrate } from "@/addons/drives/catalog-migrate";
 import type { DiskRecord, DiskView, DriveMode, HostObservation, SearchResponse, ShelfResponse } from "@/addons/drives/types";
 import { DriveError } from "@/addons/drives/types";
@@ -24,11 +24,22 @@ function withLock<T>(fn: () => Promise<T>): Promise<T> {
 
 const summaryCache = new WeakMap<DiskRecord["files"], DiskRecord["summary"] & object>();
 
-function summaryOf(disk: DiskRecord): { summary: NonNullable<DiskRecord["summary"]>; partial: boolean } {
-  if (disk.summary) return { summary: disk.summary, partial: false };
-  const cached = summaryCache.get(disk.files);
-  if (cached) return { summary: cached, partial: false };
+function summaryOf(disk: DiskRecord): { summary: NonNullable<DiskRecord["summary"]>; partial: boolean; sizesKnown: boolean } {
   const reported = disk.reportedRecords ?? 0;
+  if (disk.summary) {
+    const emptyClaim = reported > 0 && disk.summary.fileCount === 0 && disk.files.length === 0 && !disk.fileStore;
+    if (emptyClaim) {
+      return {
+        summary: { ...disk.summary, fileCount: reported, indexedBytes: 0 },
+        partial: true,
+        sizesKnown: false,
+      };
+    }
+    const unknown = disk.summary.unknownSizes ?? 0;
+    return { summary: disk.summary, partial: false, sizesKnown: unknown === 0 || disk.summary.indexedBytes > 0 };
+  }
+  const cached = summaryCache.get(disk.files);
+  if (cached) return { summary: cached, partial: false, sizesKnown: (cached.unknownSizes ?? 0) === 0 || cached.indexedBytes > 0 };
   // The file list is not in memory yet, or it is too large to total inside this request.
   if ((disk.files.length === 0 && reported > 0) || disk.files.length > 50_000 || disk.pendingRevision) {
     return {
@@ -38,18 +49,19 @@ function summaryOf(disk: DiskRecord): { summary: NonNullable<DiskRecord["summary
         categoryCounts: { torrent: 0, game: 0, media: 0, series: 0, installer: 0, music: 0, software: 0, documents: 0 },
       },
       partial: true,
+      sizesKnown: false,
     };
   }
   const summary = summarizeIndexed(disk.files);
   disk.summary = summary;
   summaryCache.set(disk.files, summary);
-  return { summary, partial: false };
+  return { summary, partial: false, sizesKnown: (summary.unknownSizes ?? 0) === 0 || summary.indexedBytes > 0 };
 }
 
 export function toView(disks: readonly DiskRecord[]): DiskView[] {
   const byId = new Map(disks.map((disk) => [disk.id, disk]));
   return disks.map((disk) => {
-    const { summary, partial } = summaryOf(disk);
+    const { summary, partial, sizesKnown } = summaryOf(disk);
     return {
       id: disk.id,
       label: disk.label,
@@ -75,6 +87,7 @@ export function toView(disks: readonly DiskRecord[]): DiskView[] {
       fileCount: partial ? (disk.reportedRecords || summary.fileCount) : summary.fileCount,
       indexedBytes: summary.indexedBytes,
       sizesReady: !partial,
+      sizesKnown: sizesKnown && !partial,
     };
   });
 }
@@ -94,13 +107,14 @@ export async function getShelf(): Promise<ShelfResponse> {
     const config = await readAgentConfig();
     const libraries = await loadLibraries();
     const remembered = liveDisks();
-    const heavy = config.mode === "agents" && !remembered && (await catalogFileBytes()) > HEAVY_CATALOG_BYTES;
+    const heavy = config.mode === "agents" && !remembered && (await catalogNeedsMigrate());
     if (heavy) startLegacyCatalogMigrate();
     const stored = remembered
       ? { version: 1 as const, seeded: true, disks: remembered }
       : heavy
         ? { version: 1 as const, seeded: true, disks: [] as DiskRecord[] }
         : await readCatalog();
+    if (stored) await attachShardStats(stored.disks);
     const now = new Date().toISOString();
     if (config.mode === "mock") {
       const base = stored?.seeded ? stored.disks : buildMockCatalog(libraries);
@@ -108,17 +122,30 @@ export async function getShelf(): Promise<ShelfResponse> {
       await save(disks, true);
       return present(disks, "mock", []);
     }
-    const { observations, errors, deferred } = await pollAgents(config.agents, stored?.disks ?? []);
-    const disks = reconcileCatalog(stored?.disks ?? [], observations, libraries, now);
+    const { observations, errors, deferred } = await pollAgents(config.agents, liveDisks() ?? stored?.disks ?? []);
+    const base = liveDisks() ?? stored?.disks ?? [];
+    const reconciled = reconcileCatalog(base, observations, libraries, now);
+    const disks = detachUnreachableHosts(
+      reconciled,
+      errors.flatMap((error) => {
+        const agent = config.agents.find((item) => item.id === error.hostId);
+        return agent ? [{ id: agent.id, name: agent.name, os: agent.os }] : [];
+      }),
+      config.agents,
+    );
     setLiveDisks(disks);
     if (deferred.length > 0) scheduleIndexIngest(deferred, libraries);
     const changed = !stored || disks.length !== stored.disks.length || disks.some((disk) => {
       const before = stored.disks.find((item) => item.id === disk.id);
-      return !before || before.files !== disk.files;
+      if (!before) return true;
+      if (before.indexRevision !== disk.indexRevision || before.fileStore !== disk.fileStore || before.shardRevision !== disk.shardRevision) return true;
+      if (before.label !== disk.label || before.connectedHosts.length !== disk.connectedHosts.length) return true;
+      if (before.files === disk.files || shardIsCurrent(disk)) return false;
+      return true;
     });
     const large = disks.some((disk) => disk.files.length > 20_000 || Boolean(disk.fileStore));
     if (!heavy && changed && !large) await writeCatalogChanges({ version: 1, seeded: true, disks }, stored);
-    else if (!heavy && changed && large) void persistLargeCatalog(disks);
+    else if (!heavy && changed && large) void persistLargeCatalog(disks).catch(() => undefined);
     else if (!heavy) cacheCatalog({ version: 1, seeded: true, disks });
     return present(disks, "agents", errors);
   });
@@ -158,21 +185,31 @@ export async function browseShelf(diskId: string | null, relativePath = "", curs
   return browseDisk(disks, diskId, relativePath, limit, cursor);
 }
 
-export async function renameDisk(id: string, label: string): Promise<DiskView> {
+export async function renameDisk(id: string, label: string, reset = false): Promise<DiskView> {
   const next = label.trim();
-  if (!next) throw new DriveError(400, "Укажите имя диска.");
-  if (next.length > 80) throw new DriveError(400, "Имя диска длиннее 80 символов.");
+  if (!reset) {
+    if (!next) throw new DriveError(400, "Укажите имя или сбросьте псевдоним.");
+    if (next.length > 80) throw new DriveError(400, "Имя длиннее 80 символов.");
+    if (/[\u0000-\u001f<>]/.test(next)) throw new DriveError(400, "Имя содержит недопустимые символы.");
+  }
   return withLock(async () => {
     const config = await readAgentConfig();
     const libraries = await loadLibraries();
-    const stored = await readCatalog();
-    const base = stored?.disks ?? (config.mode === "mock" ? buildMockCatalog(libraries) : []);
+    const live = liveDisks();
+    const stored = live ? null : await readCatalog();
+    const base = live ?? stored?.disks ?? (config.mode === "mock" ? buildMockCatalog(libraries) : []);
     const disk = base.find((item) => item.id === id);
     if (!disk) throw new DriveError(404, "Диск на полке не найден.");
-    disk.label = next;
-    disk.namedByUser = true;
-    await save(base, true);
-    return toView(base).find((item) => item.id === id)!;
+    if (reset) {
+      disk.label = disk.volumeName || "Без имени";
+      disk.namedByUser = false;
+    } else {
+      disk.label = next;
+      disk.namedByUser = true;
+    }
+    if (base.some((item) => item.files.length > 20_000 || item.fileStore)) await persistLargeCatalog(base);
+    else await save(base, true);
+    return toView(liveDisks() ?? base).find((item) => item.id === id)!;
   });
 }
 

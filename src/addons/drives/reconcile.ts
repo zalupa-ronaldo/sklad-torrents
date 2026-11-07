@@ -67,7 +67,10 @@ function findDisk(
   const uuidNorm = normalizeUuid(volume.volumeUuid);
   if (!uuidNorm) return undefined;
   if (serialNorm) {
-    return disks.find((disk) => disk.serialNorm === serialNorm && disk.uuidNorm === uuidNorm);
+    const exact = disks.find((disk) => !alreadySeen.has(disk.id) && disk.serialNorm === serialNorm && disk.uuidNorm === uuidNorm);
+    if (exact) return exact;
+    // A previous generation stored the same UUID without a serial. Keep that record so its files stay attached.
+    return disks.find((disk) => !alreadySeen.has(disk.id) && disk.uuidNorm === uuidNorm && !disk.serialNorm);
   }
   // Missing serial is not proof of identity. Continue a record only while the same
   // host still has it at an overlapping mount. Anything else is a separate disk.
@@ -220,10 +223,14 @@ export function reconcileCatalog(
       disk.files = applied.files;
       disk.scan = applied.scan;
       if (typeof volume.index?.recordCount === "number") disk.reportedRecords = volume.index.recordCount;
+      const hasLocalIndex = disk.files.length > 0 || Boolean(disk.fileStore && ((disk.shardBytes ?? 0) > 0 || (disk.summary?.fileCount ?? 0) > 0));
       if (volume.index?.deferred && volume.index.revision) disk.pendingRevision = volume.index.revision;
-      else if (volume.index?.revision && !volume.index.deferred) {
+      else if (volume.index?.revision && !volume.index.deferred && (hasLocalIndex || (volume.index.files?.length ?? 0) > 0)) {
+        // A metadata revision alone must not mark an empty catalog complete: that skips the snapshot download.
         disk.indexRevision = volume.index.revision;
         disk.pendingRevision = undefined;
+      } else if (volume.index?.revision && !hasLocalIndex) {
+        disk.pendingRevision = volume.index.revision;
       }
       seenIds.add(disk.id);
     }
@@ -238,8 +245,99 @@ export function reconcileCatalog(
     });
     disk.duplicateMounts = disk.connectedHosts.some((host) => host.mountPaths.length > 1);
   }
-  refreshClones(disks);
-  return disks;
+  const merged = mergeVolumeRecords(disks);
+  refreshClones(merged);
+  return merged;
+}
+
+export function diskRichness(disk: DiskRecord): number {
+  const stored = disk.files.length;
+  const summary = disk.summary?.fileCount ?? 0;
+  const shard = (disk.shardBytes ?? 0) > 0 ? Math.max(summary, disk.reportedRecords ?? 0, 1) : 0;
+  const store = disk.fileStore ? Math.max(summary, disk.reportedRecords ?? 0, shard, 1) : 0;
+  return Math.max(stored, store);
+}
+
+function mountsOf(disk: DiskRecord): string[] {
+  return [disk.lastMountPath, ...disk.connectedHosts.flatMap((host) => host.mountPaths)].filter(Boolean);
+}
+
+function canMergeVolumes(left: DiskRecord, right: DiskRecord): boolean {
+  if (!left.uuidNorm || left.uuidNorm !== right.uuidNorm) return false;
+  if (left.serialNorm && right.serialNorm && left.serialNorm !== right.serialNorm) {
+    if (diskRichness(left) > 0 && diskRichness(right) > 0) return false;
+    if (diskRichness(left) === 0 && diskRichness(right) === 0) {
+      const sameName = Boolean(left.volumeName) && left.volumeName === right.volumeName;
+      const mounts = new Set(mountsOf(left));
+      return sameName || mountsOf(right).some((path) => mounts.has(path));
+    }
+    return true;
+  }
+  if (!left.serialNorm && !right.serialNorm) return false;
+  return true;
+}
+
+function mergePair(left: DiskRecord, right: DiskRecord): DiskRecord {
+  const keeper = diskRichness(left) > diskRichness(right) ? left : diskRichness(right) > diskRichness(left) ? right : left.fileStore ? left : right;
+  const other = keeper === left ? right : left;
+  if (keeper.files.length === 0 && other.files.length > 0) keeper.files = other.files;
+  if (!keeper.fileStore && other.fileStore) keeper.fileStore = other.fileStore;
+  if ((keeper.shardBytes ?? 0) < (other.shardBytes ?? 0) && other.fileStore) {
+    keeper.fileStore = other.fileStore;
+    keeper.shardBytes = other.shardBytes;
+    keeper.shardRevision = other.shardRevision ?? keeper.shardRevision;
+  }
+  if (!keeper.shardRevision && other.shardRevision) keeper.shardRevision = other.shardRevision;
+  if ((keeper.summary?.fileCount ?? 0) === 0 && (other.summary?.fileCount ?? 0) > 0) keeper.summary = other.summary;
+  if ((keeper.reportedRecords ?? 0) < (other.reportedRecords ?? 0)) keeper.reportedRecords = other.reportedRecords;
+  if (!keeper.serialNorm && other.serialNorm) {
+    keeper.serial = other.serial;
+    keeper.serialNorm = other.serialNorm;
+  }
+  if (other.namedByUser && !keeper.namedByUser) {
+    keeper.label = other.label;
+    keeper.namedByUser = true;
+  }
+  const hosts = new Map(keeper.connectedHosts.map((host) => [host.id, host]));
+  for (const host of other.connectedHosts) if (!hosts.has(host.id)) hosts.set(host.id, host);
+  keeper.connectedHosts = [...hosts.values()];
+  return keeper;
+}
+
+/** One record per volume. A richer catalog wins over an empty twin. Clones with different serials and real files stay apart. */
+export function mergeVolumeRecords(disks: readonly DiskRecord[]): DiskRecord[] {
+  const groups: DiskRecord[][] = [];
+  const rest: DiskRecord[] = [];
+  for (const disk of disks) {
+    if (!disk.uuidNorm) {
+      rest.push(disk);
+      continue;
+    }
+    const group = groups.find((items) => items.some((item) => canMergeVolumes(item, disk)));
+    if (group) group.push(disk);
+    else groups.push([disk]);
+  }
+  return [...groups.map((group) => group.reduce(mergePair)), ...rest];
+}
+
+/** Drop hosts whose agent did not answer. Files, summaries, and sizes stay. */
+export function detachUnreachableHosts(
+  disks: readonly DiskRecord[],
+  failed: readonly { id: string; name: string; os: "darwin" | "win32" }[],
+  agents: readonly { id: string; os: "darwin" | "win32" }[] = [],
+): DiskRecord[] {
+  if (failed.length === 0) return disks.map((disk) => disk);
+  const ids = new Set(failed.map((item) => item.id));
+  const names = new Set(failed.map((item) => item.name));
+  const offlineOs = new Set<"darwin" | "win32">();
+  for (const os of ["darwin", "win32"] as const) {
+    const group = agents.filter((agent) => agent.os === os);
+    if (group.length > 0 && group.every((agent) => ids.has(agent.id))) offlineOs.add(os);
+  }
+  return disks.map((disk) => ({
+    ...disk,
+    connectedHosts: disk.connectedHosts.filter((host) => !ids.has(host.id) && !names.has(host.name) && !offlineOs.has(host.os)),
+  }));
 }
 
 export function online(disk: DiskRecord): boolean {

@@ -58,7 +58,10 @@ export async function pollAgent(agent: AgentEndpoint, known: readonly DiskRecord
   // Hydrate only a changed, complete revision. Commit it only after every page arrived.
   for (const volume of body.volumes ?? []) {
     const index = volume.index;
-    const existing = known.find((disk) => normalizeSerial(disk.serial) === normalizeSerial(volume.serial ?? "") && normalizeUuid(disk.volumeUuid) === normalizeUuid(volume.volumeUuid ?? ""));
+    const uuidNorm = normalizeUuid(volume.volumeUuid ?? "");
+    const serialNorm = normalizeSerial(volume.serial ?? "");
+    const sameUuid = known.filter((disk) => disk.uuidNorm === uuidNorm);
+    const existing = sameUuid.find((disk) => serialNorm && disk.serialNorm === serialNorm) ?? sameUuid[0];
     // Compatibility with an already-running older Mac agent until its next restart.
     if (index?.files && !index.revision) index.revision = `legacy:${createHash("sha256").update(JSON.stringify(index.files)).digest("hex")}`;
     const plan = indexFetchPlan({
@@ -67,6 +70,7 @@ export async function pollAgent(agent: AgentEndpoint, known: readonly DiskRecord
       recordCount: index?.recordCount ?? (index?.files ? index.files.length : 0),
       knownRevision: existing?.indexRevision,
       pendingRevision: existing?.pendingRevision,
+      localRecords: localRecords(existing),
     });
     if (plan === "none" || plan === "skip") {
       if (index) { delete index.files; delete index.delta; }
@@ -122,6 +126,15 @@ export async function pollAgent(agent: AgentEndpoint, known: readonly DiskRecord
   };
 }
 
+function localRecords(disk?: DiskRecord): number {
+  if (!disk) return 0;
+  if (disk.files.length > 0) return disk.files.length;
+  if (disk.fileStore && ((disk.shardBytes ?? 0) > 0 || (disk.summary?.fileCount ?? 0) > 0)) {
+    return disk.summary?.fileCount || disk.reportedRecords || 1;
+  }
+  return 0;
+}
+
 function sanitizeIndex(index: IndexPayload | null | undefined): IndexPayload | null {
   if (!index || typeof index !== "object") return null;
   const state = index.state;
@@ -147,11 +160,11 @@ function isRawFile(value: unknown): value is RawIndexedFile {
 
 export async function pollAgents(agents: readonly AgentEndpoint[], known: readonly DiskRecord[] = []): Promise<{
   observations: HostObservation[];
-  errors: { hostName: string; message: string }[];
+  errors: { hostId?: string; hostName: string; message: string }[];
   deferred: DeferredSnapshot[];
 }> {
   const observations: HostObservation[] = [];
-  const errors: { hostName: string; message: string }[] = [];
+  const errors: { hostId?: string; hostName: string; message: string }[] = [];
   const deferred: DeferredSnapshot[] = [];
   await Promise.all(
     agents.map(async (agent) => {
@@ -159,6 +172,7 @@ export async function pollAgents(agents: readonly AgentEndpoint[], known: readon
         observations.push(await pollAgent(agent, known, deferred));
       } catch (error) {
         errors.push({
+          hostId: agent.id,
           hostName: agent.name,
           message: error instanceof Error ? error.message : "Агент недоступен.",
         });

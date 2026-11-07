@@ -14,7 +14,8 @@ export interface RawIndexedFile {
   relativePath: string;
   name: string;
   kind: "file" | "dir";
-  size: number;
+  /** Logical length. Null means the snapshot did not say — unknown, not an empty file. */
+  size: number | null;
   /** Allocated length of the unnamed $DATA stream. Not the WOF compressed size. */
   allocated?: number;
   /** Bytes occupied on disk when the scanner measured them. Absent means unknown, not zero. */
@@ -29,7 +30,8 @@ export interface IndexedFile {
   relativePath: string;
   name: string;
   kind: "file" | "dir";
-  size: number;
+  /** Logical length. Null means unknown, not a real empty file. */
+  size: number | null;
   /** Allocated length of the unnamed $DATA stream. Not the WOF compressed size. */
   allocated?: number;
   /** Measured size on disk. Absent means unknown, not zero. */
@@ -107,12 +109,18 @@ export interface DiskRecord {
   pendingRevision?: string;
   /** NDJSON file holding files when the catalog is too large to stringify in one string. */
   fileStore?: string;
+  /** Agent or stored revision already written into fileStore. Same value means the shard must not be rewritten. */
+  shardRevision?: string;
+  /** Byte size of fileStore. A non-empty shard is a real index even when the summary was saved as zero. */
+  shardBytes?: number;
 }
 
 export interface DiskSummary {
   fileCount: number;
   indexedBytes: number;
   categoryCounts: Record<MediaCategory, number>;
+  /** Files whose logical size was missing. They are not counted as 0 bytes. */
+  unknownSizes?: number;
 }
 
 export interface ObservedVolume {
@@ -180,6 +188,8 @@ export interface DiskView {
   indexedBytes: number;
   /** False while a large index is still being totaled. Zero then is not a measured size. */
   sizesReady: boolean;
+  /** False when file rows exist but their logical sizes were not in the snapshot. */
+  sizesKnown?: boolean;
   categoryCounts: Record<MediaCategory, number>;
 }
 
@@ -187,7 +197,7 @@ export interface ShelfResponse {
   mode: DriveMode;
   readOnly: true;
   disks: DiskView[];
-  agentErrors: { hostName: string; message: string }[];
+  agentErrors: { hostId?: string; hostName: string; message: string }[];
 }
 
 export interface SearchHit {

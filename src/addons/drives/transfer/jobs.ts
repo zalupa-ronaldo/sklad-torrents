@@ -216,7 +216,7 @@ export async function enqueueCopy(input: { diskId: string; path: string; destina
     destinationLabel: destination.label,
     destPath: null,
     bytesDone: 0,
-    bytesTotal: file.size > 0 ? file.size : 0,
+    bytesTotal: file.size != null && file.size > 0 ? file.size : 0,
     speed: 0,
     sourceSha256: null,
     destSha256: null,

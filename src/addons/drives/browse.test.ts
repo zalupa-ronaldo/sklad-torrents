@@ -143,4 +143,18 @@ describe("browse aggregates", () => {
     const second = browseDisk([disk({ files: many })], "disk-s", "", 10, 10);
     expect(second.entries[0]?.name).not.toBe(first.entries[0]?.name);
   });
+
+  it("shows an unknown logical size as empty of a number and keeps a real zero", () => {
+    const page = browseDisk([disk({
+      files: [
+        { relativePath: "Archives/empty.zip", name: "empty.zip", kind: "file", size: 0, mtimeMs: 1, sidecarCategory: null, categories: [] },
+        { relativePath: "Archives/lost.iso", name: "lost.iso", kind: "file", size: null, mtimeMs: 1, sidecarCategory: null, categories: [] },
+      ],
+    })], "disk-s", "Archives");
+    const empty = page.entries.find((entry) => entry.name === "empty.zip");
+    const lost = page.entries.find((entry) => entry.name === "lost.iso");
+    expect(empty?.size).toBe(0);
+    expect(lost?.size).toBeNull();
+    expect(page.entries.find((entry) => entry.name === "Archives")).toBeUndefined();
+  });
 });

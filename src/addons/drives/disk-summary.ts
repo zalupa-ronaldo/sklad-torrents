@@ -9,11 +9,13 @@ export function summarizeIndexed(files: readonly IndexedFile[]): NonNullable<Dis
   const categoryCounts = emptyCategoryCounts();
   let indexedBytes = 0;
   let fileCountTotal = 0;
+  let unknownSizes = 0;
   for (const file of files) {
     if (file.kind !== "file" || file.name === "sklad-catalog.json") continue;
     fileCountTotal += 1;
-    if (file.size > 0) indexedBytes += file.size;
+    if (file.size == null) unknownSizes += 1;
+    else if (file.size > 0) indexedBytes += file.size;
     for (const category of file.categories) categoryCounts[category] += 1;
   }
-  return { fileCount: fileCountTotal, indexedBytes, categoryCounts };
+  return { fileCount: fileCountTotal, indexedBytes, categoryCounts, ...(unknownSizes > 0 ? { unknownSizes } : {}) };
 }

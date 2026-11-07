@@ -303,11 +303,12 @@ export function filesFromParsed(entries: readonly ParsedName[]): RawIndexedFile[
     if (!entry.hasName) continue;
     const relativePath = resolvePath(entry, bases);
     if (!relativePath) continue;
-    const size = entry.directory ? 0 : (entry.dataSize ?? entry.size);
+    // No unnamed $DATA and a zero $FILE_NAME length is unknown. A real empty file has $DATA of length 0.
+    const size: number | null = entry.directory ? 0 : entry.dataSize != null ? entry.dataSize : entry.size > 0 ? entry.size : null;
     const measured = entry.directory
       ? null
       : resolveOnDisk({
-          size,
+          size: size ?? 0,
           allocated: entry.dataAllocated,
           wofBytes: entry.wofBytes,
           wofUnmeasured: entry.wofTag && entry.wofBytes == null,

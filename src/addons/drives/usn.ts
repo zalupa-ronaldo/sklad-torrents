@@ -55,7 +55,7 @@ export function parseFsutilUsn(text: string, options?: { truncated?: boolean }):
       relativePath,
       name,
       kind: "file",
-      size: record.size ?? 0,
+      size: record.size ?? null,
       mtimeMs: record.mtimeMs ?? 0,
     });
   }

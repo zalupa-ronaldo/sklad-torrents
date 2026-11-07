@@ -1,3 +1,4 @@
+import { readLogicalSize } from "@/addons/drives/file-size";
 import { joinDisplay, normalizeRelative, parentRelative, pathSegments, segmentsStartWith } from "@/addons/drives/paths";
 import type { IndexedFile, LibraryRule, MediaCategory, PathStyle, RawIndexedFile } from "@/addons/drives/types";
 
@@ -104,7 +105,7 @@ function prepareRaw(file: RawIndexedFile): PreparedFile | null {
     relativePath,
     name,
     kind: file.kind === "dir" ? "dir" : "file",
-    size: Number.isFinite(file.size) && file.size > 0 ? file.size : 0,
+    size: readLogicalSize(file),
     ...(allocated != null ? { allocated } : {}),
     ...(onDisk != null ? { onDisk } : {}),
     ...(compression ? { compression } : {}),

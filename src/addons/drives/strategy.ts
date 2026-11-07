@@ -26,6 +26,8 @@ export function isApfs(filesystem: string): boolean {
 }
 
 export function selectIndexStrategy(input: StrategyInput): StrategyDecision {
+  // Windows NTFS is always an MFT plan. Missing administrator rights is an error, not a directory walk.
+  if (isNtfs(input.filesystem) && input.platform === "win32") return { strategy: "mft-usn", usesMft: true };
   const fs = normalizedFs(input.filesystem);
   const filesystem = fs === "ntfs" ? "ntfs" : fs.includes("apfs") ? "apfs" : "unknown";
   const os = input.platform === "win32" ? "win32" : input.platform === "darwin" ? "darwin" : "linux";
@@ -64,19 +66,19 @@ export function describeScan(input: StrategyInput & { status: ScanStatus; busy: 
     return { strategy: decision.strategy, message: "Индекс ещё не построен." };
   }
   const done = input.status === "complete";
+  const fs = normalizedFs(input.filesystem);
+  if (fs === "ntfs" && input.platform === "win32" && !input.elevated) {
+    return {
+      strategy: "mft-usn",
+      message: done
+        ? "Каталог сохранён. Новый снимок NTFS без прав администратора не строится и обходом папок не заменяется."
+        : "NTFS читается только из MFT. Нет прав администратора, обход папок не запускается.",
+    };
+  }
   if (decision.strategy === "mft-usn") {
     return {
       strategy: "mft-usn",
       message: done ? "Индекс по MFT и журналу USN готов." : "Чтение MFT и журнала USN.",
-    };
-  }
-  const fs = normalizedFs(input.filesystem);
-  if (fs === "ntfs" && input.platform === "win32" && !input.elevated) {
-    return {
-      strategy: "walk",
-      message: done
-        ? "Индекс готов обходом папок: нет прав администратора, MFT и USN не использовались."
-        : "Обход папок: нет прав администратора, MFT и USN недоступны. Готовый индекс не стирается.",
     };
   }
   if (fs.includes("apfs")) {

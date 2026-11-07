@@ -179,8 +179,9 @@ describe("shelf retention and search", () => {
     const game = vault.files.find((entry) => entry.relativePath.includes("ULUS10479"));
     expect(movie?.categories).toContain("media");
     expect(game?.categories).toContain("game");
-    expect(disks.find((disk) => disk.serial === MOCK_GAMES.serial)?.scan.strategy).toBe("walk");
+    expect(disks.find((disk) => disk.serial === MOCK_GAMES.serial)?.scan.strategy).toBe("mft-usn");
     expect(disks.find((disk) => disk.serial === MOCK_GAMES.serial)?.scan.message).toMatch(/администратор/);
+    expect(disks.find((disk) => disk.serial === MOCK_GAMES.serial)?.scan.message).toMatch(/не запуска/);
     expect(vault.scan.strategy).toBe("walk");
     expect(vault.scan.message).toMatch(/MFT не используется/);
     expect(disks.find((disk) => disk.serial === MOCK_BACKUP.serial)?.namedByUser).toBe(false);
@@ -268,7 +269,8 @@ describe("shelf retention and search", () => {
 describe("read-only indexer", () => {
   it("uses MFT/USN only for elevated Windows NTFS", () => {
     expect(selectIndexStrategy({ filesystem: "NTFS", platform: "win32", elevated: true }).strategy).toBe("mft-usn");
-    expect(selectIndexStrategy({ filesystem: "NTFS", platform: "win32", elevated: false }).strategy).toBe("walk");
+    expect(selectIndexStrategy({ filesystem: "NTFS", platform: "win32", elevated: false }).strategy).toBe("mft-usn");
+    expect(selectIndexStrategy({ filesystem: "NTFS", platform: "win32", elevated: false }).usesMft).toBe(true);
     expect(selectIndexStrategy({ filesystem: "APFS", platform: "darwin", elevated: true }).strategy).toBe("walk");
     expect(selectIndexStrategy({ filesystem: "APFS", platform: "win32", elevated: true }).strategy).toBe("walk");
     expect(selectIndexStrategy({ filesystem: "HFS+", platform: "darwin", elevated: true }).strategy).toBe("walk");
@@ -292,6 +294,8 @@ describe("read-only indexer", () => {
     }
     expect(plans[0].map((command) => command.op)).toEqual(["identify-volume", "stat-volume", "walk"]);
     expect(plans[1].map((command) => command.op)).toEqual(["identify-volume", "stat-volume", "read-mft", "read-usn"]);
+    expect(plans[2].map((command) => command.op)).toEqual(["identify-volume", "stat-volume", "read-mft"]);
+    expect(plans[2].some((command) => command.op === "walk")).toBe(false);
     expect(plans[4]).toEqual([{ op: "pause", reason: "disk-busy" }]);
     expect(() => assertSpawnAllowed({ bin: "format.com", args: ["E:"] })).toThrow();
     expect(() => assertSpawnAllowed({ bin: "fsutil", args: ["usn", "createJournal", "E:"] })).toThrow();
@@ -346,6 +350,23 @@ describe("read-only indexer", () => {
     );
     expect(failed.payload.state).toBe("error");
     expect(failed.payload.files).toBeUndefined();
+    calls.length = 0;
+    const mftFailed = await executeIndexPlan(
+      { filesystem: "NTFS", platform: "win32", elevated: true, busy: false, usnCheckpoint: false },
+      { ...handlers, readMft: async () => { calls.push("readMft"); throw new Error("том недоступен"); } },
+    );
+    expect(mftFailed.payload.state).toBe("error");
+    expect(mftFailed.payload.strategy).toBe("mft-usn");
+    expect(mftFailed.payload.message).toMatch(/Обход папок не запускался/);
+    expect(calls).toEqual(["readMft"]);
+    const blocked = await executeIndexPlan(
+      { filesystem: "NTFS", platform: "win32", elevated: false, busy: false, usnCheckpoint: false },
+      handlers,
+    );
+    expect(blocked.called).toEqual([]);
+    expect(blocked.payload.state).toBe("error");
+    expect(blocked.payload.message).toMatch(/администратора/);
+    expect(calls).toEqual(["readMft"]);
   });
 
   it("keeps indexer sources free of destructive commands", () => {
@@ -475,7 +496,7 @@ Volume Free Space:         1.2 TB (1200000000000 Bytes)
     );
     expect(sized.find((entry) => entry.name === "movie.mkv")).toMatchObject({ size: 5_000, allocated: 8_192 });
     expect(sized.find((entry) => entry.name === "note.txt")).toMatchObject({ size: 4, allocated: 4 });
-    expect(sized.find((entry) => entry.name === "sparse.bin")?.size).toBe(0);
+    expect(sized.find((entry) => entry.name === "sparse.bin")?.size).toBeNull();
     expect(sized.find((entry) => entry.name === "sparse.bin")?.allocated).toBeUndefined();
     expect(sized.find((entry) => entry.name === "big.mkv")).toMatchObject({ size: 9_000, allocated: 12_288 });
     const wof = filesFromRecords(

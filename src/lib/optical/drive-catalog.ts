@@ -69,7 +69,7 @@ function filesFromDisks(disks: DiskRecord[]): IndexedPath[] {
         diskLabel: disk.label || disk.volumeName || "Диск",
         path: root ? `${root}${separator}${relative}` : relative,
         name: file.name || relative.split(/[/\\]/).pop() || relative,
-        size: Number.isFinite(file.size) ? file.size : 0,
+        size: typeof file.size === "number" && Number.isFinite(file.size) ? file.size : 0,
         kind: file.kind === "dir" ? "folder" : "file",
       });
     }

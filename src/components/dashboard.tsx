@@ -1,15 +1,17 @@
 "use client";
 
 import { ChevronLeft, ChevronRight, Folder, File as FileIcon, Plus, Search } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { AddTorrentDialog } from "@/components/add-torrent-dialog";
 import { HostDialog } from "@/components/host-dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { compactExplanation, COMPACT_ALGORITHMS } from "@/addons/drives/compact-target";
+import { canGoBack, canGoForward, createFolderHistory, currentPlace, goBack, goForward, pushPlace, retargetDisk } from "@/addons/drives/folder-history";
+import { createMouseNavSession } from "@/addons/drives/mouse-nav";
 import { savingsOf } from "@/addons/drives/ondisk";
-import { displayDiskName, displayDiskPickerLabel, displayDiskTitle, visibleShelfDisks } from "@/addons/drives/inventory";
+import { dedupeShelfDisks, displayDiskName, displayDiskPickerLabel, displayDiskTitle } from "@/addons/drives/inventory";
 import type { TransferDestination, TransferJob } from "@/addons/drives/transfer/jobs";
 import type { BrowseEntry, BrowseResponse } from "@/addons/drives/browse";
 import type { DiskView, MediaCategory, SearchHit, SearchResponse, ShelfResponse } from "@/addons/drives/types";
@@ -40,7 +42,8 @@ function formatMtime(ms: number): string {
 }
 
 /** Logical size plus share of the open folder. Share is bytes / folder bytes, never a file count. */
-function formatSizeShare(size: number, scopeBytes: number): string {
+function formatSizeShare(size: number | null, scopeBytes: number): string {
+  if (size == null) return "—";
   const bytes = formatBytes(size);
   if (!(scopeBytes > 0)) return bytes;
   const share = size <= 0 ? 0 : Math.min(1, size / scopeBytes);
@@ -52,8 +55,8 @@ function needsManualScan(disk: { online: boolean; fileCount: number; scan: { sta
   return disk.scan.status === "error" || disk.scan.status === "idle" || disk.fileCount === 0;
 }
 
-function folderHint(size: number, fileCount: number, onDisk: number | null): string {
-  const parts = [formatBytes(size), `${fileCount.toLocaleString("ru-RU")} ф.`];
+function folderHint(size: number | null, fileCount: number, onDisk: number | null): string {
+  const parts = [size == null ? "размер неизвестен" : formatBytes(size), `${fileCount.toLocaleString("ru-RU")} ф.`];
   if (onDisk == null) parts.push("на диске неизвестно");
   else parts.push(`на диске ${formatBytes(onDisk)}`);
   const saved = savingsOf(size, onDisk);
@@ -148,6 +151,13 @@ export function Dashboard() {
   const [compactJobId, setCompactJobId] = useState<string | null>(null);
   const [scanBusy, setScanBusy] = useState(false);
   const [scanNote, setScanNote] = useState<string | null>(null);
+  const [aliasId, setAliasId] = useState<string | null>(null);
+  const [aliasDraft, setAliasDraft] = useState("");
+  const [aliasError, setAliasError] = useState<string | null>(null);
+  const [aliasBusy, setAliasBusy] = useState(false);
+  const panelRef = useRef<HTMLDivElement>(null);
+  const historyRef = useRef(createFolderHistory());
+  const [nav, setNav] = useState(historyRef.current);
 
   const refreshMeta = useCallback(async () => {
     try {
@@ -189,6 +199,39 @@ export function Dashboard() {
       setBrowseLoading(false);
     }
   }, []);
+
+  const visit = useCallback((nextDiskId: string | null, nextPath: string) => {
+    const next = pushPlace(historyRef.current, { diskId: nextDiskId, path: nextPath });
+    historyRef.current = next;
+    setNav(next);
+    void loadBrowse(nextDiskId, nextPath);
+  }, [loadBrowse]);
+
+  const travel = useCallback((direction: "back" | "forward") => {
+    const next = direction === "back" ? goBack(historyRef.current) : goForward(historyRef.current);
+    if (next === historyRef.current) return;
+    historyRef.current = next;
+    setNav(next);
+    const place = currentPlace(next);
+    void loadBrowse(place.diskId, place.path);
+  }, [loadBrowse]);
+
+  useEffect(() => {
+    const root = panelRef.current;
+    if (!root) return;
+    const session = createMouseNavSession((action) => travel(action));
+    const down = (event: MouseEvent) => session.mousedown(event);
+    const up = (event: MouseEvent) => session.mouseup(event);
+    const aux = (event: MouseEvent) => session.auxclick(event);
+    root.addEventListener("mousedown", down);
+    root.addEventListener("mouseup", up);
+    root.addEventListener("auxclick", aux);
+    return () => {
+      root.removeEventListener("mousedown", down);
+      root.removeEventListener("mouseup", up);
+      root.removeEventListener("auxclick", aux);
+    };
+  }, [travel]);
 
   useEffect(() => {
     if (!compactJobId) return;
@@ -265,6 +308,8 @@ export function Dashboard() {
     const kick = window.setTimeout(() => {
       void refreshMeta();
       void (async () => {
+        historyRef.current = createFolderHistory({ diskId: startDisk, path: startPath });
+        setNav(historyRef.current);
         await loadBrowse(startDisk, startPath);
         if (selectName) {
           // selection applied in a follow-up effect once browse arrives
@@ -305,7 +350,7 @@ export function Dashboard() {
   }, [query]);
 
   const stripDisks = useMemo(() => {
-    return visibleShelfDisks(shelf?.disks ?? []).sort((a, b) => b.fileCount - a.fileCount || b.totalBytes - a.totalBytes || a.label.localeCompare(b.label, "ru"));
+    return dedupeShelfDisks(shelf?.disks ?? []).sort((a, b) => b.fileCount - a.fileCount || b.totalBytes - a.totalBytes || a.label.localeCompare(b.label, "ru"));
   }, [shelf]);
 
   const treeDisks = useMemo(() => {
@@ -319,7 +364,7 @@ export function Dashboard() {
         relativePath: "",
         displayPath: disk.mountPaths[0] || disk.lastMountPath,
         kind: "dir" as const,
-        size: disk.indexedBytes,
+        size: disk.sizesKnown === false ? null : disk.indexedBytes,
         allocated: null,
         onDisk: null,
         compression: null,
@@ -331,6 +376,19 @@ export function Dashboard() {
         sizesReady: disk.sizesReady,
       }));
   }, [browse, stripDisks]);
+
+  useEffect(() => {
+    if (!diskId || !shelf) return;
+    if (stripDisks.some((disk) => disk.id === diskId)) return;
+    const current = shelf.disks.find((disk) => disk.id === diskId);
+    if (!current?.volumeUuid) return;
+    const uuid = current.volumeUuid.replace(/-/g, "").toLowerCase();
+    const keeper = stripDisks.find((disk) => disk.volumeUuid.replace(/-/g, "").toLowerCase() === uuid);
+    if (!keeper || keeper.id === diskId) return;
+    historyRef.current = retargetDisk(historyRef.current, diskId, keeper.id);
+    setNav(historyRef.current);
+    setDiskId(keeper.id);
+  }, [diskId, shelf, stripDisks]);
 
   const rows = useMemo(() => {
     if (query.trim() && hits) {
@@ -361,9 +419,9 @@ export function Dashboard() {
     sorted.sort((a, b) => {
       if (sortKey === "name") return a.name.localeCompare(b.name, "ru");
       if (sortKey === "mtime") return (b.mtimeMs || 0) - (a.mtimeMs || 0);
-      if (sortKey === "type") return (a.extension || a.kind).localeCompare(b.extension || b.kind) || b.size - a.size || b.fileCount - a.fileCount;
-      if (sortKey === "ondisk") return compareKnownDesc(a.onDisk, b.onDisk) || b.size - a.size || a.name.localeCompare(b.name, "ru");
-      return b.size - a.size || compareKnownDesc(a.onDisk, b.onDisk) || b.fileCount - a.fileCount || a.name.localeCompare(b.name, "ru");
+      if (sortKey === "type") return (a.extension || a.kind).localeCompare(b.extension || b.kind) || compareKnownDesc(a.size, b.size) || b.fileCount - a.fileCount;
+      if (sortKey === "ondisk") return compareKnownDesc(a.onDisk, b.onDisk) || compareKnownDesc(a.size, b.size) || a.name.localeCompare(b.name, "ru");
+      return compareKnownDesc(a.size, b.size) || compareKnownDesc(a.onDisk, b.onDisk) || b.fileCount - a.fileCount || a.name.localeCompare(b.name, "ru");
     });
     return sorted.map((entry) => ({
       key: `${entry.diskId}:${entry.relativePath}`,
@@ -396,22 +454,22 @@ export function Dashboard() {
       return;
     }
     // Root disk row from roots list has empty relativePath and diskId.
-    void loadBrowse(entry.diskId, entry.relativePath || "");
+    visit(entry.diskId, entry.relativePath || "");
     setTreeOpen((current) => ({ ...current, [entry.diskId]: true }));
   }
 
   function goUp() {
     if (!diskId) return;
     if (!path) {
-      void loadBrowse(null, "");
+      visit(null, "");
       return;
     }
     const parent = path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "";
-    void loadBrowse(diskId, parent);
+    visit(diskId, parent);
   }
 
   function openDisk(disk: DiskView) {
-    void loadBrowse(disk.id, "");
+    visit(disk.id, "");
     setTreeOpen((current) => ({ ...current, [disk.id]: true }));
   }
 
@@ -553,6 +611,23 @@ export function Dashboard() {
 
   const currentDisk = diskId ? (stripDisks.find((disk) => disk.id === diskId) ?? shelf?.disks.find((disk) => disk.id === diskId) ?? null) : null;
 
+  async function saveAlias(id: string, reset: boolean) {
+    setAliasBusy(true);
+    setAliasError(null);
+    try {
+      await api(`/api/drives/${encodeURIComponent(id)}`, {
+        method: "PATCH",
+        body: JSON.stringify(reset ? { reset: true } : { label: aliasDraft }),
+      });
+      setAliasId(null);
+      await refreshMeta();
+    } catch (error) {
+      setAliasError(error instanceof Error ? error.message : "Не удалось сохранить имя.");
+    } finally {
+      setAliasBusy(false);
+    }
+  }
+
   async function startRescan(id: string) {
     setScanBusy(true);
     setScanNote(null);
@@ -598,7 +673,7 @@ export function Dashboard() {
   }
 
   return (
-    <div className="flex h-dvh flex-col bg-background">
+    <div ref={panelRef} className="flex h-dvh flex-col bg-background">
       <header className="flex flex-wrap items-center gap-2 border-b px-3 py-2">
         <div className="flex items-center gap-2">
           <span className="grid size-8 place-items-center rounded-md bg-primary text-xs font-bold text-primary-foreground">С</span>
@@ -654,8 +729,50 @@ export function Dashboard() {
         </div>
       </div>
 
+      <div data-testid="disk-strip" className="flex gap-1 overflow-auto border-b px-2 py-1.5 text-[11px]">
+        {stripDisks.map((disk) => {
+          const system = [disk.volumeName, disk.mountPaths[0] || disk.lastMountPath, disk.volumeUuid].filter(Boolean).join(" · ");
+          if (aliasId === disk.id) {
+            return (
+              <form
+                key={disk.id}
+                className="inline-flex shrink-0 items-center gap-1 rounded-md border border-primary px-1.5 py-1"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  void saveAlias(disk.id, false);
+                }}
+              >
+                <input
+                  aria-label="Псевдоним диска"
+                  className="h-6 w-28 rounded border border-input bg-transparent px-1"
+                  value={aliasDraft}
+                  maxLength={80}
+                  onChange={(event) => setAliasDraft(event.target.value)}
+                />
+                <button type="submit" className="rounded px-1 hover:bg-muted" disabled={aliasBusy}>Ок</button>
+                <button type="button" className="rounded px-1 hover:bg-muted" onClick={() => { setAliasId(null); setAliasError(null); }}>Отмена</button>
+                <button type="button" className="rounded px-1 hover:bg-muted" disabled={aliasBusy} onClick={() => void saveAlias(disk.id, true)}>Сбросить</button>
+                {aliasError ? <span className="text-destructive">{aliasError}</span> : null}
+              </form>
+            );
+          }
+          return (
+            <span key={disk.id} className={cn("inline-flex shrink-0 items-center gap-1 rounded-md border px-1.5 py-1", diskId === disk.id && "border-primary bg-primary/10")}>
+              <button type="button" onClick={() => openDisk(disk)} className="inline-flex items-center gap-1.5" title={system}>
+                <span className={cn("size-1.5 rounded-full", disk.online ? "bg-seed" : "bg-muted-foreground")} />
+                <span className="font-medium">{displayDiskTitle(disk)}</span>
+                <span className="text-muted-foreground">{formatBytes(disk.freeBytes)} / {formatBytes(disk.totalBytes)}</span>
+              </button>
+              <button type="button" className="rounded px-1 text-muted-foreground hover:bg-muted" title={system} onClick={() => { setAliasId(disk.id); setAliasDraft(disk.namedByUser ? disk.label : disk.volumeName || disk.label); setAliasError(null); }}>
+                Имя
+              </button>
+            </span>
+          );
+        })}
+      </div>
+
       <div className="flex min-h-0 flex-1">
-        <aside className="flex w-[220px] shrink-0 flex-col border-r bg-card/20">
+        <aside data-testid="file-tree" className="flex w-[220px] shrink-0 flex-col border-r bg-card/20">
           <div className="border-b px-2 py-1.5 text-[11px] font-semibold tracking-wide text-muted-foreground uppercase">Диски</div>
           <div className="min-h-0 flex-1 overflow-auto p-1">
             {(browse?.roots ? browse.entries : treeDisks).map((entry) => {
@@ -671,7 +788,7 @@ export function Dashboard() {
                     type="button"
                     onClick={() => {
                       setTreeOpen((current) => ({ ...current, [entry.diskId]: true }));
-                      void loadBrowse(entry.diskId, "");
+                      visit(entry.diskId, "");
                     }}
                     className={cn(
                       "flex w-full items-center gap-1 rounded-md px-1.5 py-1 text-left text-xs hover:bg-muted/50",
@@ -681,8 +798,8 @@ export function Dashboard() {
                     <span className="text-muted-foreground">{open && diskActive ? "▾" : "▸"}</span>
                     <span className={cn("size-1.5 rounded-full", entry.online ? "bg-seed" : "bg-muted-foreground")} />
                     <span className="min-w-0 flex-1 truncate font-medium">{entry.name}</span>
-                    <span className="shrink-0 text-[10px] tabular-nums text-muted-foreground" title={entry.sizesReady === false ? "Считаем объём индекса" : entry.fileCount === 0 ? "Индекс ещё не построен" : folderHint(entry.size, entry.fileCount, entry.onDisk)}>
-                      {entry.sizesReady === false ? "считаем" : entry.fileCount === 0 ? "нет индекса" : formatBytes(entry.size)}
+                    <span className="shrink-0 text-[10px] tabular-nums text-muted-foreground" title={entry.sizesReady === false ? "Считаем объём индекса" : entry.fileCount === 0 ? "Индекс ещё не построен" : entry.size == null ? "Размер в снимке неизвестен" : folderHint(entry.size, entry.fileCount, entry.onDisk)}>
+                      {entry.sizesReady === false ? "считаем" : entry.fileCount === 0 ? "нет индекса" : entry.size == null ? "—" : formatBytes(entry.size)}
                     </span>
                   </button>
                   {open && diskActive
@@ -690,7 +807,7 @@ export function Dashboard() {
                         <button
                           key={child.relativePath}
                           type="button"
-                          onClick={() => void loadBrowse(child.diskId, child.relativePath)}
+                          onClick={() => visit(child.diskId, child.relativePath)}
                           className={cn(
                             "flex w-full items-center gap-1 rounded-md py-0.5 pr-1.5 pl-6 text-left text-[11px] hover:bg-muted/50",
                             path === child.relativePath && "bg-muted",
@@ -699,7 +816,7 @@ export function Dashboard() {
                           <Folder className="size-3 shrink-0 text-amber-400" />
                           <span className="min-w-0 flex-1 truncate">{child.name}</span>
                           <span className="shrink-0 text-[10px] tabular-nums text-muted-foreground" title={folderHint(child.size, child.fileCount, child.onDisk)}>
-                            {formatBytes(child.size)}
+                            {child.size == null ? "—" : formatBytes(child.size)}
                           </span>
                         </button>
                       ))
@@ -712,6 +829,12 @@ export function Dashboard() {
 
         <main className="flex min-w-0 flex-1 flex-col">
           <div className="flex items-center gap-1 border-b px-2 py-1.5">
+            <Button type="button" variant="ghost" size="sm" className="h-7 px-2" onClick={() => travel("back")} disabled={!canGoBack(nav)} title="Назад по папкам">
+              Назад
+            </Button>
+            <Button type="button" variant="ghost" size="sm" className="h-7 px-2" onClick={() => travel("forward")} disabled={!canGoForward(nav)} title="Вперёд по папкам">
+              Вперёд
+            </Button>
             <Button type="button" variant="ghost" size="sm" className="h-7 px-2" onClick={goUp} disabled={!diskId}>
               <ChevronLeft className="size-3.5" />
               Вверх
@@ -722,7 +845,7 @@ export function Dashboard() {
                   key={`${crumb.diskId}:${crumb.path}:${index}`}
                   type="button"
                   className="inline-flex items-center gap-0.5 rounded px-1 py-0.5 hover:bg-muted"
-                  onClick={() => void loadBrowse(crumb.diskId, crumb.path)}
+                  onClick={() => visit(crumb.diskId, crumb.path)}
                 >
                   {index > 0 ? <ChevronRight className="size-3 text-muted-foreground" /> : null}
                   <span className={cn(index === crumbs.length - 1 && "font-semibold")}>{crumb.label}</span>
@@ -874,7 +997,7 @@ export function Dashboard() {
               <div className="mt-1 break-all font-mono text-[10px] text-muted-foreground">{selected.displayPath}</div>
               {"size" in selected ? (
                 <div className="mt-1 space-y-0.5 text-muted-foreground">
-                  <div>Размер {formatBytes(selected.size)}</div>
+                  <div>Размер {selected.size == null ? "—" : formatBytes(selected.size)}</div>
                   <div>{selected.onDisk == null ? "На диске неизвестно" : `На диске ${formatBytes(selected.onDisk)}`}</div>
                   {savingsOf(selected.size, selected.onDisk) ? (
                     <div>Экономия {formatBytes(savingsOf(selected.size, selected.onDisk)!.bytes)} · {formatPercent(savingsOf(selected.size, selected.onDisk)!.ratio)}</div>
@@ -910,28 +1033,6 @@ export function Dashboard() {
           ) : null}
         </aside>
       </div>
-
-      <footer className="flex gap-1 overflow-auto border-t px-2 py-1 text-[11px]">
-        {stripDisks.map((disk) => (
-          <button
-            key={disk.id}
-            type="button"
-            onClick={() => openDisk(disk)}
-            className={cn(
-              "inline-flex shrink-0 items-center gap-1.5 rounded-md border px-2 py-1 hover:bg-muted/40",
-              diskId === disk.id && "border-primary bg-primary/10",
-            )}
-            title={disk.mountPaths[0] || disk.lastMountPath}
-          >
-            <span className={cn("size-1.5 rounded-full", disk.online ? "bg-seed" : "bg-muted-foreground")} />
-            <span className="font-medium">{displayDiskTitle(disk)}</span>
-            <span className="text-muted-foreground">
-              {formatBytes(disk.freeBytes)} / {formatBytes(disk.totalBytes)}
-            </span>
-          </button>
-        ))}
-      </footer>
-
 
       {compactTarget ? (
         <div className="fixed inset-0 z-50 grid place-items-center bg-black/60 p-4" role="dialog" aria-modal="true" aria-label="Сжать папку">

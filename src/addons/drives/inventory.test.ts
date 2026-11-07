@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { hiddenByDataTwin, isBrowsableDisk, isStripDisk, visibleShelfDisks } from "@/addons/drives/inventory";
+import { dedupeShelfDisks, hiddenByDataTwin, isBrowsableDisk, isStripDisk, visibleShelfDisks } from "@/addons/drives/inventory";
 import type { DiskView } from "@/addons/drives/types";
 
 function view(partial: Partial<DiskView> & Pick<DiskView, "id" | "label" | "lastMountPath">): DiskView {
@@ -76,5 +76,45 @@ describe("disk visibility", () => {
 
   it("keeps Macintosh HD when there is no Data volume", () => {
     expect(isStripDisk(hd, [hd])).toBe(true);
+  });
+
+  it("shows one chip per volume uuid and still hides the sealed twin", () => {
+    const vaultUuid = "54C64F37-629A-410E-B506-92969EF32EEC";
+    const vaultA = view({
+      id: "vault",
+      label: "vault",
+      volumeName: "vault",
+      volumeUuid: vaultUuid,
+      lastMountPath: "/Volumes/vault",
+      serial: "USB",
+      totalBytes: 1_000_000_000_000,
+      fileCount: 1,
+    });
+    const vaultB = view({
+      id: "vault-new",
+      label: "vault",
+      volumeName: "vault",
+      volumeUuid: "54c64f37-629a-410e-b506-92969ef32eec",
+      lastMountPath: "/Volumes/vault 1",
+      serial: "USB",
+      totalBytes: vaultA.totalBytes,
+      fileCount: 10,
+    });
+    const other = view({
+      id: "other",
+      label: "vault",
+      volumeName: "vault",
+      volumeUuid: "99999999-9999-4999-8999-999999999999",
+      lastMountPath: "/Volumes/other",
+      serial: "OTHER",
+      totalBytes: vaultA.totalBytes,
+      fileCount: 3,
+    });
+    const shown = dedupeShelfDisks([vaultA, vaultB, data, hd, other]).map((disk) => disk.id);
+    expect(shown.filter((id) => id === "vault" || id === "vault-new")).toHaveLength(1);
+    expect(shown).toContain("vault-new");
+    expect(shown).toContain("data");
+    expect(shown).toContain("other");
+    expect(shown).not.toContain("hd");
   });
 });
