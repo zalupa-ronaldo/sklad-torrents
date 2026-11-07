@@ -3,19 +3,20 @@ import { joinDisplay, normalizeRelative, parentRelative, pathSegments, segmentsS
 import type { IndexedFile, LibraryRule, MediaCategory, PathStyle, RawIndexedFile } from "@/addons/drives/types";
 
 const CATEGORIES: readonly MediaCategory[] = ["torrent", "game", "media", "series", "installer", "music", "software", "documents"];
-const EXTENSIONS: Record<string, MediaCategory[]> = {
-  mkv: ["media"], mp4: ["media"], avi: ["media"], mov: ["media"], m4v: ["media"], ts: ["media"], m2ts: ["media"], iso: ["media"],
-  mp3: ["music"], flac: ["music"], wav: ["music"], ogg: ["music"], m4a: ["music"], aac: ["music"], opus: ["music"], cue: ["music"],
-  exe: ["software"], msi: ["software"], msix: ["software"], appx: ["software"], dmg: ["software"], pkg: ["software"],
-  pdf: ["documents"], doc: ["documents"], docx: ["documents"], txt: ["documents"], md: ["documents"], xls: ["documents"], xlsx: ["documents"], epub: ["documents"], fb2: ["documents"],
-};
+// Map, not a plain object: extensions such as constructor/toString are Object.prototype functions.
+const EXTENSIONS = new Map<string, readonly MediaCategory[]>([
+  ["mkv", ["media"]], ["mp4", ["media"]], ["avi", ["media"]], ["mov", ["media"]], ["m4v", ["media"]], ["ts", ["media"]], ["m2ts", ["media"]], ["iso", ["media"]],
+  ["mp3", ["music"]], ["flac", ["music"]], ["wav", ["music"]], ["ogg", ["music"]], ["m4a", ["music"]], ["aac", ["music"]], ["opus", ["music"]], ["cue", ["music"]],
+  ["exe", ["software"]], ["msi", ["software"]], ["msix", ["software"]], ["appx", ["software"]], ["dmg", ["software"]], ["pkg", ["software"]],
+  ["pdf", ["documents"]], ["doc", ["documents"]], ["docx", ["documents"]], ["txt", ["documents"]], ["md", ["documents"]], ["xls", ["documents"]], ["xlsx", ["documents"]], ["epub", ["documents"]], ["fb2", ["documents"]],
+]);
 function inferFile(relativePath: string, kind: "file" | "dir"): MediaCategory[] {
   const lower = relativePath.toLowerCase();
   const name = lower.split("/").pop() ?? lower;
   const found = new Set<MediaCategory>();
   if (kind === "file") {
     const ext = name.includes(".") ? name.split(".").pop() ?? "" : "";
-    for (const category of EXTENSIONS[ext] ?? []) found.add(category);
+    for (const category of EXTENSIONS.get(ext) ?? []) found.add(category);
     if (/(^|[\/])(games? setup|установщики|installers?)([\/]|$)/.test(lower) && ["exe", "msi", "msix", "appx", "dmg", "pkg", "zip", "rar", "7z"].includes(ext)) found.add("installer");
     if (["exe", "msi", "msix", "appx", "dmg", "pkg"].includes(ext) && /setup|install|installer|установ|repack|re-pack|distribution/.test(lower)) found.add("installer");
     if (["zip", "rar", "7z"].includes(ext) && /setup|install|installer|установ|repack|re-pack/.test(lower)) found.add("installer");

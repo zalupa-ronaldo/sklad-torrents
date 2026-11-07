@@ -122,8 +122,12 @@ export interface IngestProgress {
   pages: number;
   records: number;
   expected: number;
-  /** Short status only: HTTP code or a fixed reason. No paths and no file names. */
+  /** Agent page offset for this attempt. Same number as records after a successful page. */
+  offset: number;
+  /** Short status only: HTTP code or the exception message. No paths and no file names. */
   error?: string;
+  /** Top stack frames with directory prefixes removed. */
+  stack?: string;
 }
 
 export interface DiskSummary {

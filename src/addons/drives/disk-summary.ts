@@ -15,7 +15,7 @@ export function summarizeIndexed(files: readonly IndexedFile[]): NonNullable<Dis
     fileCountTotal += 1;
     if (file.size == null) unknownSizes += 1;
     else if (file.size > 0) indexedBytes += file.size;
-    for (const category of file.categories) categoryCounts[category] += 1;
+    for (const category of file.categories) if (Object.hasOwn(categoryCounts, category)) categoryCounts[category] += 1;
   }
   return { fileCount: fileCountTotal, indexedBytes, categoryCounts, ...(unknownSizes > 0 ? { unknownSizes } : {}) };
 }

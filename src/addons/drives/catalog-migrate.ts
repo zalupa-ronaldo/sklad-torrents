@@ -50,7 +50,7 @@ for (const disk of parsed.disks || []) {
     fileCount += 1;
     if (typeof file.size !== "number") unknownSizes += 1;
     else if (file.size > 0) indexedBytes += file.size;
-    for (const category of file.categories || []) if (categoryCounts[category] !== undefined) categoryCounts[category] += 1;
+    for (const category of file.categories || []) if (Object.prototype.hasOwnProperty.call(categoryCounts, category)) categoryCounts[category] += 1;
   }
   const computed = { fileCount, indexedBytes, categoryCounts, ...(unknownSizes ? { unknownSizes } : {}) };
   const summary = files.length > 0 ? computed : (disk.summary && disk.summary.fileCount > 0 ? disk.summary : undefined);

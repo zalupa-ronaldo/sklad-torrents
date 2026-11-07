@@ -126,7 +126,7 @@ function classifyByExtensions(input: ClassifyInput): Classification | null {
       if (ext === "cue") hasCue = true;
       else if (ext === "iso") hasIso = true;
       else if (ext === "exe") hasExe = true;
-      const hinted = IMPLIED_GAME[ext];
+      const hinted = Object.hasOwn(IMPLIED_GAME, ext) ? IMPLIED_GAME[ext] : undefined;
       if (hinted) implied = implied === "psp" ? "psp" : hinted;
     }
   }

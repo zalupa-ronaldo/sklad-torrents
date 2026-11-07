@@ -14,7 +14,26 @@ import { dataDir } from "@/lib/qbittorrent/store";
 
 const running = new Set<string>();
 const failedAt = new Map<string, number>();
+/** A data-dependent error for this revision will not start another full download. HTTP failures stay out of this set. */
+const fatalRevision = new Set<string>();
 let retryMs = 30_000;
+
+export function ingestFailureIsTransient(error: unknown): boolean {
+  if (!(error instanceof Error)) return true;
+  if (error.name === "TimeoutError" || error.name === "AbortError") return true;
+  if (error.message.startsWith("http ")) return true;
+  return /timeout|network|fetch failed|ECONN|EAI_|aborted|socket/i.test(error.message);
+}
+
+function safeStack(error: unknown): string {
+  if (!(error instanceof Error) || !error.stack) return "";
+  return error.stack
+    .split("\n")
+    .slice(0, 4)
+    .map((line) => line.replace(/\((?:\/[^)]+\/)?([^/)]+)\)/g, "($1)").replace(/(?:\/[\w.+-]+){2,}/g, (match) => match.split("/").pop() || match))
+    .join(" | ")
+    .slice(0, 500);
+}
 let tail: Promise<void> = Promise.resolve();
 
 const PAGE = 10_000;
@@ -34,13 +53,13 @@ function keyOf(volumeUuid: string, revision: string): string {
 export function scheduleIndexIngest(jobs: readonly DeferredSnapshot[], libraries: readonly LibraryRule[]): void {
   for (const job of jobs) {
     const key = keyOf(job.volumeUuid, job.revision);
-    if (!key || key.startsWith(":") || running.has(key)) continue;
+    if (!key || key.startsWith(":") || running.has(key) || fatalRevision.has(key)) continue;
     const failed = failedAt.get(key) ?? 0;
     if (Date.now() - failed < retryMs) continue;
     const existing = findLive(job.serial, job.volumeUuid);
     if (existing && coversSnapshot(existing, job.revision)) continue;
     running.add(key);
-    note(job, { phase: "queued", pages: 0, records: 0, expected: job.recordCount });
+    note(job, { phase: "queued", pages: 0, records: 0, offset: 0, expected: job.recordCount });
     const run = tail.then(() => ingest(job, libraries), () => ingest(job, libraries));
     tail = run.then(
       () => undefined,
@@ -52,14 +71,18 @@ export function scheduleIndexIngest(jobs: readonly DeferredSnapshot[], libraries
       },
       (error: unknown) => {
         const message = error instanceof Error ? error.message : "ingest failed";
-        failedAt.set(key, Date.now());
+        const transient = ingestFailureIsTransient(error);
+        if (transient) failedAt.set(key, Date.now());
+        else fatalRevision.add(key);
         const disk = findLive(job.serial, job.volumeUuid);
         note(job, {
           phase: "failed",
           pages: disk?.ingest?.pages ?? 0,
           records: disk?.ingest?.records ?? 0,
+          offset: disk?.ingest?.offset ?? 0,
           expected: job.recordCount,
-          error: message.slice(0, 120),
+          error: message.slice(0, 160),
+          stack: safeStack(error),
         });
         if (disk?.pendingRevision === job.revision && !coversSnapshot(disk, job.revision)) disk.pendingRevision = undefined;
       },
@@ -107,14 +130,14 @@ async function ingest(job: DeferredSnapshot, libraries: readonly LibraryRule[]):
         summary.fileCount += 1;
         if (file.size == null) summary.unknownSizes += 1;
         else if (file.size > 0) summary.indexedBytes += file.size;
-        for (const category of file.categories) if (summary.categoryCounts[category] != null) summary.categoryCounts[category] += 1;
+        for (const category of file.categories) if (Object.hasOwn(summary.categoryCounts, category)) summary.categoryCounts[category] += 1;
         if (!stream.write(`${JSON.stringify(file)}\n`)) {
           await new Promise<void>((resolve) => stream.once("drain", () => resolve()));
         }
       }
       records += page.files.length;
       pages += 1;
-      note(job, { phase: "page", pages, records, expected: job.recordCount });
+      note(job, { phase: "page", pages, records, offset: records, expected: job.recordCount });
       if (records > job.recordCount) throw new Error(`page overshot ${records}/${job.recordCount}`);
     }
     if (records !== job.recordCount) throw new Error(`page short ${records}/${job.recordCount}`);
@@ -125,9 +148,14 @@ async function ingest(job: DeferredSnapshot, libraries: readonly LibraryRule[]):
   } catch (error) {
     stream.destroy();
     await unlink(temp).catch(() => undefined);
+    if (error instanceof Error) {
+      const detail = error as Error & { page?: number; offset?: number };
+      detail.page = pages;
+      detail.offset = records;
+    }
     throw error;
   }
-  note(job, { phase: "write", pages, records, expected: job.recordCount });
+  note(job, { phase: "write", pages, records, offset: records, expected: job.recordCount });
   await rename(temp, finalPath);
   const bytes = (await stat(finalPath)).size;
   await withCatalogWrite(async () => {
@@ -142,7 +170,7 @@ async function ingest(job: DeferredSnapshot, libraries: readonly LibraryRule[]):
     disk.shardRevision = job.revision;
     disk.pendingRevision = undefined;
     disk.reportedRecords = records;
-    disk.ingest = { phase: "done", pages, records, expected: job.recordCount };
+    disk.ingest = { phase: "done", pages, records, offset: records, expected: job.recordCount };
     const described = describeScan({
       filesystem: disk.filesystem,
       platform: disk.pathStyle === "win32" ? "win32" : "darwin",
