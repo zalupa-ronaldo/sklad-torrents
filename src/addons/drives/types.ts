@@ -14,7 +14,14 @@ export interface RawIndexedFile {
   relativePath: string;
   name: string;
   kind: "file" | "dir";
-  size: number;
+  /** Logical length. Null means the snapshot did not say — unknown, not an empty file. */
+  size: number | null;
+  /** Allocated length of the unnamed $DATA stream. Not the WOF compressed size. */
+  allocated?: number;
+  /** Bytes occupied on disk when the scanner measured them. Absent means unknown, not zero. */
+  onDisk?: number;
+  /** Set only when compression itself was identified. */
+  compression?: "wof" | "ntfs";
   mtimeMs: number;
   sidecarCategory?: MediaCategory | null;
 }
@@ -23,7 +30,13 @@ export interface IndexedFile {
   relativePath: string;
   name: string;
   kind: "file" | "dir";
-  size: number;
+  /** Logical length. Null means unknown, not a real empty file. */
+  size: number | null;
+  /** Allocated length of the unnamed $DATA stream. Not the WOF compressed size. */
+  allocated?: number;
+  /** Measured size on disk. Absent means unknown, not zero. */
+  onDisk?: number;
+  compression?: "wof" | "ntfs";
   mtimeMs: number;
   sidecarCategory: MediaCategory | null;
   categories: MediaCategory[];
@@ -44,6 +57,8 @@ export interface IndexPayload {
   strategy?: IndexStrategy;
   files?: RawIndexedFile[];
   delta?: IndexDelta;
+  /** Large snapshot is downloaded off the shelf request. Not sent by the agent. */
+  deferred?: boolean;
 }
 
 export interface ScanState {
@@ -87,6 +102,40 @@ export interface DiskRecord {
   cloneOfIds: string[];
   scan: ScanState;
   files: IndexedFile[];
+  /** Exact totals from one pass over files. Shelf reads this and does not walk the array. */
+  summary?: DiskSummary;
+  /** Agent record count before the local file list is ready. Not a substitute for summary.indexedBytes. */
+  reportedRecords?: number;
+  pendingRevision?: string;
+  /** NDJSON file holding files when the catalog is too large to stringify in one string. */
+  fileStore?: string;
+  /** Agent or stored revision already written into fileStore. Same value means the shard must not be rewritten. */
+  shardRevision?: string;
+  /** Byte size of fileStore. A non-empty shard is a real index even when the summary was saved as zero. */
+  shardBytes?: number;
+  /** Page download of an existing agent snapshot. Absent means no ingest is in flight. */
+  ingest?: IngestProgress;
+}
+
+export interface IngestProgress {
+  phase: "queued" | "page" | "write" | "failed" | "done";
+  pages: number;
+  records: number;
+  expected: number;
+  /** Agent page offset for this attempt. Same number as records after a successful page. */
+  offset: number;
+  /** Short status only: HTTP code or the exception message. No paths and no file names. */
+  error?: string;
+  /** Top stack frames with directory prefixes removed. */
+  stack?: string;
+}
+
+export interface DiskSummary {
+  fileCount: number;
+  indexedBytes: number;
+  categoryCounts: Record<MediaCategory, number>;
+  /** Files whose logical size was missing. They are not counted as 0 bytes. */
+  unknownSizes?: number;
 }
 
 export interface ObservedVolume {
@@ -150,14 +199,22 @@ export interface DiskView {
   clonePeerLabels: string[];
   scan: ScanState;
   fileCount: number;
+  /** Sum of indexed file sizes. Folder totals in the browser are derived from the same bytes. */
+  indexedBytes: number;
+  /** False while a large index is still being totaled. Zero then is not a measured size. */
+  sizesReady: boolean;
+  /** False when file rows exist but their logical sizes were not in the snapshot. */
+  sizesKnown?: boolean;
   categoryCounts: Record<MediaCategory, number>;
+  /** Present while a snapshot download is queued, running, or has failed. */
+  ingest?: IngestProgress;
 }
 
 export interface ShelfResponse {
   mode: DriveMode;
   readOnly: true;
   disks: DiskView[];
-  agentErrors: { hostName: string; message: string }[];
+  agentErrors: { hostId?: string; hostName: string; message: string }[];
 }
 
 export interface SearchHit {

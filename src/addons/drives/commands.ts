@@ -1,5 +1,5 @@
 import type { HostOs, IndexStrategy } from "@/addons/drives/types";
-import { selectIndexStrategy } from "@/addons/drives/strategy";
+import { isNtfs, selectIndexStrategy } from "@/addons/drives/strategy";
 import { WINDOWS_VOLUME_SCRIPT } from "@/addons/drives/win-script";
 
 export const READ_ONLY_OPS = [
@@ -39,7 +39,10 @@ export function planIndexCommands(input: PlanInput): IndexCommand[] {
     { op: "identify-volume", reason: "read-identity" },
     { op: "stat-volume", reason: "read-capacity" },
   ];
-  if (decision.strategy === "mft-usn") {
+  if (isNtfs(input.filesystem) && input.platform === "win32") {
+    commands.push({ op: "read-mft", reason: input.elevated ? "ntfs-mft" : "ntfs-mft-needs-admin" });
+    if (input.elevated) commands.push({ op: "read-usn", reason: input.usnCheckpoint ? "incremental-usn" : "usn-checkpoint" });
+  } else if (decision.strategy === "mft-usn") {
     commands.push({ op: "read-mft", reason: "ntfs-mft" });
     commands.push({ op: "read-usn", reason: input.usnCheckpoint ? "incremental-usn" : "usn-checkpoint" });
   } else {

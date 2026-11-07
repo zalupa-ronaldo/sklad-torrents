@@ -1,20 +1,22 @@
+import { readLogicalSize } from "@/addons/drives/file-size";
 import { joinDisplay, normalizeRelative, parentRelative, pathSegments, segmentsStartWith } from "@/addons/drives/paths";
 import type { IndexedFile, LibraryRule, MediaCategory, PathStyle, RawIndexedFile } from "@/addons/drives/types";
 
 const CATEGORIES: readonly MediaCategory[] = ["torrent", "game", "media", "series", "installer", "music", "software", "documents"];
-const EXTENSIONS: Record<string, MediaCategory[]> = {
-  mkv: ["media"], mp4: ["media"], avi: ["media"], mov: ["media"], m4v: ["media"], ts: ["media"], m2ts: ["media"], iso: ["media"],
-  mp3: ["music"], flac: ["music"], wav: ["music"], ogg: ["music"], m4a: ["music"], aac: ["music"], opus: ["music"], cue: ["music"],
-  exe: ["software"], msi: ["software"], msix: ["software"], appx: ["software"], dmg: ["software"], pkg: ["software"],
-  pdf: ["documents"], doc: ["documents"], docx: ["documents"], txt: ["documents"], md: ["documents"], xls: ["documents"], xlsx: ["documents"], epub: ["documents"], fb2: ["documents"],
-};
+// Map, not a plain object: extensions such as constructor/toString are Object.prototype functions.
+const EXTENSIONS = new Map<string, readonly MediaCategory[]>([
+  ["mkv", ["media"]], ["mp4", ["media"]], ["avi", ["media"]], ["mov", ["media"]], ["m4v", ["media"]], ["ts", ["media"]], ["m2ts", ["media"]], ["iso", ["media"]],
+  ["mp3", ["music"]], ["flac", ["music"]], ["wav", ["music"]], ["ogg", ["music"]], ["m4a", ["music"]], ["aac", ["music"]], ["opus", ["music"]], ["cue", ["music"]],
+  ["exe", ["software"]], ["msi", ["software"]], ["msix", ["software"]], ["appx", ["software"]], ["dmg", ["software"]], ["pkg", ["software"]],
+  ["pdf", ["documents"]], ["doc", ["documents"]], ["docx", ["documents"]], ["txt", ["documents"]], ["md", ["documents"]], ["xls", ["documents"]], ["xlsx", ["documents"]], ["epub", ["documents"]], ["fb2", ["documents"]],
+]);
 function inferFile(relativePath: string, kind: "file" | "dir"): MediaCategory[] {
   const lower = relativePath.toLowerCase();
   const name = lower.split("/").pop() ?? lower;
   const found = new Set<MediaCategory>();
   if (kind === "file") {
     const ext = name.includes(".") ? name.split(".").pop() ?? "" : "";
-    for (const category of EXTENSIONS[ext] ?? []) found.add(category);
+    for (const category of EXTENSIONS.get(ext) ?? []) found.add(category);
     if (/(^|[\/])(games? setup|установщики|installers?)([\/]|$)/.test(lower) && ["exe", "msi", "msix", "appx", "dmg", "pkg", "zip", "rar", "7z"].includes(ext)) found.add("installer");
     if (["exe", "msi", "msix", "appx", "dmg", "pkg"].includes(ext) && /setup|install|installer|установ|repack|re-pack|distribution/.test(lower)) found.add("installer");
     if (["zip", "rar", "7z"].includes(ext) && /setup|install|installer|установ|repack|re-pack/.test(lower)) found.add("installer");
@@ -90,34 +92,68 @@ export function categoriesFor(
   return CATEGORIES.filter((category) => found.has(category));
 }
 
+type PreparedFile = Omit<IndexedFile, "categories">;
+
+function prepareRaw(file: RawIndexedFile): PreparedFile | null {
+  const relativePath = normalizeRelative(file.relativePath);
+  if (!relativePath && file.name !== "") return null;
+  const name = file.name.trim() || relativePath.split("/").pop() || relativePath;
+  const allocated = typeof file.allocated === "number" && Number.isFinite(file.allocated) && file.allocated >= 0 ? file.allocated : undefined;
+  const onDisk = typeof file.onDisk === "number" && Number.isFinite(file.onDisk) && file.onDisk >= 0 ? file.onDisk : undefined;
+  const compression = file.compression === "wof" || file.compression === "ntfs" ? file.compression : undefined;
+  if (!relativePath && name === "") return null;
+  return {
+    relativePath,
+    name,
+    kind: file.kind === "dir" ? "dir" : "file",
+    size: readLogicalSize(file),
+    ...(allocated != null ? { allocated } : {}),
+    ...(onDisk != null ? { onDisk } : {}),
+    ...(compression ? { compression } : {}),
+    mtimeMs: Number.isFinite(file.mtimeMs) ? file.mtimeMs : 0,
+    sidecarCategory: asCategory(file.sidecarCategory),
+  };
+}
+
+function finishPrepared(file: PreparedFile, map: ReadonlyMap<string, MediaCategory>, rules: readonly LibraryRule[], style: PathStyle, mountPath: string): IndexedFile {
+  const sidecar = file.sidecarCategory ?? sidecarFor(file.relativePath, map);
+  return {
+    ...file,
+    sidecarCategory: sidecar,
+    categories: [...new Set([...categoriesFor(file.relativePath, joinDisplay(style, mountPath, file.relativePath), rules, sidecar), ...inferFile(file.relativePath, file.kind)])],
+  };
+}
+
 export function toIndexedFiles(
   raw: readonly RawIndexedFile[],
   rules: readonly LibraryRule[],
   style: PathStyle,
   mountPath: string,
 ): IndexedFile[] {
-  const prepared = raw
-    .map((file) => {
-      const relativePath = normalizeRelative(file.relativePath);
-      if (!relativePath && file.name !== "") return null;
-      const name = file.name.trim() || relativePath.split("/").pop() || relativePath;
-      return {
-        relativePath,
-        name,
-        kind: file.kind === "dir" ? "dir" : "file",
-        size: Number.isFinite(file.size) && file.size > 0 ? file.size : 0,
-        mtimeMs: Number.isFinite(file.mtimeMs) ? file.mtimeMs : 0,
-        sidecarCategory: asCategory(file.sidecarCategory),
-      };
-    })
-    .filter((file): file is Omit<IndexedFile, "categories"> => file !== null && (file.relativePath.length > 0 || file.kind === "dir"));
+  const prepared = raw.map(prepareRaw).filter((file): file is PreparedFile => file !== null && (file.relativePath.length > 0 || file.kind === "dir"));
   const map = sidecarMap(prepared);
-  return prepared.map((file) => {
-    const sidecar = file.sidecarCategory ?? sidecarFor(file.relativePath, map);
-    return {
-      ...file,
-      sidecarCategory: sidecar,
-      categories: [...new Set([...categoriesFor(file.relativePath, joinDisplay(style, mountPath, file.relativePath), rules, sidecar), ...inferFile(file.relativePath, file.kind)])],
-    };
-  });
+  return prepared.map((file) => finishPrepared(file, map, rules, style, mountPath));
+}
+
+/** Same classification as toIndexedFiles, but returns to the event loop between batches. */
+export async function classifyFilesYielding(
+  raw: readonly RawIndexedFile[],
+  rules: readonly LibraryRule[],
+  style: PathStyle,
+  mountPath: string,
+  batchSize = 4_000,
+): Promise<IndexedFile[]> {
+  const prepared: PreparedFile[] = [];
+  for (let i = 0; i < raw.length; i += 1) {
+    const file = prepareRaw(raw[i]!);
+    if (file && (file.relativePath.length > 0 || file.kind === "dir")) prepared.push(file);
+    if (i > 0 && i % batchSize === 0) await new Promise((resolve) => setImmediate(resolve));
+  }
+  const map = sidecarMap(prepared);
+  const out: IndexedFile[] = new Array(prepared.length);
+  for (let i = 0; i < prepared.length; i += 1) {
+    out[i] = finishPrepared(prepared[i]!, map, rules, style, mountPath);
+    if (i > 0 && i % batchSize === 0) await new Promise((resolve) => setImmediate(resolve));
+  }
+  return out;
 }
