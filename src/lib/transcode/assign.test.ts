@@ -59,6 +59,24 @@ describe("parallel HandBrake assignment", () => {
     expect(software[0]).toMatchObject({ state: "leased", encoder: "software", codec: "av1" })
   })
 
+  it("uses the 1.11.1 encoder names and does not treat listed vce or missing vt_av1 as a hardware pass", () => {
+    const mac: EncodeHost = {
+      id: "mac",
+      os: "linux",
+      slots: 1,
+      probe: { hardwareAv1: false, videoToolbox: null, amf: null, encoders: ["svt_av1", "svt_av1_10bit", "vt_h264", "vt_h265", "vt_h265_10bit", "vt_prores"] },
+    };
+    const pc: EncodeHost = {
+      id: "pc",
+      os: "linux",
+      slots: 1,
+      probe: { hardwareAv1: false, videoToolbox: null, amf: null, encoders: ["svt_av1", "svt_av1_10bit", "vce_av1", "vce_av1_10bit", "vce_h264", "vce_h265", "vce_h265_10bit"] },
+    };
+    expect(assignEncodeJobs([{ id: "a", codec: "av1", allowSoftware: true }], [mac, pc]).map((item) => item.encoder)).toEqual(["software"]);
+    const noAv1: EncodeHost = { ...mac, probe: { ...mac.probe, encoders: ["vt_h264", "vt_h265", "x264"] } };
+    expect(assignEncodeJobs([{ id: "a", codec: "av1", allowSoftware: true }], [noAv1])[0]).toMatchObject({ state: "blocked", encoder: null });
+  });
+
   it("does not give a leased job to a second worker", () => {
     const again = assignEncodeJobs([{ id: "a", codec: "hevc", allowSoftware: true }], [pc], new Set(["a"]))
     expect(again[0]?.state).toBe("blocked")

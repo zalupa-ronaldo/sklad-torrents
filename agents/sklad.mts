@@ -164,6 +164,27 @@ async function main(): Promise<void> {
       const result = await encode.runEncodeOnce();
       emit(0, { ...result, ok: true, command, action: "work" });
     }
+    if (sub === "hub") {
+      const token = process.env.SKLAD_WORKER_TOKEN || "";
+      const remote = await import("../src/lib/encode-remote/hub.ts");
+      const hub = await remote.startEncodeHub({ token, port: Number(flag("--port") || 0), bind: flag("--bind") || undefined });
+      process.stdout.write(`${JSON.stringify({ ok: true, command, action: "hub", port: hub.port, bound: hub.bound })}\n`);
+      await new Promise<void>((resolve) => {
+        const stop = () => { void hub.close().finally(resolve); };
+        process.on("SIGTERM", stop);
+        process.on("SIGINT", stop);
+      });
+      return;
+    }
+    if (sub === "worker") {
+      const token = process.env.SKLAD_WORKER_TOKEN || "";
+      const hub = process.env.SKLAD_HUB || "";
+      const id = flag("--id") || "";
+      const role = flag("--role") === "mac" ? "mac" : "pc";
+      const remote = await import("../src/lib/encode-remote/worker.ts");
+      await remote.runEncodeWorker({ hub, token, id, role });
+      return;
+    }
     if (sub === "cancel") {
       const id = flag("--id");
       if (!id) emit(2, { ok: false, command, error: "Нужен --id." });
