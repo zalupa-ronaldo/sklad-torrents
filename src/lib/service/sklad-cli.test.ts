@@ -64,7 +64,7 @@ it("runs snapshot ingest, one verify job, restart, and a repeated ingest without
   const policy = run(dir, ["policy"]);
   expect(policy.json.pin).toBe("until-explicit-remove");
   expect((policy.json.encode as { started?: boolean }).started).toBe(false);
-  expect(run(dir, ["encode"]).status).toBe(3);
+  expect(run(dir, ["encode"]).status).toBe(2);
 });
 
 it("starts and stops the service process", async () => {

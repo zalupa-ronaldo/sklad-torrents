@@ -155,7 +155,40 @@ async function main(): Promise<void> {
     });
   }
   if (command === "encode") {
-    emit(3, { ok: false, command, state: "blocked", started: false, reason: "HandBrake не запускался. Нет пробы кодеков и нет ролика в этой команде." });
+    const encode = await import("../src/lib/transcode/encode-worker.ts");
+    if (sub === "probe") {
+      const probe = await encode.probeEncoder();
+      emit(probe.present ? 0 : 3, { ...probe, ok: probe.present, command, action: "probe", started: false });
+    }
+    if (sub === "work") {
+      const result = await encode.runEncodeOnce();
+      emit(0, { ...result, ok: true, command, action: "work" });
+    }
+    if (sub === "cancel") {
+      const id = flag("--id");
+      if (!id) emit(2, { ok: false, command, error: "Нужен --id." });
+      const job = await createJobStore(dataDir()).cancel(id);
+      emit(0, { ok: true, command, action: "cancel", jobId: job.id, state: job.state, verified: false, ready: false });
+    }
+    const source = flag("--source");
+    const destination = flag("--dest");
+    const codec = flag("--codec");
+    if (!source || !destination || (codec !== "av1" && codec !== "hevc" && codec !== "h264")) {
+      emit(2, { ok: false, command, started: false, error: "Нужны --source, --dest и явный --codec av1|hevc|h264. H.264 сам не выбирается." });
+    }
+    const queued = await encode.enqueueEncode({
+      source,
+      destination,
+      codec,
+      allowSoftware: !args.includes("--hardware-only"),
+      ...(flag("--torrent") ? { torrentHash: flag("--torrent")! } : {}),
+    });
+    if (!queued.ok) emit(3, { ...queued, ok: false, command, started: false });
+    if (sub === "run") {
+      const result = await encode.runEncodeOnce();
+      emit(result.verified === true ? 0 : 1, { ...result, ok: result.verified === true, command, action: "run", enqueue: queued });
+    }
+    emit(0, { ...queued, ok: true, command, action: "enqueue" });
   }
   if (command === "service") {
     if (sub === "run") return serviceRun();
@@ -216,7 +249,9 @@ async function serviceRun(): Promise<void> {
   process.on("SIGINT", finish);
   while (!stop) {
     const result = await verifySnapshotJob(createJobStore(dataDir()));
-    if (!result.processed) await new Promise((resolve) => setTimeout(resolve, Number(process.env.SKLAD_SERVICE_TICK_MS || 200)));
+    const encode = await import("../src/lib/transcode/encode-worker.ts");
+    const encoded = await encode.runEncodeOnce(dataDir()).catch(() => ({ processed: false }));
+    if (!result.processed && !encoded.processed) await new Promise((resolve) => setTimeout(resolve, Number(process.env.SKLAD_SERVICE_TICK_MS || 200)));
   }
   await rm(pidFile(), { force: true });
   process.exit(0);

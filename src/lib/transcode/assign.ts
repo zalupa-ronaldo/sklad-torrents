@@ -12,11 +12,13 @@ export interface CodecProbe {
   hardwareAv1: boolean | null
   videoToolbox: { h264: boolean; hevc: boolean; av1: boolean } | null
   amf: { h264: boolean; hevc: boolean; av1: boolean } | null
+  /** Names from this machine's HandBrake `--help`. Absent means the caller did not pass a list. */
+  encoders?: readonly string[]
 }
 
 export interface EncodeHost {
   id: string
-  os: "win32" | "darwin"
+  os: "win32" | "darwin" | "linux"
   slots: number
   probe: CodecProbe
 }
@@ -80,6 +82,7 @@ export function assignEncodeJobs(
 }
 
 function encoderFor(host: EncodeHost, job: EncodeRequest): "hardware" | "software" | null {
+  if (host.os === "linux") return linuxEncoder(host, job)
   if (job.codec === "av1") {
     if (host.probe.hardwareAv1 === true) return "hardware"
     if (host.os === "darwin" && host.probe.videoToolbox?.av1 === true) return "hardware"
@@ -88,5 +91,21 @@ function encoderFor(host: EncodeHost, job: EncodeRequest): "hardware" | "softwar
   }
   const table = host.os === "darwin" ? host.probe.videoToolbox : host.probe.amf
   if (table?.[job.codec] === true) return "hardware"
+  return job.allowSoftware ? "software" : null
+}
+
+const HARDWARE_AV1 = /^(nvenc_av1|qsv_av1|vt_av1|vce_av1|amf_av1)$/
+
+function linuxEncoder(host: EncodeHost, job: EncodeRequest): "hardware" | "software" | null {
+  const names = host.probe.encoders
+  const listed = (name: string) => !names || names.includes(name)
+  if (job.codec === "av1") {
+    const hardwareListed = !names || names.some((name) => HARDWARE_AV1.test(name))
+    if (host.probe.hardwareAv1 === true && hardwareListed) return "hardware"
+    if (!listed("svt_av1") && !listed("svt_av1_10bit")) return null
+    return job.allowSoftware ? "software" : null
+  }
+  const software = job.codec === "hevc" ? "x265" : "x264"
+  if (!listed(software)) return null
   return job.allowSoftware ? "software" : null
 }

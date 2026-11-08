@@ -42,6 +42,23 @@ describe("parallel HandBrake assignment", () => {
     expect(software[0]).toMatchObject({ state: "leased", codec: "av1", encoder: "software", hostId: "mac-mini" })
   })
 
+  it("keeps Linux on the encoders it actually listed and does not turn AV1 into HEVC", () => {
+    const linux: EncodeHost = {
+      id: "linux-local",
+      os: "linux",
+      slots: 2,
+      probe: { hardwareAv1: false, videoToolbox: null, amf: null, encoders: ["x264", "x265"] },
+    }
+    const blocked = assignEncodeJobs([{ id: "av1", codec: "av1", allowSoftware: true }], [linux])
+    expect(blocked[0]).toMatchObject({ state: "blocked", codec: "av1", encoder: null })
+    expect(blocked[0]?.reason).toMatch(/HEVC/)
+    const software = assignEncodeJobs(
+      [{ id: "av1", codec: "av1", allowSoftware: true }],
+      [{ ...linux, probe: { ...linux.probe, encoders: ["svt_av1", "x264"] } }],
+    )
+    expect(software[0]).toMatchObject({ state: "leased", encoder: "software", codec: "av1" })
+  })
+
   it("does not give a leased job to a second worker", () => {
     const again = assignEncodeJobs([{ id: "a", codec: "hevc", allowSoftware: true }], [pc], new Set(["a"]))
     expect(again[0]?.state).toBe("blocked")

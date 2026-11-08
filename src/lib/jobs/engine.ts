@@ -425,6 +425,35 @@ export class JobStore {
     });
   }
 
+  async noteSourceRemoved(id: string): Promise<boolean> {
+    return this.exclusive(async () => {
+      const job = this.jobs.find((item) => item.id === id);
+      if (!job || job.state !== "done" || !job.verified || job.sourceDeleted) {
+        return { result: false, dirty: false, events: [] };
+      }
+      job.sourceDeleted = true;
+      job.updatedAt = new Date().toISOString();
+      return { result: true, dirty: true, events: [this.upsertEvent(job)] };
+    });
+  }
+
+  async requeueStale(host: JobHost, stale: (job: Job) => boolean): Promise<number> {
+    return this.exclusive(async () => {
+      let changed = 0;
+      const events: JobEvent[] = [];
+      for (const job of this.jobs) {
+        if (job.host !== host || job.state !== "running" || job.verified) continue;
+        if (!stale(cloneJob(job))) continue;
+        job.workerToken = null;
+        job.state = "queued";
+        job.updatedAt = new Date().toISOString();
+        changed += 1;
+        events.push(this.upsertEvent(job));
+      }
+      return { result: changed, dirty: changed > 0, events };
+    });
+  }
+
   async adoptOrphans(host: JobHost): Promise<number> {
     return this.exclusive(async () => {
       let changed = 0;
