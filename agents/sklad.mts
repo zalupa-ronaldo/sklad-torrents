@@ -203,6 +203,29 @@ async function main(): Promise<void> {
       if (!row) emit(2, { ok: false, command, error: "Нужен --id существующей игры." });
       emit(0, { ok: true, command, action: "status", game: publicGame(row) });
     }
+    if (sub === "discover") {
+      const root = flag("--root");
+      if (!root) emit(2, { ok: false, command, error: "Нужен --root настроенной библиотеки. Все тома не сканируются." });
+      const { importDiscovered } = await import("../src/lib/games/discover.ts");
+      const result = await importDiscovered(root);
+      emit(0, {
+        ok: true,
+        command,
+        action: "discover",
+        added: result.added,
+        existing: result.existing,
+        copied: false,
+        games: result.games.map((game) => ({
+          name: game.name,
+          steamAppId: game.steamAppId,
+          provenance: game.provenance,
+          confidence: game.confidence,
+          needsReview: game.needsReview,
+          unmanaged: game.unmanaged,
+          compact: game.steamAppId ? "not-run" : "unknown",
+        })),
+      });
+    }
     if (sub === "register") {
       const steam = flag("--steam");
       const result = await games.registerGame({
@@ -311,12 +334,9 @@ async function serviceRun(): Promise<void> {
   process.on("SIGTERM", finish);
   process.on("SIGINT", finish);
   while (!stop) {
-    const result = await verifySnapshotJob(createJobStore(dataDir()));
-    const encode = await import("../src/lib/transcode/encode-worker.ts");
-    const encoded = await encode.runEncodeOnce(dataDir()).catch(() => ({ processed: false }));
-    const games = await import("../src/lib/games/prepare.ts");
-    const played = await games.runGameOnce(dataDir()).catch(() => ({ processed: false }));
-    if (!result.processed && !encoded.processed && !played.processed) await new Promise((resolve) => setTimeout(resolve, Number(process.env.SKLAD_SERVICE_TICK_MS || 200)));
+    const { dispatchOnce } = await import("../src/lib/service/dispatch.ts");
+    const round = await dispatchOnce(dataDir());
+    if (round.processed.length === 0) await new Promise((resolve) => setTimeout(resolve, Number(process.env.SKLAD_SERVICE_TICK_MS || 200)));
   }
   await rm(pidFile(), { force: true });
   process.exit(0);

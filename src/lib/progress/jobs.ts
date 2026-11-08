@@ -31,7 +31,7 @@ export interface ProgressPayload {
     ready: boolean;
     location: string;
     compact: string;
-    compressed: false;
+    compressed: boolean;
   }[];
 }
 

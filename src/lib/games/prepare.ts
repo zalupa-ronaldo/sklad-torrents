@@ -6,12 +6,12 @@ import path from "node:path";
 import { pipeline } from "node:stream/promises";
 
 import { buildCompactArgv } from "@/addons/media-games/compact";
+import { compactAllowsLaunch, executeCompact } from "@/lib/games/compact-run";
 import { adviseCompression, cacheFromText, lookupCompactResult } from "@/lib/compact-db/database";
 import { createJobStore } from "@/lib/jobs/engine";
 import type { Job } from "@/lib/jobs/model";
 import { evictPreparedGame, gamePoolSpace, removeFromGamePool } from "@/lib/policies/storage-roles";
 import { dataDir } from "@/lib/qbittorrent/store";
-import { decideGameCompression } from "@/lib/compact-db/game-root";
 import {
   GAME_LIMITS,
   assessRegistration,
@@ -44,13 +44,13 @@ export async function registerGame(input: {
   if (samePlace(input.root, input.pool)) return blocked("Источник и пул совпадают или вложены.");
   const explicit = input.name && input.exe && input.steamAppId ? { name: input.name, steamAppId: input.steamAppId, exe: input.exe } : null;
   if (input.offline) {
-    if (!explicit) return blocked("Офлайн-игру можно записать только явными именем, Steam ID и exe. Диск не опрашивается.");
-    return saveRegistered(directory, input.root, input.pool, { ...explicit, args: [], saves: [], provenance: "explicit", confidence: "medium" }, false);
+    if (!explicit) return blocked("Офлайн-игру можно записать только явными именем и exe. Диск не опрашивается.");
+    return saveRegistered(directory, input.root, input.pool, explicitIdentity(explicit), false);
   }
   const exists = await directoryExists(input.root);
   if (!exists) {
     if (!explicit) return blocked("Корня нет на месте. Без явной регистрации офлайн-запись не создаётся и том не ищется.");
-    return saveRegistered(directory, input.root, input.pool, { ...explicit, args: [], saves: [], provenance: "explicit", confidence: "medium" }, false);
+    return saveRegistered(directory, input.root, input.pool, explicitIdentity(explicit), false);
   }
   const manifest = await readManifest(input.root);
   const exe = manifest?.exe || input.exe || "";
@@ -65,6 +65,8 @@ export async function prepareGame(id: string, compactDb: string | null, director
   const game = games.find((item) => item.id === id);
   if (!game) return blocked("Игры в библиотеке нет.");
   if (!game.online) return blocked("Источник offline. Подготовка не начинает живой опрос диска.", game);
+  if (!game.pool) return blocked("Пул не задан. Задание не ставится.", game);
+  if (!(await directoryExists(game.pool))) return blocked("Каталога пула нет. Задание не ставится.", game);
   assertGamePaths([game.root, game.pool, game.destination]);
   if (samePlace(game.root, game.destination)) return blocked("Источник и назначение совпадают или вложены.", game);
   const eviction = evictPreparedGame("space-pressure");
@@ -101,6 +103,7 @@ export async function prepareGame(id: string, compactDb: string | null, director
   if ((queued.job.state === "done" || queued.job.state === "error") && !(await directoryExists(game.destination))) {
     await store.requeueCopy(queued.job.id);
   }
+  game.compactDbPath = compactDb;
   game.jobId = queued.job.id;
   game.state = "preparing";
   game.reason = "";
@@ -161,12 +164,14 @@ async function execute(store: ReturnType<typeof createJobStore>, directory: stri
   await writeFile(path.join(staging, ".sklad-managed"), JSON.stringify(marker), "utf8");
   if (await directoryExists(game.destination)) throw new Error("Назначение уже есть. Чужая папка не перезаписывается.");
   await rename(staging, game.destination);
-  const compact = await compactDecision(game, compactDb);
+  const compact = await compactDecision(game, compactDb || game.compactDbPath);
   game.manifest = files.files;
   game.saveFingerprints = await fingerprints(game.destination, game.saves);
   game.copyVerified = true;
   game.compact = compact.state;
   game.compactReason = compact.reason;
+  game.compressed = compact.compressed;
+  game.ntfsSmoke = false;
   game.ready = compact.launch;
   game.state = compact.launch ? "available" : "blocked";
   game.reason = compact.launch ? "" : compact.reason;
@@ -211,6 +216,7 @@ export async function removeGame(id: string, directory = dataDir()): Promise<Rec
   const games = await listGames(directory);
   const game = games.find((item) => item.id === id);
   if (!game) return blocked("Игры в библиотеке нет.");
+  if (game.unmanaged) return blocked("Эта игра уже была на диске и в пул для удаления не зачислена.", game);
   const eviction = evictPreparedGame("game-exit");
   if (eviction.evict) return blocked("Выход из игры ничего не переносит и не очищает.", game);
   if (!(await directoryExists(game.destination))) return blocked("Управляемой копии в пуле нет.", game);
@@ -235,12 +241,23 @@ export async function removeGame(id: string, directory = dataDir()): Promise<Rec
   return { ok: true, removed: true, sourceKept: sourceLeft, ready: false, game: publicGame(game) };
 }
 
-async function compactDecision(game: GameRecord, compactDb: string | null): Promise<{ state: GameRecord["compact"]; reason: string; launch: boolean; argv: string[] | null }> {
+function explicitIdentity(explicit: { name: string; steamAppId: number | null; exe: string }) {
+  return {
+    ...explicit,
+    args: [] as string[],
+    saves: [] as string[],
+    provenance: "explicit" as const,
+    confidence: explicit.steamAppId ? "medium" as const : "low" as const,
+    needsReview: !explicit.steamAppId,
+  };
+}
+
+async function compactDecision(game: GameRecord, compactDb: string | null): Promise<{ state: GameRecord["compact"]; reason: string; launch: boolean; argv: string[] | null; compressed: boolean; ntfsSmoke: false }> {
   if (!game.steamAppId) {
-    return { state: "hold", reason: "Steam ID нет. Сжатие не пропускается и не считается выполненным.", launch: false, argv: null };
+    return { state: "unknown", reason: "Steam ID нет. Игра в библиотеке есть. База CompactGUI для неё неизвестна: это не пропуск и не успех.", launch: false, argv: null, compressed: false, ntfsSmoke: false };
   }
   if (!compactDb) {
-    return { state: "hold", reason: "Локальная база CompactGUI не передана. Неизвестная экономия не разрешает ни сжатие, ни запуск.", launch: false, argv: null };
+    return { state: "unknown", reason: "База CompactGUI не задана. Неизвестная экономия не считается пропуском и не ставит сжатие выполненным.", launch: false, argv: null, compressed: false, ntfsSmoke: false };
   }
   const cache = cacheFromText(await readFile(compactDb, "utf8"), new Date().toISOString());
   const lookup = lookupCompactResult(cache, game.steamAppId, "XPRESS8K");
@@ -248,37 +265,35 @@ async function compactDecision(game: GameRecord, compactDb: string | null): Prom
   const windowsPath = `D:\\SkladTest\\${game.id}`;
   const argv = buildCompactArgv({ os: "win32", binary: "C:\\Windows\\System32\\compact.exe", folder: windowsPath, algorithm: "XPRESS8K" });
   if (advice.action === "skip") {
-    return { state: "skipped", reason: `${advice.reason} Сжатие не запускалось. Это не гарантия сообщества.`, launch: true, argv };
+    return { state: "skipped", reason: `${advice.reason} Сжатие не запускалось. Это не гарантия сообщества.`, launch: true, argv, compressed: false, ntfsSmoke: false };
   }
-  const executed = decideGameCompression({
-    identified: true,
-    steamAppId: game.steamAppId,
-    kind: "game-root",
-    path: windowsPath,
-    os: "win32",
-    filesystem: "NTFS",
-    letter: "D",
+  if (advice.action !== "eligible") {
+    return { state: "unknown", reason: advice.reason, launch: false, argv, compressed: false, ntfsSmoke: false };
+  }
+  const result = await executeCompact({
+    os: process.platform,
+    filesystem: process.platform === "win32" ? "NTFS" : "unknown",
+    role: "game-pool",
+    root: game.destination,
     escapes: [],
-    lookup,
-    requested: "XPRESS8K",
-    alreadyAlgorithm: null,
-    minSavings: MIN_SAVINGS,
-    manualOverride: false,
+    algorithm: "XPRESS8K",
+    binary: "C:\\Windows\\System32\\compact.exe",
   });
-  if (process.platform !== "win32" || advice.action !== "eligible" || !executed.accept) {
-    const reason = advice.action === "eligible"
-      ? "На Linux compact.exe не запускается. Копия не помечена сжатой. Проверка на ПК не выполнялась."
-      : advice.reason;
-    return { state: advice.action === "eligible" ? "blocked" : "hold", reason, launch: false, argv };
-  }
-  return { state: "blocked", reason: "Сжатие на этом прогоне не запускалось.", launch: false, argv };
+  return {
+    state: result.compressed ? "done" : "blocked",
+    reason: result.reason,
+    launch: compactAllowsLaunch(result),
+    argv,
+    compressed: result.compressed,
+    ntfsSmoke: false,
+  };
 }
 
 async function saveRegistered(
   directory: string,
   root: string,
   pool: string,
-  identity: { name: string; steamAppId: number | null; exe: string; args: string[]; saves: string[]; provenance: "manifest" | "explicit"; confidence: "high" | "medium" },
+  identity: { name: string; steamAppId: number | null; exe: string; args: string[]; saves: string[]; provenance: GameRecord["provenance"]; confidence: GameRecord["confidence"]; needsReview: boolean },
   online: boolean,
 ): Promise<Record<string, unknown>> {
   const games = await listGames(directory);
@@ -296,6 +311,10 @@ async function saveRegistered(
     saves: identity.saves,
     provenance: identity.provenance,
     confidence: identity.confidence,
+    needsReview: identity.needsReview,
+    unmanaged: false,
+    ntfsSmoke: false,
+    compactDbPath: null,
     online,
     lastSeenAt: online ? new Date().toISOString() : previous?.lastSeenAt ?? null,
     location: path.resolve(root),

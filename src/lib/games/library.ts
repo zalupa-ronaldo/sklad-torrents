@@ -28,18 +28,23 @@ export interface GameRecord {
   exe: string;
   args: string[];
   saves: string[];
-  provenance: "manifest" | "explicit";
-  confidence: "high" | "medium";
+  provenance: "manifest" | "explicit" | "steam-manifest" | "epic-manifest" | "gog-manifest" | "offline-index";
+  confidence: "high" | "medium" | "low";
+  needsReview: boolean;
+  unmanaged: boolean;
   online: boolean;
   lastSeenAt: string | null;
   location: string;
   state: "registered" | "preparing" | "available" | "blocked";
   copyVerified: boolean;
   ready: boolean;
-  compact: "skipped" | "blocked" | "hold" | "not-run";
+  compact: "skipped" | "blocked" | "hold" | "unknown" | "done" | "not-run";
   compactReason: string;
-  compressed: false;
+  compressed: boolean;
+  /** Physical NTFS compact has not been run by this cloud agent. */
+  ntfsSmoke: false;
   pcIntegration: "not-verified";
+  compactDbPath: string | null;
   jobId: string | null;
   managed: true;
   pinned: "until-explicit-remove";
@@ -61,6 +66,9 @@ export function publicGame(game: GameRecord) {
     copyVerified: game.copyVerified,
     compact: game.compact,
     compressed: game.compressed,
+    ntfsSmoke: game.ntfsSmoke,
+    needsReview: game.needsReview,
+    unmanaged: game.unmanaged,
     pcIntegration: game.pcIntegration,
     reason: game.reason,
     pinned: game.pinned,
@@ -106,32 +114,36 @@ export function assessRegistration(input: {
   manifest: { name: string; steamAppId: number | null; exe: string; args: string[]; saves: string[] } | null;
   explicit: { name: string; steamAppId: number | null; exe: string } | null;
   exeInside: boolean;
-}): { ok: true; name: string; steamAppId: number | null; exe: string; args: string[]; saves: string[]; provenance: "manifest" | "explicit"; confidence: "high" | "medium" } | { ok: false; reason: string } {
-  if (input.manifest && input.manifest.steamAppId && input.manifest.exe && input.exeInside) {
+}): { ok: true; name: string; steamAppId: number | null; exe: string; args: string[]; saves: string[]; provenance: "manifest" | "explicit"; confidence: "high" | "medium" | "low"; needsReview: boolean } | { ok: false; reason: string } {
+  if (input.manifest?.exe && input.exeInside) {
+    const steam = input.manifest.steamAppId;
     return {
       ok: true,
       name: input.manifest.name,
-      steamAppId: input.manifest.steamAppId,
+      steamAppId: steam,
       exe: input.manifest.exe,
       args: input.manifest.args,
       saves: input.manifest.saves,
       provenance: "manifest",
-      confidence: "high",
+      confidence: steam ? "high" : "medium",
+      needsReview: !steam,
     };
   }
-  if (input.explicit?.name && input.explicit.steamAppId && input.explicit.exe && input.exeInside) {
+  if (input.explicit?.name && input.explicit.exe && input.exeInside) {
+    const steam = input.explicit.steamAppId;
     return {
       ok: true,
       name: input.explicit.name,
-      steamAppId: input.explicit.steamAppId,
+      steamAppId: steam,
       exe: input.explicit.exe,
       args: [],
       saves: [],
       provenance: "explicit",
-      confidence: "medium",
+      confidence: steam ? "medium" : "low",
+      needsReview: !steam,
     };
   }
-  return { ok: false, reason: "Корень игры не подтверждён. Одного exe или имени папки недостаточно. Нужен sklad-game.json или явные имя, Steam ID и exe внутри корня." };
+  return { ok: false, reason: "Корень игры не подтверждён. Одного exe или имени папки недостаточно. Нужен известный манифест или явные имя и exe внутри корня." };
 }
 
 export async function hashFile(file: string): Promise<GameFile> {
@@ -146,7 +158,7 @@ export async function readLibrary(directory: string): Promise<{ entries: unknown
     const parsed = JSON.parse(await readFile(libraryPath(directory), "utf8")) as { entries?: unknown[]; games?: unknown[] };
     return {
       entries: Array.isArray(parsed.entries) ? parsed.entries : [],
-      games: Array.isArray(parsed.games) ? parsed.games.filter(isGame) : [],
+      games: Array.isArray(parsed.games) ? parsed.games.filter(isGame).map(fillGame) : [],
     };
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return { entries: [], games: [] };
@@ -156,6 +168,17 @@ export async function readLibrary(directory: string): Promise<{ entries: unknown
 
 function libraryPath(directory: string): string {
   return path.join(directory, "library.json");
+}
+
+function fillGame(game: GameRecord): GameRecord {
+  return {
+    ...game,
+    needsReview: game.needsReview === true,
+    unmanaged: game.unmanaged === true,
+    ntfsSmoke: false,
+    compactDbPath: game.compactDbPath ?? null,
+    compressed: game.compressed === true,
+  };
 }
 
 function isGame(value: unknown): value is GameRecord {
