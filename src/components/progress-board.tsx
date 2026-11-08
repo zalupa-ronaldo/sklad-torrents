@@ -18,6 +18,7 @@ const EMPTY_COUNTS: JobCounts = { queued: 0, running: 0, paused: 0, done: 0, err
 
 export function ProgressBoard() {
   const [jobs, setJobs] = useState<PublicJob[]>([]);
+  const [games, setGames] = useState<{ id: string; name: string; state: string; online: boolean; ready: boolean; location: string }[]>([]);
   const [counts, setCounts] = useState<JobCounts>(EMPTY_COUNTS);
   const [total, setTotal] = useState(0);
   const [offset, setOffset] = useState(0);
@@ -42,8 +43,9 @@ export function ProgressBoard() {
   const load = useCallback(async () => {
     const params = new URLSearchParams({ offset: String(offset), limit: String(JOB_PAGE_SIZE) });
     if (query.trim()) params.set("q", query.trim());
-    const page = await api<PublicJobList>(`/api/jobs?${params}`);
+    const page = await api<PublicJobList & { games?: { id: string; name: string; state: string; online: boolean; ready: boolean; location: string }[] }>(`/api/jobs?${params}`);
     setJobs(page.jobs);
+    setGames(page.games ?? []);
     setTotal(page.total);
     setCounts(page.counts);
     setLoadError(null);
@@ -213,6 +215,16 @@ export function ProgressBoard() {
           </Link>
         </div>
       </header>
+      {games.length > 0 ? (
+        <ul className="flex gap-2 overflow-auto border-b px-4 py-2">
+          {games.map((game) => (
+            <li key={game.id} className="rounded-md border px-2 py-1 text-xs">
+              <span className="font-medium">{game.name}</span>
+              <span className="ml-2 text-muted-foreground">{game.online ? "на месте" : "offline"} · {game.ready ? "готова" : game.state}</span>
+            </li>
+          ))}
+        </ul>
+      ) : null}
       <div className="grid min-h-0 flex-1 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.2fr)]">
         <section className="flex min-h-0 flex-col gap-4 overflow-auto border-b px-4 py-4 lg:border-r lg:border-b-0">
           <div className="grid gap-3 md:grid-cols-2">

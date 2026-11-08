@@ -155,15 +155,17 @@ async function readCatalogFile(directory: string): Promise<DiskRecord[]> {
 async function writeLibrary(directory: string, entry: { diskId: string; title: null; confidence: "none"; provenance: string; fileCount: number; indexedBytes: number }): Promise<void> {
   const file = path.join(directory, "library.json");
   let entries: unknown[] = [];
+  let games: unknown[] = [];
   try {
-    const parsed = JSON.parse(await readFile(file, "utf8")) as { entries?: unknown[] };
+    const parsed = JSON.parse(await readFile(file, "utf8")) as { entries?: unknown[]; games?: unknown[] };
     entries = Array.isArray(parsed.entries) ? parsed.entries : [];
+    games = Array.isArray(parsed.games) ? parsed.games : [];
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
   const rest = entries.filter((item) => !item || typeof item !== "object" || (item as { diskId?: string }).diskId !== entry.diskId);
   await mkdir(directory, { recursive: true });
-  await writeFile(file, JSON.stringify({ entries: [...rest, entry] }, null, 2), "utf8");
+  await writeFile(file, JSON.stringify({ entries: [...rest, entry], games }, null, 2), "utf8");
 }
 
 function snapshotDisk(id: string, fixture: SnapshotFixture, files: IndexedFile[], digest: string, now: string): DiskRecord {

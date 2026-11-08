@@ -34,7 +34,10 @@ export interface HandBrakeCapability {
   audioCopy: boolean;
   markers: boolean;
   subtitles: boolean;
+  /** Functional hardware encode. Help text never sets this. */
   hardwareAv1: boolean;
+  /** vce_av1 names present in help. Not a functional pass, and vt_av1 is not one of them. */
+  advertisedHardwareAv1: string[];
 }
 
 const HDR_TRANSFER = new Set(["smpte2084", "arib-std-b67"]);
@@ -77,9 +80,12 @@ export function versionFromText(text: string): string | null {
   return match ? match[1]! : null;
 }
 
+/** Names seen in HandBrake 1.11.1 help. Presence is not a functional hardware encode. */
+export const ADVERTISED_VCE_AV1 = ["vce_av1", "vce_av1_10bit"] as const;
+
 export function capabilityFromHelp(help: string, versionText: string): HandBrakeCapability {
   const encoders = encodersFromHelp(help);
-  const hardwareAv1 = encoders.some((name) => /^(nvenc_av1|qsv_av1|vt_av1|vce_av1|amf_av1)$/.test(name));
+  const advertisedHardwareAv1 = encoders.filter((name) => (ADVERTISED_VCE_AV1 as readonly string[]).includes(name));
   return {
     present: encoders.length > 0,
     version: versionFromText(versionText) ?? versionFromText(help),
@@ -87,7 +93,8 @@ export function capabilityFromHelp(help: string, versionText: string): HandBrake
     audioCopy: /^\s+copy\s*$/m.test(help),
     markers: help.includes("--markers"),
     subtitles: help.includes("--subtitle"),
-    hardwareAv1,
+    hardwareAv1: false,
+    advertisedHardwareAv1,
   };
 }
 

@@ -94,7 +94,7 @@ function encoderFor(host: EncodeHost, job: EncodeRequest): "hardware" | "softwar
   return job.allowSoftware ? "software" : null
 }
 
-const HARDWARE_AV1 = /^(nvenc_av1|qsv_av1|vt_av1|vce_av1|amf_av1)$/
+const HARDWARE_AV1 = /^(vce_av1|vce_av1_10bit)$/
 
 function linuxEncoder(host: EncodeHost, job: EncodeRequest): "hardware" | "software" | null {
   const names = host.probe.encoders

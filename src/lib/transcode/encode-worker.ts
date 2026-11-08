@@ -33,6 +33,7 @@ export interface EncodeProbe {
   version: string | null;
   encoders: string[];
   hardwareAv1: boolean;
+  advertisedHardwareAv1: string[];
   videoToolbox: null;
   platform: NodeJS.Platform;
   pcVerified: false;
@@ -60,7 +61,7 @@ export async function probeEncoder(): Promise<EncodeProbe> {
     videoToolbox: null,
   };
   if (!binary) {
-    return { ok: false, present: false, version: null, encoders: [], hardwareAv1: false, ...base };
+    return { ok: false, present: false, version: null, encoders: [], hardwareAv1: false, advertisedHardwareAv1: [], ...base };
   }
   const [help, versionText] = await Promise.all([
     collect(binary, ["--help"], 15_000),
@@ -72,7 +73,8 @@ export async function probeEncoder(): Promise<EncodeProbe> {
     present: capability.present,
     version: capability.version,
     encoders: capability.encoders,
-    hardwareAv1: capability.hardwareAv1,
+    hardwareAv1: false,
+    advertisedHardwareAv1: capability.advertisedHardwareAv1,
     ...base,
   };
 }
@@ -325,6 +327,10 @@ async function retireOwnedSource(input: {
   });
   if (!input.sizeBenefit) return { retire: false, applied: false, reason: "Размер результата не меньше источника. Исходник не снимается." };
   if (!decision.retire) return { retire: false, applied: false, reason: decision.reason };
+  const { coldGameBlocksDelete, listGames } = await import("@/lib/games/library");
+  if (coldGameBlocksDelete(await listGames(input.directory), input.source)) {
+    return { retire: false, applied: false, reason: "Холодная копия игры не снимается правилом видео." };
+  }
   const ownedRoot = path.join(input.directory, "encode-owned");
   if (!pathInside(ownedRoot, input.source)) {
     return { retire: true, applied: false, reason: "Исходник вне каталога своих временных файлов. Удаление в production не включено." };

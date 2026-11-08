@@ -437,6 +437,22 @@ export class JobStore {
     });
   }
 
+  async requeueCopy(id: string): Promise<Job | null> {
+    return this.exclusive(async () => {
+      const job = this.jobs.find((item) => item.id === id);
+      if (!job || job.kind !== "copy") return { result: null, dirty: false, events: [] };
+      if (job.state !== "done" && job.state !== "error") return { result: cloneJob(job), dirty: false, events: [] };
+      job.state = "queued";
+      job.verified = false;
+      job.cancelled = false;
+      job.workerToken = null;
+      job.lastError = null;
+      job.progress = emptyProgress();
+      job.updatedAt = new Date().toISOString();
+      return { result: cloneJob(job), dirty: true, events: [this.upsertEvent(job)] };
+    });
+  }
+
   async requeueStale(host: JobHost, stale: (job: Job) => boolean): Promise<number> {
     return this.exclusive(async () => {
       let changed = 0;

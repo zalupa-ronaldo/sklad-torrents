@@ -7,6 +7,7 @@ import {
   pathInside,
   requirementBlock,
   scratchFits,
+  capabilityFromHelp,
   verifyMedia,
   type HandBrakeCapability,
 } from "@/lib/transcode/encode-plan";
@@ -19,6 +20,7 @@ const capability: HandBrakeCapability = {
   markers: true,
   subtitles: true,
   hardwareAv1: false,
+  advertisedHardwareAv1: [],
 };
 
 describe("encode plan", () => {
@@ -88,6 +90,19 @@ describe("encode plan", () => {
     expect(pathInside("/tmp/job", "/tmp/job-extra/a.mp4")).toBe(false);
     expect(scratchFits(null, 100).ok).toBe(false);
     expect(scratchFits(10, 100).ok).toBe(false);
+  });
+
+  it("reads 1.11.1 help names and does not treat vce_av1 or a missing vt_av1 as a functional pass", () => {
+    const mac = capabilityFromHelp(`Select video encoder:\n svt_av1\n svt_av1_10bit\n vt_h264\n vt_h265\n vt_h265_10bit\n vt_prores\n --encoder-preset`, "HandBrake 1.11.1");
+    const win = capabilityFromHelp(`Select video encoder:\n svt_av1\n svt_av1_10bit\n vce_av1\n vce_av1_10bit\n vce_h264\n vce_h265\n vce_h265_10bit\n --encoder-preset`, "HandBrake 1.11.1");
+    expect(mac.version).toBe("1.11.1");
+    expect(mac.encoders).toEqual(["svt_av1", "svt_av1_10bit", "vt_h264", "vt_h265", "vt_h265_10bit", "vt_prores"]);
+    expect(mac.hardwareAv1).toBe(false);
+    expect(mac.advertisedHardwareAv1).toEqual([]);
+    expect(mac.encoders).not.toContain("vt_av1");
+    expect(win.advertisedHardwareAv1).toEqual(["vce_av1", "vce_av1_10bit"]);
+    expect(win.hardwareAv1).toBe(false);
+    expect(win.encoders).not.toContain("amf_av1");
   });
 
   it("reads HDR from the probe instead of assuming it is absent", () => {

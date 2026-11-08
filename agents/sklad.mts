@@ -55,12 +55,12 @@ async function main(): Promise<void> {
       ok: true,
       command: "help",
       wiztree: "offline-file",
-      commands: ["help", "ingest", "mft-import", "mft-status", "mft-cancel", "catalog", "status", "work", "policy", "encode", "service"],
+      commands: ["help", "ingest", "mft-import", "mft-status", "mft-cancel", "catalog", "status", "work", "policy", "encode", "game", "service"],
       service: ["start", "status", "stop", "run"],
       jsonStdout: "npm --silent run sklad -- <command> --json",
     };
     if (!json) {
-      process.stdout.write("sklad ingest|mft-import|mft-status|mft-cancel|catalog|status|work|policy|encode|service\n");
+      process.stdout.write("sklad ingest|mft-import|mft-status|mft-cancel|catalog|status|work|policy|encode|game|service\n");
     }
     emit(0, body);
   }
@@ -190,6 +190,69 @@ async function main(): Promise<void> {
     }
     emit(0, { ...queued, ok: true, command, action: "enqueue" });
   }
+  if (command === "game") {
+    const games = await import("../src/lib/games/prepare.ts");
+    const { listGames, publicGame } = await import("../src/lib/games/library.ts");
+    if (sub === "list" || sub === "") {
+      const rows = (await listGames()).map(publicGame);
+      emit(0, { ok: true, command, action: "list", games: rows });
+    }
+    if (sub === "status") {
+      const id = flag("--id");
+      const row = (await listGames()).find((item) => item.id === id);
+      if (!row) emit(2, { ok: false, command, error: "Нужен --id существующей игры." });
+      emit(0, { ok: true, command, action: "status", game: publicGame(row) });
+    }
+    if (sub === "register") {
+      const steam = flag("--steam");
+      const result = await games.registerGame({
+        root: flag("--root") || "",
+        pool: flag("--pool") || "",
+        ...(flag("--name") ? { name: flag("--name")! } : {}),
+        ...(flag("--exe") ? { exe: flag("--exe")! } : {}),
+        ...(steam ? { steamAppId: Number(steam) } : {}),
+        ...(args.includes("--offline") ? { offline: true } : {}),
+      });
+      emit(result.ok ? 0 : 3, { command, action: "register", ...result, ok: result.ok === true });
+    }
+    if (sub === "prepare") {
+      const id = flag("--id");
+      if (!id) emit(2, { ok: false, command, error: "Нужен --id." });
+      const result = await games.prepareGame(id, flag("--compact-db"));
+      emit(result.ok ? 0 : 3, { command, action: "prepare", ...result, ok: result.ok === true });
+    }
+    if (sub === "work") {
+      const result = await games.runGameOnce(undefined, flag("--compact-db"));
+      emit(0, { ...result, ok: true, command, action: "work" });
+    }
+    if (sub === "launch") {
+      const id = flag("--id");
+      if (!id) emit(2, { ok: false, command, error: "Нужен --id." });
+      const result = await games.launchGame(id);
+      emit(result.ok ? 0 : 3, { command, action: "launch", ...result, ok: result.ok === true });
+    }
+    if (sub === "remove") {
+      const id = flag("--id");
+      if (!id) emit(2, { ok: false, command, error: "Нужен --id." });
+      const result = await games.removeGame(id);
+      emit(result.ok ? 0 : 3, { command, action: "remove", ...result, ok: result.ok === true });
+    }
+    if (sub === "cancel") {
+      const id = flag("--id");
+      const gamesNow = await listGames();
+      const row = gamesNow.find((item) => item.id === id);
+      if (!row?.jobId) emit(2, { ok: false, command, error: "Нет задания подготовки." });
+      await createJobStore(dataDir()).cancel(row.jobId);
+      row.ready = false;
+      row.copyVerified = false;
+      row.state = "blocked";
+      row.reason = "Подготовка отменена. Готовой копии нет.";
+      const { saveGames } = await import("../src/lib/games/library.ts");
+      await saveGames(gamesNow);
+      emit(0, { ok: true, command, action: "cancel", ready: false, game: publicGame(row) });
+    }
+    emit(2, { ok: false, command, error: "game: list, register, prepare, work, status, launch, remove, cancel." });
+  }
   if (command === "service") {
     if (sub === "run") return serviceRun();
     if (sub === "start") return serviceStart();
@@ -251,7 +314,9 @@ async function serviceRun(): Promise<void> {
     const result = await verifySnapshotJob(createJobStore(dataDir()));
     const encode = await import("../src/lib/transcode/encode-worker.ts");
     const encoded = await encode.runEncodeOnce(dataDir()).catch(() => ({ processed: false }));
-    if (!result.processed && !encoded.processed) await new Promise((resolve) => setTimeout(resolve, Number(process.env.SKLAD_SERVICE_TICK_MS || 200)));
+    const games = await import("../src/lib/games/prepare.ts");
+    const played = await games.runGameOnce(dataDir()).catch(() => ({ processed: false }));
+    if (!result.processed && !encoded.processed && !played.processed) await new Promise((resolve) => setTimeout(resolve, Number(process.env.SKLAD_SERVICE_TICK_MS || 200)));
   }
   await rm(pidFile(), { force: true });
   process.exit(0);
