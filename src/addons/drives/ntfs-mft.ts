@@ -8,6 +8,15 @@ export interface NtfsGeometry {
   recordSize: number;
 }
 
+export interface FileLink {
+  parent: number;
+  parentSequence: number;
+  name: string;
+  namespace: number;
+  size: number;
+  mtimeMs: number;
+}
+
 export interface ParsedName {
   parent: number;
   name: string;
@@ -20,6 +29,10 @@ export interface ParsedName {
   /** Base MFT record. Equals `index` when this record is the base. */
   base: number;
   hasName: boolean;
+  /** Record sequence number at offset 0x10. */
+  sequence: number;
+  /** Every $FILE_NAME in the record. The ranked name stays in `name` for older callers. */
+  links: FileLink[];
   /** Unnamed $DATA real size, or null when the record has no unnamed data attribute. */
   dataSize: number | null;
   dataAllocated: number | null;
@@ -155,7 +168,9 @@ export function parseRecord(record: Buffer, index: number, bytesPerSector: numbe
   const baseWord = record.readBigUInt64LE(0x20);
   const baseRef = Number(baseWord & 0xffffffffffffn);
   let offset = record.readUInt16LE(0x14);
-  let best: { parent: number; name: string; namespace: number; size: number; mtimeMs: number; rank: number } | null = null;
+  const sequence = record.readUInt16LE(0x10);
+  const links: FileLink[] = [];
+  let best: { parent: number; parentSequence: number; name: string; namespace: number; size: number; mtimeMs: number; rank: number } | null = null;
   let dataSize: number | null = null;
   let dataAllocated: number | null = null;
   let wofBytes: number | null = null;
@@ -176,16 +191,17 @@ export function parseRecord(record: Buffer, index: number, bytesPerSector: numbe
         const namespace = value.readUInt8(0x41);
         if (0x42 + chars * 2 <= value.length) {
           const rank = namespace === 1 || namespace === 3 ? 2 : namespace === 0 ? 1 : 0;
-          if (!best || rank >= best.rank) {
-            best = {
-              parent: fileRef(value, 0),
-              name: value.toString("utf16le", 0x42, 0x42 + chars * 2),
-              namespace,
-              size: u64(value, 0x30),
-              mtimeMs: filetimeToMs(value, 0x10),
-              rank,
-            };
-          }
+          const parentWord = value.readBigUInt64LE(0);
+          const link: FileLink = {
+            parent: Number(parentWord & 0xffffffffffffn),
+            parentSequence: Number((parentWord >> 48n) & 0xffffn),
+            name: value.toString("utf16le", 0x42, 0x42 + chars * 2),
+            namespace,
+            size: u64(value, 0x30),
+            mtimeMs: filetimeToMs(value, 0x10),
+          };
+          links.push(link);
+          if (!best || rank >= best.rank) best = { ...link, rank };
         }
       }
     } else if (type === DATA) {
@@ -217,6 +233,8 @@ export function parseRecord(record: Buffer, index: number, bytesPerSector: numbe
     index,
     base: baseWord === 0n ? index : baseRef,
     hasName: best != null,
+    sequence,
+    links,
     dataSize,
     dataAllocated,
     wofBytes,
@@ -272,6 +290,7 @@ function preferData(target: ParsedName, extra: ParsedName): void {
   if (extra.wofBytes != null && (target.wofBytes == null || extra.wofBytes > target.wofBytes)) target.wofBytes = extra.wofBytes;
   target.wofTag = target.wofTag || extra.wofTag;
   target.ntfsCompressed = target.ntfsCompressed || extra.ntfsCompressed;
+  if (target.links.length === 0 && extra.links.length > 0) target.links = extra.links;
   if (!target.hasName && extra.hasName) {
     target.hasName = true;
     target.name = extra.name;
@@ -327,6 +346,149 @@ export function filesFromParsed(entries: readonly ParsedName[]): RawIndexedFile[
     files.push(file);
   }
   return files;
+}
+
+export interface MftCatalog {
+  files: RawIndexedFile[];
+  userFiles: number;
+  userDirs: number;
+  nonempty: number;
+  explicitZero: number;
+  unknownSize: number;
+  logicalBytes: number;
+  allocatedBytes: number;
+  unknownAllocated: number;
+  hardlinks: number;
+  unresolved: number;
+  cycles: number;
+  sequenceMismatch: number;
+  unsafe: number;
+  meta: number;
+  wof: number;
+}
+
+function nameClass(name: string): "ok" | "meta" | "unsafe" {
+  if (!name || name === "." || name === ".." || name.includes("/") || name.includes("\\") || name.includes(":")) return "unsafe";
+  if (name.startsWith("$")) return "meta";
+  return "ok";
+}
+
+function resolveLink(entry: ParsedName, link: FileLink, byIndex: ReadonlyMap<number, ParsedName>): { path: string | null; cycle: boolean; sequence: boolean; unsafe: boolean; meta: boolean } {
+  const own = nameClass(link.name);
+  if (own !== "ok") return { path: null, cycle: false, sequence: false, unsafe: own === "unsafe", meta: own === "meta" };
+  const parent = byIndex.get(link.parent);
+  if (link.parent !== 5 && link.parentSequence !== 0 && parent && parent.sequence !== link.parentSequence) {
+    return { path: null, cycle: false, sequence: true, unsafe: false, meta: false };
+  }
+  const parts = [link.name];
+  let current = link.parent === 5 ? undefined : parent;
+  const seen = new Set<number>([entry.index]);
+  while (current) {
+    if (current.index === 5) break;
+    if (seen.has(current.index)) return { path: null, cycle: true, sequence: false, unsafe: false, meta: false };
+    seen.add(current.index);
+    const step = current.links[0] ?? { parent: current.parent, parentSequence: 0, name: current.name, namespace: current.namespace, size: current.size, mtimeMs: current.mtimeMs };
+    const stepClass = nameClass(step.name);
+    if (stepClass !== "ok") return { path: null, cycle: false, sequence: false, unsafe: stepClass === "unsafe", meta: stepClass === "meta" };
+    parts.push(step.name);
+    if (step.parent === 5) break;
+    const next = byIndex.get(step.parent);
+    if (step.parentSequence !== 0 && next && next.sequence !== step.parentSequence) {
+      return { path: null, cycle: false, sequence: true, unsafe: false, meta: false };
+    }
+    if (!next) return { path: null, cycle: false, sequence: false, unsafe: false, meta: false };
+    current = next;
+  }
+  parts.reverse();
+  return { path: parts.join("/"), cycle: false, sequence: false, unsafe: false, meta: false };
+}
+
+/** One catalog row per hardlink path. Logical bytes are counted once per MFT record. */
+export function catalogFromParsed(entries: readonly ParsedName[]): MftCatalog {
+  const bases = new Map<number, ParsedName>();
+  const extras: ParsedName[] = [];
+  for (const entry of entries) {
+    if (entry.base !== entry.index) extras.push(entry);
+    else bases.set(entry.index, entry);
+  }
+  for (const extra of extras) {
+    const base = bases.get(extra.base);
+    if (base) preferData(base, extra);
+  }
+  const stats: MftCatalog = {
+    files: [],
+    userFiles: 0,
+    userDirs: 0,
+    nonempty: 0,
+    explicitZero: 0,
+    unknownSize: 0,
+    logicalBytes: 0,
+    allocatedBytes: 0,
+    unknownAllocated: 0,
+    hardlinks: 0,
+    unresolved: 0,
+    cycles: 0,
+    sequenceMismatch: 0,
+    unsafe: 0,
+    meta: 0,
+    wof: 0,
+  };
+  for (const entry of bases.values()) {
+    const links = entry.links.length > 0 ? entry.links : entry.hasName ? [{
+      parent: entry.parent,
+      parentSequence: 0,
+      name: entry.name,
+      namespace: entry.namespace,
+      size: entry.size,
+      mtimeMs: entry.mtimeMs,
+    }] : [];
+    let counted = false;
+    links.forEach((link, linkIndex) => {
+      const resolved = resolveLink(entry, link, bases);
+      if (resolved.cycle) stats.cycles += 1;
+      if (resolved.sequence) stats.sequenceMismatch += 1;
+      if (resolved.unsafe) stats.unsafe += 1;
+      if (resolved.meta) stats.meta += 1;
+      if (!resolved.path) {
+        if (!resolved.cycle && !resolved.sequence && !resolved.unsafe && !resolved.meta) stats.unresolved += 1;
+        return;
+      }
+      const primary = linkIndex === 0;
+      const size: number | null = entry.directory ? 0 : entry.dataSize != null ? entry.dataSize : link.size > 0 ? link.size : null;
+      const file: RawIndexedFile = {
+        relativePath: resolved.path,
+        name: link.name,
+        kind: entry.directory ? "dir" : "file",
+        size: primary ? size : size,
+        mtimeMs: link.mtimeMs,
+      };
+      if (!entry.directory && primary && entry.dataAllocated != null) file.allocated = entry.dataAllocated;
+      if (!entry.directory && primary && entry.wofBytes != null) {
+        file.onDisk = entry.wofBytes;
+        file.compression = "wof";
+        stats.wof += 1;
+      }
+      stats.files.push(file);
+      if (!primary) stats.hardlinks += 1;
+      if (!counted && !entry.directory) {
+        counted = true;
+        stats.userFiles += 1;
+        if (size == null) stats.unknownSize += 1;
+        else if (size === 0) stats.explicitZero += 1;
+        else {
+          stats.nonempty += 1;
+          stats.logicalBytes += size;
+        }
+        if (entry.dataAllocated == null) stats.unknownAllocated += 1;
+        else stats.allocatedBytes += entry.dataAllocated;
+      }
+      if (!counted && entry.directory) {
+        counted = true;
+        stats.userDirs += 1;
+      }
+    });
+  }
+  return stats;
 }
 
 export function filesFromRecords(records: Buffer[], recordSize: number, bytesPerSector: number): RawIndexedFile[] {

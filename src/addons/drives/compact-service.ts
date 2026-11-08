@@ -39,6 +39,7 @@ export async function startVolumeCompact(input: {
   const stored = await readCatalog();
   const disk = stored?.disks.find((item) => item.id === input.diskId);
   if (!disk) throw new DriveError(404, "Диск в каталоге не найден. Сжатие не запускалось.");
+  if (disk.snapshotOnly) throw new DriveError(403, "Это офлайн-снимок. Сжатие не запускается.");
   const host = disk.connectedHosts.find((item) => item.os === "win32");
   const agent = config.agents.find((item) => item.os === "win32" && (item.id === host?.id || item.id === disk.lastHostId));
   const mount = (host?.mountPaths[0] || disk.lastMountPath || "").trim();

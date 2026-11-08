@@ -54,12 +54,13 @@ async function main(): Promise<void> {
     const body: Reply = {
       ok: true,
       command: "help",
-      wiztree: false,
-      commands: ["help", "ingest", "catalog", "status", "work", "policy", "encode", "service"],
+      wiztree: "offline-file",
+      commands: ["help", "ingest", "mft-import", "mft-status", "mft-cancel", "catalog", "status", "work", "policy", "encode", "service"],
       service: ["start", "status", "stop", "run"],
+      jsonStdout: "npm --silent run sklad -- <command> --json",
     };
     if (!json) {
-      process.stdout.write("sklad ingest|catalog|status|work|policy|encode|service start|status|stop\n");
+      process.stdout.write("sklad ingest|mft-import|mft-status|mft-cancel|catalog|status|work|policy|encode|service\n");
     }
     emit(0, body);
   }
@@ -79,13 +80,36 @@ async function main(): Promise<void> {
     const result = await ingestSnapshot(fixture);
     emit(0, { ok: true, command, wiztree: false, ...result });
   }
+  if (command === "mft-import" || command === "mft-status" || command === "mft-cancel") {
+    const mft = await import("../src/lib/service/mft-import.ts");
+    if (command === "mft-cancel") {
+      await mft.requestMftCancel();
+      emit(0, { ok: true, command, cancelled: true, ready: false });
+    }
+    if (command === "mft-status") {
+      const progress = await mft.readMftProgress();
+      emit(0, { ok: true, command, progress, ready: progress?.ready === true });
+    }
+    const file = flag("--file");
+    const serial = flag("--serial");
+    const volumeUuid = flag("--uuid");
+    if (!file || !serial || !volumeUuid) emit(2, { ok: false, command, error: "Нужны --file, --serial и --uuid. Буква и размер тома диском не являются." });
+    try {
+      await mft.clearMftCancel();
+      const result = await mft.importMftExport({ filePath: file, serial, volumeUuid });
+      emit(0, { ok: true, command, wiztree: "offline-file", live: false, ...result });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Импорт MFT не выполнился.";
+      emit(message.includes("E и F") ? 3 : 1, { ok: false, command, ready: false, error: message });
+    }
+  }
   if (command === "catalog") {
     const disks = await readDisks();
     emit(0, {
       ok: true,
       command,
       scanned: false,
-      wiztree: false,
+      wiztree: "offline-file",
       disks: disks.map((disk) => ({
         id: disk.id,
         label: disk.label,

@@ -11,12 +11,13 @@ function agentFor(disk: DiskRecord, agents: { id: string; os: "darwin" | "win32"
 
 /** Ask the drive-agent that owns the disk to index it. Does not walk the disk in this process. */
 export async function requestDiskRescan(diskId: string, fetchImpl: typeof fetch = fetch): Promise<{ accepted: true; message: string }> {
+  const stored = await readCatalog();
+  const disk = stored?.disks.find((item) => item.id === diskId);
+  if (disk?.snapshotOnly) throw new DriveError(403, "Это офлайн-снимок. Сканирование не запускается.");
   const config = await readAgentConfig();
   if (config.mode === "mock") {
     throw new DriveError(400, "Это демонстрационный каталог. Сканирование носителя не запускалось.");
   }
-  const stored = await readCatalog();
-  const disk = stored?.disks.find((item) => item.id === diskId);
   if (!disk) throw new DriveError(404, "Диск в каталоге не найден. Сканирование не запускалось.");
   if (disk.connectedHosts.length === 0) throw new DriveError(409, "Диск не подключён. Сканирование не запускалось.");
   const agent = agentFor(disk, config.agents);

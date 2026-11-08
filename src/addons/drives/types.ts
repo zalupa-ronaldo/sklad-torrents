@@ -106,6 +106,8 @@ export interface DiskRecord {
   summary?: DiskSummary;
   /** Agent record count before the local file list is ready. Not a substitute for summary.indexedBytes. */
   reportedRecords?: number;
+  /** Offline MFT snapshot. Rescan, compress, and transfer stay off until a person asks. */
+  snapshotOnly?: boolean;
   pendingRevision?: string;
   /** NDJSON file holding files when the catalog is too large to stringify in one string. */
   fileStore?: string;
