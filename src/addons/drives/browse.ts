@@ -1,3 +1,6 @@
+import { rollupOnDisk, type CompressionKind, type FolderCompression } from "@/addons/drives/ondisk";
+import { recordStage } from "@/addons/drives/stage";
+import type { IndexedFile } from "@/addons/drives/types";
 import { joinDisplay, normalizeRelative, parentRelative } from "@/addons/drives/paths";
 import { displayDiskName, isBrowsableRecord } from "@/addons/drives/inventory";
 import { mountPathsOf, online } from "@/addons/drives/reconcile";
@@ -12,15 +15,20 @@ export interface BrowseEntry {
   relativePath: string;
   displayPath: string;
   kind: "file" | "dir";
-  /** Recursive for dirs, file size for files. */
-  size: number;
-  /** Unknown allocated → null (UI shows —). */
+  /** Recursive for dirs, file size for files. Null means unknown, not zero. */
+  size: number | null;
+  /** Unknown allocated → null (UI shows —). Unnamed $DATA allocation, not WOF usage. */
   allocated: number | null;
+  /** Measured bytes on disk. Null means unknown, not zero and not a saving. */
+  onDisk: number | null;
+  compression: FolderCompression | null;
   mtimeMs: number;
   extension: string;
   categories: MediaCategory[];
   fileCount: number;
   dirCount: number;
+  /** False while indexedBytes is not a finished total. */
+  sizesReady?: boolean;
 }
 
 export interface BrowseResponse {
@@ -31,6 +39,8 @@ export interface BrowseResponse {
   parentPath: string | null;
   displayPath: string;
   entries: BrowseEntry[];
+  /** Byte total of the listed folder (or of every disk root). Percents use this, not file counts. */
+  scopeBytes: number;
   nextCursor: number | null;
   total: number;
   roots: boolean;
@@ -40,13 +50,17 @@ export interface BrowseResponse {
 interface FolderNode {
   name: string;
   relativePath: string;
-  size: number;
+  size: number | null;
+  /** Null until at least one descendant reports an allocated length. */
+  allocated: number | null;
+  onDisk: number | null;
+  compression: FolderCompression | null;
   fileCount: number;
   dirCount: number;
   mtimeMs: number;
   categories: Set<MediaCategory>;
   dirs: Map<string, FolderNode>;
-  files: { name: string; relativePath: string; size: number; mtimeMs: number; categories: MediaCategory[]; extension: string }[];
+  files: { name: string; relativePath: string; size: number | null; allocated: number | null; onDisk: number | null; compression: CompressionKind | null; mtimeMs: number; categories: MediaCategory[]; extension: string }[];
 }
 
 interface DiskTree {
@@ -58,6 +72,13 @@ const treeCache = new Map<string, DiskTree>();
 
 function slash(relative: string): string {
   return normalizeRelative(relative);
+}
+
+function compareSizeDesc(a: number | null, b: number | null): number {
+  if (a == null && b == null) return 0;
+  if (a == null) return 1;
+  if (b == null) return -1;
+  return b - a;
 }
 
 function extensionOf(name: string, kind: "file" | "dir"): string {
@@ -73,6 +94,9 @@ function emptyNode(name: string, relativePath: string): FolderNode {
     name,
     relativePath,
     size: 0,
+    allocated: null,
+    onDisk: null,
+    compression: null,
     fileCount: 0,
     dirCount: 0,
     mtimeMs: 0,
@@ -93,7 +117,38 @@ function ensureChild(parent: FolderNode, name: string): FolderNode {
 }
 
 function revisionOf(disk: DiskRecord): string {
-  return `${disk.id}:${disk.indexRevision || ""}:${disk.files.length}:${disk.scan.status}:${disk.lastSeenAt}`;
+  // lastSeenAt changes on every shelf poll and must not rebuild a million-row tree.
+  return `${disk.id}:${disk.indexRevision || ""}:${disk.files.length}:${disk.summary?.indexedBytes ?? ""}:${disk.scan.status}`;
+}
+
+function insertFile(root: FolderNode, file: IndexedFile): void {
+  if (file.name === "sklad-catalog.json") return;
+  const relative = slash(file.relativePath);
+  if (!relative) return;
+  const parts = relative.split("/");
+  let node = root;
+  for (let i = 0; i < parts.length - (file.kind === "file" ? 1 : 0); i += 1) {
+    node = ensureChild(node, parts[i]!);
+  }
+  if (file.kind === "file") {
+    const name = file.name || parts[parts.length - 1]!;
+    node.files.push({
+      name,
+      relativePath: relative,
+      size: file.size == null ? null : file.size,
+      allocated: typeof file.allocated === "number" ? file.allocated : null,
+      onDisk: typeof file.onDisk === "number" ? file.onDisk : null,
+      compression: file.compression === "wof" || file.compression === "ntfs" ? file.compression : null,
+      mtimeMs: file.mtimeMs || 0,
+      categories: file.categories,
+      extension: extensionOf(name, "file"),
+    });
+    return;
+  }
+  let folder = root;
+  for (const part of parts) folder = ensureChild(folder, part);
+  for (const category of file.categories) folder.categories.add(category);
+  if (file.mtimeMs > folder.mtimeMs) folder.mtimeMs = file.mtimeMs;
 }
 
 /** O(n) once per disk revision — recursive size/file totals for every folder. */
@@ -103,62 +158,82 @@ export function buildDiskTree(disk: DiskRecord): DiskTree {
   if (cached && cached.revision === revision) return cached;
 
   const root = emptyNode("", "");
-  for (const file of disk.files) {
-    if (file.name === "sklad-catalog.json") continue;
-    const relative = slash(file.relativePath);
-    if (!relative) continue;
-    const parts = relative.split("/");
-    let node = root;
-    for (let i = 0; i < parts.length - (file.kind === "file" ? 1 : 0); i += 1) {
-      node = ensureChild(node, parts[i]!);
-    }
-    if (file.kind === "file") {
-      const name = file.name || parts[parts.length - 1]!;
-      node.files.push({
-        name,
-        relativePath: relative,
-        size: file.size > 0 ? file.size : 0,
-        mtimeMs: file.mtimeMs || 0,
-        categories: file.categories,
-        extension: extensionOf(name, "file"),
-      });
-    } else {
-      // Explicit directory row — ensure the leaf folder exists.
-      let folder = root;
-      for (const part of parts) folder = ensureChild(folder, part);
-      for (const category of file.categories) folder.categories.add(category);
-      if (file.mtimeMs > folder.mtimeMs) folder.mtimeMs = file.mtimeMs;
-    }
-  }
+  for (const file of disk.files) insertFile(root, file);
+  return finishTree(disk.id, root, revision);
+}
 
-  function rollup(node: FolderNode): void {
+function rollupTree(node: FolderNode): void {
     let size = 0;
+    let sizeKnown = true;
+    let allocated = 0;
+    let allocatedKnown = false;
     let fileCount = 0;
     let dirCount = node.dirs.size;
     let mtimeMs = node.mtimeMs;
+    const addSize = (value: number | null) => {
+      if (value == null) sizeKnown = false;
+      else size += value;
+    };
+    const addAllocated = (value: number | null) => {
+      if (value == null) return;
+      allocated += value;
+      allocatedKnown = true;
+    };
     for (const file of node.files) {
-      size += file.size;
+      addSize(file.size);
+      addAllocated(file.allocated);
       fileCount += 1;
       if (file.mtimeMs > mtimeMs) mtimeMs = file.mtimeMs;
       for (const category of file.categories) node.categories.add(category);
     }
     for (const child of node.dirs.values()) {
-      rollup(child);
-      size += child.size;
+      rollupTree(child);
+      addSize(child.size);
+      addAllocated(child.allocated);
       fileCount += child.fileCount;
       dirCount += child.dirCount;
       if (child.mtimeMs > mtimeMs) mtimeMs = child.mtimeMs;
       for (const category of child.categories) node.categories.add(category);
     }
-    node.size = size;
+    const disk = rollupOnDisk([
+      ...node.files.map((file) => ({ size: file.size ?? 0, onDisk: file.onDisk, compression: file.compression })),
+      ...[...node.dirs.values()].map((child) => ({ size: child.size ?? 0, onDisk: child.onDisk, compression: child.compression })),
+    ]);
+    node.size = sizeKnown ? size : null;
+    node.allocated = allocatedKnown ? allocated : null;
+    node.onDisk = disk.onDisk;
+    node.compression = disk.compression;
     node.fileCount = fileCount;
     node.dirCount = dirCount;
     node.mtimeMs = mtimeMs;
-  }
-  rollup(root);
+}
 
+function finishTree(diskId: string, root: FolderNode, revision: string): DiskTree {
+  rollupTree(root);
   const tree = { revision, root };
-  treeCache.set(disk.id, tree);
+  treeCache.set(diskId, tree);
+  return tree;
+}
+
+/** Same tree, but a large index returns to the event loop so a shelf request is not frozen. */
+export async function buildDiskTreeCooperative(disk: DiskRecord): Promise<DiskTree> {
+  const revision = revisionOf(disk);
+  const cached = treeCache.get(disk.id);
+  if (cached && cached.revision === revision) return cached;
+  if (disk.files.length < 12_000) return buildDiskTree(disk);
+  const started = performance.now();
+  const root = emptyNode("", "");
+  let gapStarted = performance.now();
+  for (let i = 0; i < disk.files.length; i += 1) {
+    insertFile(root, disk.files[i]!);
+    if (i > 0 && i % 8_000 === 0) {
+      recordStage("browse-tree-gap", performance.now() - gapStarted, 8_000);
+      await new Promise((resolve) => setImmediate(resolve));
+      gapStarted = performance.now();
+    }
+  }
+  const tree = finishTree(disk.id, root, revision);
+  recordStage("browse-tree", performance.now() - started, disk.files.length);
   return tree;
 }
 
@@ -204,7 +279,9 @@ function listChildren(disk: DiskRecord, relativePath: string): BrowseEntry[] {
       displayPath: joinDisplay(disk.pathStyle, mount, child.relativePath),
       kind: "dir" as const,
       size: child.size,
-      allocated: null,
+      allocated: child.allocated,
+      onDisk: child.onDisk,
+      compression: child.compression,
       mtimeMs: child.mtimeMs,
       extension: "",
       categories: [...child.categories].slice(0, 6),
@@ -218,9 +295,11 @@ function listChildren(disk: DiskRecord, relativePath: string): BrowseEntry[] {
     name: file.name,
     relativePath: file.relativePath,
     displayPath: joinDisplay(disk.pathStyle, mount, file.relativePath),
-    kind: "file" as const,
-    size: file.size,
-    allocated: null,
+      kind: "file" as const,
+      size: file.size,
+      allocated: file.allocated,
+      onDisk: file.onDisk,
+      compression: file.compression,
     mtimeMs: file.mtimeMs,
     extension: file.extension,
     categories: file.categories,
@@ -229,20 +308,26 @@ function listChildren(disk: DiskRecord, relativePath: string): BrowseEntry[] {
   }));
   // WizTree default: largest first, dirs and files together by size.
   const all = [...dirs, ...files];
-  all.sort((a, b) => b.size - a.size || b.fileCount - a.fileCount || a.name.localeCompare(b.name, "ru"));
+  all.sort((a, b) => compareSizeDesc(a.size, b.size) || b.fileCount - a.fileCount || a.name.localeCompare(b.name, "ru"));
   return all;
 }
 
 export function browseRoots(disks: readonly DiskRecord[], limit = 200, cursor = 0): BrowseResponse {
   const entries: BrowseEntry[] = [];
   for (const disk of disks) {
-    if (!isBrowsableRecord(disk)) continue;
+    if (!isBrowsableRecord(disk, disks)) continue;
     const mount = mountOf(disk);
-    const isZ = /^z:\\/i.test(disk.lastMountPath) || /^z:\\/i.test(mount);
-    if (isZ && disk.files.length === 0) continue;
-    // Skip empty indexes (Macintosh HD / NO NAME / blank USB) — keep letter drives with content.
-    if (disk.files.length === 0) continue;
-    const tree = buildDiskTree(disk);
+    const connected = online(disk);
+    // An empty offline placeholder stays out of the tree. A connected disk stays, even with no index.
+    if (disk.files.length === 0 && !connected && !disk.summary && !(disk.reportedRecords && disk.reportedRecords > 0)) continue;
+    const shardReady = (disk.summary?.fileCount ?? 0) > 0 && (disk.shardBytes ?? 0) > 0 && !disk.pendingRevision;
+    const waiting = disk.files.length === 0 && !shardReady && (
+      Boolean(disk.pendingRevision) ||
+      (disk.ingest != null && disk.ingest.phase !== "done") ||
+      (disk.reportedRecords ?? 0) > 0
+    );
+    const summarized = !waiting && Boolean(disk.summary) && disk.files.length === 0 && (disk.summary?.fileCount ?? 0) > 0;
+    const tree = summarized || waiting ? null : buildDiskTree(disk);
     const name = displayDiskName({
       label: disk.label,
       volumeName: disk.volumeName,
@@ -257,16 +342,20 @@ export function browseRoots(disks: readonly DiskRecord[], limit = 200, cursor = 
       relativePath: "",
       displayPath: mount || name,
       kind: "dir",
-      size: tree.root.size,
-      allocated: null,
-      mtimeMs: tree.root.mtimeMs,
+      size: waiting ? null : tree ? tree.root.size : disk.summary && (disk.summary.unknownSizes ?? 0) > 0 && disk.summary.indexedBytes === 0 ? null : (disk.summary?.indexedBytes ?? 0),
+      allocated: tree ? tree.root.allocated : null,
+      onDisk: tree ? tree.root.onDisk : null,
+      compression: tree ? tree.root.compression : null,
+      mtimeMs: tree ? tree.root.mtimeMs : 0,
       extension: "",
-      categories: [...tree.root.categories].slice(0, 6),
-      fileCount: tree.root.fileCount,
-      dirCount: tree.root.dirCount,
+      categories: tree ? [...tree.root.categories].slice(0, 6) : [],
+      fileCount: tree ? tree.root.fileCount : (disk.summary?.fileCount ?? disk.reportedRecords ?? 0),
+      dirCount: tree ? tree.root.dirCount : 0,
+      sizesReady: waiting ? false : Boolean(tree) || Boolean(disk.summary && (disk.summary.fileCount > 0 || disk.files.length > 0)),
     });
   }
-  entries.sort((a, b) => b.size - a.size || b.fileCount - a.fileCount || a.name.localeCompare(b.name, "ru"));
+  entries.sort((a, b) => compareSizeDesc(a.size, b.size) || b.fileCount - a.fileCount || a.name.localeCompare(b.name, "ru"));
+  const scopeBytes = entries.reduce((sum, entry) => sum + (entry.size ?? 0), 0);
   const slice = entries.slice(Math.max(0, cursor), Math.max(0, cursor) + Math.min(500, Math.max(1, limit)));
   return {
     diskId: null,
@@ -276,6 +365,7 @@ export function browseRoots(disks: readonly DiskRecord[], limit = 200, cursor = 
     parentPath: null,
     displayPath: "Диски",
     entries: slice,
+    scopeBytes,
     nextCursor: cursor + slice.length < entries.length ? cursor + slice.length : null,
     total: entries.length,
     roots: true,
@@ -293,12 +383,9 @@ export function browseDisk(
   const disk = disks.find((item) => item.id === diskId);
   if (!disk) throw new DriveError(404, "Диск в каталоге не найден.");
   const mount = mountOf(disk);
-  const isZ = /^z:\\/i.test(disk.lastMountPath) || /^z:\\/i.test(mount);
-  if (isZ && disk.files.length === 0) {
-    throw new DriveError(400, "Снимок Z: пуст. Диск не сканируем.");
-  }
   const parent = slash(relativePath);
   const tree = buildDiskTree(disk);
+  const folder = findNode(tree.root, parent);
   const all = listChildren(disk, parent);
   const slice = all.slice(Math.max(0, cursor), Math.max(0, cursor) + Math.min(500, Math.max(1, limit)));
   const name = displayDiskName({
@@ -315,6 +402,7 @@ export function browseDisk(
     parentPath: parent ? parentRelative(parent) : null,
     displayPath: joinDisplay(disk.pathStyle as PathStyle, mount, parent) || name,
     entries: slice,
+    scopeBytes: folder?.size ?? 0,
     nextCursor: cursor + slice.length < all.length ? cursor + slice.length : null,
     total: all.length,
     roots: false,

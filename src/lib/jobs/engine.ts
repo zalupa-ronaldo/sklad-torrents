@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import { JobError } from "@/lib/jobs/errors";
@@ -214,11 +214,11 @@ export class JobStore {
     return this.events.map((event) => structuredClone(event));
   }
 
-  async enqueue(input: EnqueueInput): Promise<EnqueueResult> {
+  async enqueue(input: EnqueueInput, options?: { anyState?: boolean }): Promise<EnqueueResult> {
     const draft = validateEnqueue(input);
     return this.exclusive<EnqueueResult>(async () => {
       const key = jobIdempotencyKey(draft.kind, draft.host, draft.source, draft.destination);
-      const existing = this.jobs.find((job) => job.idempotencyKey === key && ACTIVE_JOB_STATES.has(job.state));
+      const existing = this.jobs.find((job) => job.idempotencyKey === key && (options?.anyState || ACTIVE_JOB_STATES.has(job.state)));
       if (existing) return { result: { job: cloneJob(existing), created: false }, dirty: false, events: [] };
       const now = new Date().toISOString();
       const job: StoredJob = {
@@ -292,9 +292,9 @@ export class JobStore {
     });
   }
 
-  async claimNext(host: JobHost): Promise<Job | null> {
+  async claimNext(host: JobHost, where?: (job: Job) => boolean): Promise<Job | null> {
     return this.exclusive(async () => {
-      const job = this.jobs.filter((item) => item.host === host && item.state === "queued").sort((a, b) => a.seq - b.seq)[0];
+      const job = this.jobs.filter((item) => item.host === host && item.state === "queued" && (where ? where(item) : true)).sort((a, b) => a.seq - b.seq)[0];
       if (!job) return { result: null, dirty: false, events: [] };
       this.markRunning(job);
       return { result: cloneJob(job), dirty: true, events: [this.upsertEvent(job)] };
@@ -389,7 +389,7 @@ export class JobStore {
     });
   }
 
-  async cancel(id: string): Promise<Job> {
+  async cancel(id: string, reason = "Отменено. Файлы на диске не удалялись."): Promise<Job> {
     return this.transition(id, (job) => {
       if (job.state !== "queued" && job.state !== "running" && job.state !== "paused") {
         throw new JobError("conflict", "Эту задачу уже нельзя отменить.");
@@ -397,7 +397,7 @@ export class JobStore {
       job.state = "error";
       job.cancelled = true;
       job.workerToken = null;
-      job.lastError = "Отменено. Файлы на диске не удалялись.";
+      job.lastError = cleanText(reason, 500) || "Отменено. Файлы на диске не удалялись.";
     });
   }
 
@@ -422,6 +422,51 @@ export class JobStore {
       }
       if (job.state !== "done" || !job.verified) throw new JobError("conflict", "Сначала дождитесь проверки результата.");
       job.sourceDeleted = true;
+    });
+  }
+
+  async noteSourceRemoved(id: string): Promise<boolean> {
+    return this.exclusive(async () => {
+      const job = this.jobs.find((item) => item.id === id);
+      if (!job || job.state !== "done" || !job.verified || job.sourceDeleted) {
+        return { result: false, dirty: false, events: [] };
+      }
+      job.sourceDeleted = true;
+      job.updatedAt = new Date().toISOString();
+      return { result: true, dirty: true, events: [this.upsertEvent(job)] };
+    });
+  }
+
+  async requeueCopy(id: string): Promise<Job | null> {
+    return this.exclusive(async () => {
+      const job = this.jobs.find((item) => item.id === id);
+      if (!job || job.kind !== "copy") return { result: null, dirty: false, events: [] };
+      if (job.state !== "done" && job.state !== "error") return { result: cloneJob(job), dirty: false, events: [] };
+      job.state = "queued";
+      job.verified = false;
+      job.cancelled = false;
+      job.workerToken = null;
+      job.lastError = null;
+      job.progress = emptyProgress();
+      job.updatedAt = new Date().toISOString();
+      return { result: cloneJob(job), dirty: true, events: [this.upsertEvent(job)] };
+    });
+  }
+
+  async requeueStale(host: JobHost, stale: (job: Job) => boolean): Promise<number> {
+    return this.exclusive(async () => {
+      let changed = 0;
+      const events: JobEvent[] = [];
+      for (const job of this.jobs) {
+        if (job.host !== host || job.state !== "running" || job.verified) continue;
+        if (!stale(cloneJob(job))) continue;
+        job.workerToken = null;
+        job.state = "queued";
+        job.updatedAt = new Date().toISOString();
+        changed += 1;
+        events.push(this.upsertEvent(job));
+      }
+      return { result: changed, dirty: changed > 0, events };
     });
   }
 
@@ -502,11 +547,17 @@ export class JobStore {
     let result!: T;
     let events: JobEvent[] = [];
     await this.lock(async () => {
-      await this.ensureLoaded();
-      const out = await fn();
-      result = out.result;
-      events = out.events;
-      if (out.dirty) await this.persist();
+      const release = await acquireJobLock(this.directory);
+      try {
+        this.loaded = false;
+        await this.ensureLoaded();
+        const out = await fn();
+        result = out.result;
+        events = out.events;
+        if (out.dirty) await this.persist();
+      } finally {
+        await release();
+      }
     });
     for (const event of events) this.dispatch(event);
     return result;
@@ -560,6 +611,39 @@ export class JobStore {
     const tmp = path.join(this.directory, `.jobs.${process.pid}.${randomUUID()}.tmp`);
     await writeFile(tmp, JSON.stringify({ version: 1, jobs: [...foreign, ...this.jobs] }, null, 2), { mode: 0o600 });
     await rename(tmp, this.file);
+  }
+}
+
+async function acquireJobLock(directory: string): Promise<() => Promise<void>> {
+  await mkdir(directory, { recursive: true });
+  const lockDir = path.join(directory, ".jobs.lock");
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    try {
+      await mkdir(lockDir);
+      await writeFile(path.join(lockDir, "pid"), String(process.pid), { mode: 0o600 });
+      return async () => {
+        await rm(lockDir, { recursive: true, force: true });
+      };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      const holder = Number(await readFile(path.join(lockDir, "pid"), "utf8").catch(() => "0"));
+      if (!pidAlive(holder)) {
+        await rm(lockDir, { recursive: true, force: true });
+        continue;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+  }
+  throw new JobError("conflict", "Очередь занята другим процессом.");
+}
+
+function pidAlive(pid: number): boolean {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM";
   }
 }
 

@@ -1,3 +1,4 @@
+import { spawn } from "node:child_process";
 import { createReadStream, createWriteStream, existsSync, statSync } from "node:fs";
 import { readFile, writeFile, rename, mkdir, open as openFs } from "node:fs/promises";
 import path from "node:path";
@@ -8,9 +9,13 @@ import { promisify } from "node:util";
 import { createHash, randomUUID } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 
+import { systemCompactReason } from "../../src/addons/drives/compact-target.ts";
 import { executeIndexPlan } from "../../src/addons/drives/execute-index.ts";
+import { buildCompactArgv, DEFAULT_COMPACT_EXE } from "../../src/addons/media-games/compact.ts";
+import { isCompactAlgorithm } from "../../src/addons/media-games/presets.ts";
 import { selectIndexStrategy } from "../../src/addons/drives/strategy.ts";
 import { normalizeSerial, normalizeUuid } from "../../src/addons/drives/identity.ts";
+import { loadVolumeGuard, matchesExcluded, type VolumeGuard } from "../../src/addons/drives/volume-guard.ts";
 import type { CollectedVolume, HostOs, IndexPayload } from "../../src/addons/drives/types.ts";
 import { readNtfsLetter, readUsn } from "./indexers.mts";
 import { walkTree } from "./walk.mts";
@@ -46,6 +51,19 @@ function volumeKey(volume: { serial: string; volumeUuid: string }): string {
   return `${volume.serial}|${volume.volumeUuid}`;
 }
 
+/** MFT snapshots that stored only $FILE_NAME lengths are all zeros. One rebuild picks up $DATA sizes. */
+function snapshotHasNoSizes(index: IndexPayload | null | undefined): boolean {
+  const files = index?.files;
+  if (!files || files.length === 0) return false;
+  let sawFile = false;
+  for (const file of files) {
+    if (file.kind === "dir") continue;
+    sawFile = true;
+    if (typeof file.size === "number" && file.size > 0) return false;
+  }
+  return sawFile;
+}
+
 /** Relative path only: no abs, no .., no NUL. Slash-normalized. */
 function safeRelativePath(raw: string | null): string | null {
   if (!raw) return null;
@@ -58,8 +76,9 @@ function safeRelativePath(raw: string | null): string | null {
   return parts.join("/");
 }
 
-function isExcludedLetter(letter: string | null | undefined): boolean {
-  return String(letter || "").toUpperCase() === "Z";
+function letterKey(letter: string | null | undefined): string {
+  const value = String(letter || "").replace(":", "").trim().toUpperCase();
+  return /^[A-Z]$/.test(value) ? value : "";
 }
 
 function resolveVolumeFile(
@@ -81,9 +100,6 @@ function resolveVolumeFile(
     return !have || have === wantSerial;
   });
   if (!volume) return { error: "Том не подключён на этом хосте.", status: 404 };
-  if (isExcludedLetter(volume.letter) || volume.mountPaths.some((mount) => /^z:\\/i.test(mount))) {
-    return { error: "Том Z недоступен для чтения и записи.", status: 403 };
-  }
   const relative = safeRelativePath(relativeRaw);
   if (!relative) return { error: "Путь должен быть относительным внутри тома.", status: 400 };
   const mount = volume.mountPaths[0];
@@ -99,6 +115,36 @@ function resolveVolumeFile(
   return { absolute: joined, relative, volume };
 }
 
+
+function readJsonBody(request: IncomingMessage): Promise<Record<string, unknown>> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    let size = 0;
+    request.on("data", (chunk: Buffer) => {
+      size += chunk.length;
+      if (size > 64_000) {
+        reject(new Error("Слишком большой запрос."));
+        request.destroy();
+        return;
+      }
+      chunks.push(chunk);
+    });
+    request.on("end", () => {
+      if (chunks.length === 0) {
+        resolve({});
+        return;
+      }
+      try {
+        const parsed = JSON.parse(Buffer.concat(chunks).toString("utf8")) as unknown;
+        if (!parsed || typeof parsed !== "object") reject(new Error("Пустое тело запроса."));
+        else resolve(parsed as Record<string, unknown>);
+      } catch {
+        reject(new Error("Не удалось разобрать запрос."));
+      }
+    });
+    request.on("error", () => reject(new Error("Не удалось прочитать запрос.")));
+  });
+}
 
 function send(response: ServerResponse, status: number, body: unknown) {
   response.writeHead(status, {
@@ -123,9 +169,18 @@ export function startAgent(options: {
   const events: AgentEvent[] = [];
   let eventId = 0;
   const running = new Set<string>();
+  const rebuiltEmptySizes = new Set<string>();
+  const compactJobs = new Map<string, { id: string; state: "running" | "completed" | "failed"; error: string | null; message: string; path: string; algorithm: string }>();
   let ticking = false;
   let restoreFailed = false;
-  const disabled = new Set<string>();
+  let guard: VolumeGuard = { manualOnly: new Set(), excludeLetters: new Set(), excludeUuids: new Set(), excludeSerials: new Set() };
+  function isExcludedVolume(volume: { letter?: string | null; mountPaths?: string[]; volumeUuid?: string; serial?: string }): boolean {
+    return matchesExcluded(guard, volume);
+  }
+  function isManualVolume(volume: { letter?: string | null; mountPaths?: string[] }): boolean {
+    const letter = letterKey(volume.letter) || letterKey((volume.mountPaths?.[0] || "").slice(0, 2));
+    return Boolean(letter && guard.manualOnly.has(letter));
+  }
   const snapshotPath = process.env.SKLAD_AGENT_SNAPSHOT || path.join(process.cwd(), "data", "drive-agent-snapshot.json.gz");
   let persistChain: Promise<unknown> = Promise.resolve();
   function persist() {
@@ -138,12 +193,14 @@ export function startAgent(options: {
   }
   const ready = (async () => {
     try {
-      const data = JSON.parse(await readFile(path.join(process.cwd(), "data", "drive-agent-disabled.json"), "utf8"));
-      for (const letter of data.letters ?? []) disabled.add(String(letter).toUpperCase());
+      guard = await loadVolumeGuard();
+      process.env.SKLAD_EXCLUDE_LETTERS = [...guard.excludeLetters].join(",");
     } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") note = "Не удалось прочитать исключения дисков."; }
     try {
       const saved = JSON.parse((await promisify(gunzip)(await readFile(snapshotPath))).toString());
-      volumes = (saved.volumes ?? []).map((v: TrackedVolume) => ({ ...v, indexedAt: v.indexedAt || Date.now(), freeAtIndex: v.freeBytes, usnStart: v.usnStart ?? null }));
+      volumes = (saved.volumes ?? [])
+        .filter((volume: TrackedVolume) => !isExcludedVolume(volume))
+        .map((volume: TrackedVolume) => ({ ...volume, indexedAt: volume.indexedAt || Date.now(), freeAtIndex: volume.freeBytes, usnStart: volume.usnStart ?? null }));
     } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") { restoreFailed = true; note = "Снимок повреждён: автоматическое сканирование отключено, нужен ручной запуск."; } }
   })();
 
@@ -153,9 +210,11 @@ export function startAgent(options: {
     if (events.length > 400) events.shift();
   }
 
-  async function indexVolume(volume: TrackedVolume) {
+  async function indexVolume(volume: TrackedVolume, sizeRebuild = false, manual = false) {
     const key = volumeKey(volume);
-    if (running.has(key) || disabled.has((volume.letter ?? "").toUpperCase())) return;
+    if (running.has(key) || isExcludedVolume(volume)) return;
+    if (!manual && isManualVolume(volume)) return;
+    if (sizeRebuild) rebuiltEmptySizes.add(key);
     running.add(key);
     const previousIndex = volume.index;
     volume.index = {
@@ -234,6 +293,7 @@ export function startAgent(options: {
     const previous = new Map(volumes.map((volume) => [volumeKey(volume), volume]));
     const next: TrackedVolume[] = [];
     for (const volume of collected.volumes) {
+      if (isExcludedVolume(volume)) continue;
       const key = volumeKey(volume);
       const prior = previous.get(key);
       if (!prior) {
@@ -259,10 +319,20 @@ export function startAgent(options: {
     for (const volume of volumes) {
       // Complete snapshots do not expire. Free-space changes are not proof of a
       // pathname change; never turn a UI refresh into another full MFT read.
-      const needs = !restoreFailed && !disabled.has((volume.letter ?? "").toUpperCase()) && !volume.busy &&
-        (!volume.index || (volume.index.state === "paused" && !volume.index.files));
-      if (needs) void indexVolume(volume);
+      // A snapshot whose every file is 0 bytes is the old $FILE_NAME reader and is rebuilt once.
+      const key = volumeKey(volume);
+      const rebuildSizes = snapshotHasNoSizes(volume.index) && !rebuiltEmptySizes.has(key);
+      const needs = !restoreFailed && !isExcludedVolume(volume) && !isManualVolume(volume) && !volume.busy &&
+        (!volume.index || (volume.index.state === "paused" && !volume.index.files) || rebuildSizes);
+      if (needs) void indexVolume(volume, rebuildSizes);
     }
+  }
+
+  function resolveTracked(serial: string | null, uuid: string | null, relative: string | null) {
+    const resolved = resolveVolumeFile(volumes, serial, uuid, relative, options.os);
+    if ("error" in resolved) return resolved;
+    if (isExcludedVolume(resolved.volume)) return { error: "Том исключён в конфиге агента.", status: 403 as const };
+    return resolved;
   }
 
   const server = createServer((request: IncomingMessage, response: ServerResponse) => {
@@ -271,17 +341,78 @@ export function startAgent(options: {
       send(response, 200, { ok: true, hostId: options.hostId, os: options.os, elevated, note });
       return;
     }
+    if (request.method === "GET" && url.pathname === "/v1/compact") {
+      const job = compactJobs.get(url.searchParams.get("id") || "");
+      if (!job) { send(response, 404, { error: "Задание сжатия не найдено." }); return; }
+      send(response, 200, job);
+      return;
+    }
+    if (request.method === "POST" && url.pathname === "/v1/compact") {
+      void (async () => {
+        try {
+          const body = await readJsonBody(request);
+          if (body.confirm !== true) { send(response, 400, { error: "Нужно явное подтверждение. Сжатие не запускалось." }); return; }
+          if (options.os !== "win32" || process.platform !== "win32") {
+            send(response, 400, { error: "Сжатие Windows запускается только на самом ПК. Здесь оно не начато." });
+            return;
+          }
+          if (!elevated) { send(response, 403, { error: "Агент без прав администратора. CompactGUI/WOF не запускался." }); return; }
+          const algorithm = String(body.algorithm || "");
+          if (!isCompactAlgorithm(algorithm)) { send(response, 400, { error: "Неизвестный алгоритм. Сжатие не запускалось." }); return; }
+          const resolved = resolveTracked(String(body.serial || ""), String(body.uuid || ""), String(body.path || ""));
+          if ("error" in resolved) { send(response, resolved.status, { error: `${resolved.error} Сжатие не запускалось.` }); return; }
+          if (!/ntfs/i.test(resolved.volume.filesystem)) {
+            send(response, 400, { error: "Том не NTFS. Сжатие не запускалось." });
+            return;
+          }
+          const blocked = systemCompactReason(resolved.absolute);
+          if (blocked) { send(response, 400, { error: `${blocked} Сжатие не запускалось.` }); return; }
+          let info;
+          try { info = statSync(resolved.absolute); } catch {
+            send(response, 404, { error: "Папка не найдена на томе. Сжатие не запускалось." });
+            return;
+          }
+          if (!info.isDirectory()) { send(response, 400, { error: "Сжимать можно только папку. Сжатие не запускалось." }); return; }
+          const binary = DEFAULT_COMPACT_EXE;
+          if (!existsSync(binary)) { send(response, 500, { error: "Программа сжатия Windows не найдена. Сжатие не запускалось." }); return; }
+          const argv = buildCompactArgv({ os: "win32", binary, folder: resolved.absolute, algorithm });
+          const id = randomUUID();
+          const job = { id, state: "running" as const, error: null, message: "Сжатие выполняется.", path: resolved.absolute, algorithm };
+          compactJobs.set(id, job);
+          const child = spawn(argv[0], argv.slice(1), { windowsHide: true, stdio: ["ignore", "ignore", "pipe"] });
+          let stderr = "";
+          child.stderr?.on("data", (chunk: Buffer) => {
+            stderr = `${stderr}${chunk.toString("utf8")}`.slice(-500);
+          });
+          child.on("error", () => {
+            compactJobs.set(id, { ...job, state: "failed", error: "Не удалось запустить сжатие Windows.", message: "Сжатие не выполнилось." });
+          });
+          child.on("exit", (code) => {
+            if (code === 0) {
+              compactJobs.set(id, { ...job, state: "completed", error: null, message: "Сжатие завершилось. Размеры обновятся после перечитывания MFT." });
+              void indexVolume(resolved.volume);
+            } else {
+              compactJobs.set(id, { ...job, state: "failed", error: stderr.trim() || `Сжатие завершилось с кодом ${code}.`, message: "Сжатие не выполнилось." });
+            }
+          });
+          send(response, 202, job);
+        } catch (error) {
+          send(response, 400, { error: error instanceof Error ? error.message : "Сжатие не запускалось." });
+        }
+      })();
+      return;
+    }
     if (request.method === "POST" && url.pathname === "/v1/rescan") {
       const volume = volumes.find((v) => v.serial === url.searchParams.get("serial") && v.volumeUuid === url.searchParams.get("uuid"));
-      if (!volume || disabled.has((volume.letter ?? "").toUpperCase())) { send(response, 404, { error: "Том исключён или недоступен." }); return; }
+      if (!volume || isExcludedVolume(volume)) { send(response, 404, { error: "Том исключён в конфиге агента." }); return; }
       if (running.has(volumeKey(volume)) || volume.busy) { send(response, 409, { error: "Том занят." }); return; }
-      void indexVolume(volume);
+      void indexVolume(volume, false, true);
       send(response, 202, { accepted: true });
       return;
     }
     if (request.method === "GET" && url.pathname === "/v1/files") {
       const volume = volumes.find((v) => v.serial === url.searchParams.get("serial") && v.volumeUuid === url.searchParams.get("uuid"));
-      if (!volume || disabled.has((volume.letter ?? "").toUpperCase())) { send(response, 404, { error: "Том недоступен." }); return; }
+      if (!volume || isExcludedVolume(volume)) { send(response, 404, { error: "Том исключён в конфиге агента." }); return; }
       const index = volume.index;
       if (!index?.files || index.revision !== url.searchParams.get("revision")) { send(response, 409, { error: "Снимок изменился." }); return; }
       const offset = Math.max(0, Math.floor(Number(url.searchParams.get("offset")) || 0));
@@ -296,7 +427,8 @@ export function startAgent(options: {
         os: options.os,
         elevated,
         note,
-        volumes: volumes.filter((volume) => !disabled.has((volume.letter ?? "").toUpperCase())).map((volume) => ({
+        volumes: volumes.filter((volume) => !isExcludedVolume(volume)).map((volume) => ({
+          manualOnly: isManualVolume(volume),
           serial: volume.serial,
           volumeUuid: volume.volumeUuid,
           filesystem: volume.filesystem,
@@ -324,7 +456,7 @@ export function startAgent(options: {
     }
 
     if (request.method === "GET" && url.pathname === "/v1/file/stat") {
-      const resolved = resolveVolumeFile(volumes, url.searchParams.get("serial"), url.searchParams.get("uuid"), url.searchParams.get("path"), options.os);
+      const resolved = resolveTracked(url.searchParams.get("serial"), url.searchParams.get("uuid"), url.searchParams.get("path"));
       if ("error" in resolved) { send(response, resolved.status, { error: resolved.error }); return; }
       try {
         const info = statSync(resolved.absolute);
@@ -342,7 +474,7 @@ export function startAgent(options: {
       return;
     }
     if (request.method === "GET" && url.pathname === "/v1/file/content") {
-      const resolved = resolveVolumeFile(volumes, url.searchParams.get("serial"), url.searchParams.get("uuid"), url.searchParams.get("path"), options.os);
+      const resolved = resolveTracked(url.searchParams.get("serial"), url.searchParams.get("uuid"), url.searchParams.get("path"));
       if ("error" in resolved) { send(response, resolved.status, { error: resolved.error }); return; }
       let info;
       try {
@@ -375,7 +507,7 @@ export function startAgent(options: {
       return;
     }
     if (request.method === "PUT" && url.pathname === "/v1/file/content") {
-      const resolved = resolveVolumeFile(volumes, url.searchParams.get("serial"), url.searchParams.get("uuid"), url.searchParams.get("path"), options.os);
+      const resolved = resolveTracked(url.searchParams.get("serial"), url.searchParams.get("uuid"), url.searchParams.get("path"));
       if ("error" in resolved) { send(response, resolved.status, { error: resolved.error }); return; }
       // Refuse overwrite unless explicit
       const overwrite = url.searchParams.get("overwrite") === "1";

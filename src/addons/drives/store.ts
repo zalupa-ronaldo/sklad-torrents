@@ -1,12 +1,19 @@
-import { mkdir, readFile, rename, writeFile, stat } from "node:fs/promises";
+import { randomBytes } from "node:crypto";
+import { createReadStream, createWriteStream } from "node:fs";
+import { copyFile, mkdir, readFile, rename, unlink, writeFile, stat } from "node:fs/promises";
 import path from "node:path";
+import { createInterface } from "node:readline";
 
+import { uniqueDisks } from "@/addons/drives/disk-table";
+import { summarizeIndexed } from "@/addons/drives/disk-summary";
+import { mergeVolumeRecords } from "@/addons/drives/reconcile";
+import { recordStage } from "@/addons/drives/stage";
 import { dataDir } from "@/lib/qbittorrent/store";
-import type { AgentEndpoint, DiskRecord, DriveMode } from "@/addons/drives/types";
+import type { AgentEndpoint, DiskRecord, DriveMode, IndexedFile } from "@/addons/drives/types";
 import { DriveError } from "@/addons/drives/types";
 
 export interface CatalogFile {
-  version: 1;
+  version: 1 | 2;
   seeded: boolean;
   disks: DiskRecord[];
 }
@@ -26,12 +33,132 @@ export function agentConfigPath(): string {
 
 // Shared by independently bundled Next route modules; one parsed tree per process.
 const catalogCache = ((globalThis as typeof globalThis & { __skladCatalog?: Map<string, { stamp: string; baseStamp: string; file: CatalogFile }> }).__skladCatalog ??= new Map());
+const liveState = ((globalThis as typeof globalThis & { __skladLiveDisks?: { disks: DiskRecord[] | null } }).__skladLiveDisks ??= { disks: null });
+
+export function liveDisks(): DiskRecord[] | null {
+  return liveState.disks;
+}
+
+export function setLiveDisks(disks: DiskRecord[]): void {
+  liveState.disks = uniqueDisks(disks);
+}
+
+export function clearLiveDisks(): void {
+  liveState.disks = null;
+}
+
+export function adoptCatalogDisks(incoming: readonly DiskRecord[]): DiskRecord[] {
+  const merged = uniqueDisks(mergeVolumeRecords([...(liveState.disks ?? []), ...incoming]));
+  liveState.disks = merged;
+  return merged;
+}
+
+const resetState = ((globalThis as typeof globalThis & { __skladCatalogReset?: { readyDir: string } }).__skladCatalogReset ??= { readyDir: "" });
+
+/** Fresh catalog from agent snapshots. The previous drives.json is archived, not parsed. */
+export function catalogResetRequested(): boolean {
+  return process.env.SKLAD_CATALOG_RESET === "1";
+}
+
+export function resetMarkerPath(): string {
+  return path.join(dataDir(), "catalog-reset.json");
+}
+
+async function moveAside(source: string, dest: string): Promise<boolean> {
+  try {
+    await stat(source);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
+  }
+  await mkdir(path.dirname(dest), { recursive: true });
+  await rename(source, dest);
+  return true;
+}
+
+/**
+ * Move the active catalog, premigrate file, overlay, and shard directory into archive/.
+ * Runs once per data dir. A later process start does not archive the clean catalog again.
+ */
+export async function ensureCleanCatalog(): Promise<{ archivedTo: string | null }> {
+  if (!catalogResetRequested()) return { archivedTo: null };
+  const dir = dataDir();
+  if (resetState.readyDir === dir) return { archivedTo: null };
+  const marker = resetMarkerPath();
+  try {
+    const saved = JSON.parse(await readFile(marker, "utf8")) as { applied?: boolean };
+    if (saved.applied === true) {
+      resetState.readyDir = dir;
+      return { archivedTo: null };
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const dest = path.join(dataDir(), "archive", stamp);
+  await mkdir(dest, { recursive: true });
+  const root = dataDir();
+  await moveAside(path.join(root, "drives.json"), path.join(dest, "drives.json"));
+  await moveAside(path.join(root, "drives.json.premigrate"), path.join(dest, "drives.json.premigrate"));
+  await moveAside(path.join(root, "drives.json.overlay"), path.join(dest, "drives.json.overlay"));
+  await moveAside(path.join(root, "drive-files"), path.join(dest, "drive-files"));
+  await writeFile(marker, JSON.stringify({ applied: true, archivedTo: dest, at: new Date().toISOString() }));
+  clearLiveDisks();
+  catalogCache.clear();
+  const { clearBrowseCache } = await import("@/addons/drives/browse");
+  clearBrowseCache();
+  resetState.readyDir = dataDir();
+  return { archivedTo: dest };
+}
+
+let writeChain: Promise<unknown> = Promise.resolve();
+
+export function withCatalogWrite<T>(fn: () => Promise<T>): Promise<T> {
+  const run = writeChain.then(fn, fn);
+  writeChain = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  return run;
+}
+
+function uniqueTemp(target: string): string {
+  return `${target}.${process.pid}.${Date.now().toString(36)}.${randomBytes(4).toString("hex")}.tmp`;
+}
+
+export const HEAVY_CATALOG_BYTES = 8_000_000;
+
+async function fileBytes(target: string): Promise<number> {
+  try {
+    return (await stat(target)).size;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return 0;
+    throw error;
+  }
+}
+
+export async function catalogFileBytes(): Promise<number> {
+  return fileBytes(catalogFilePath());
+}
+
+export function premigratePath(): string {
+  return `${catalogFilePath()}.premigrate`;
+}
+
+/** True when the live catalog or a preserved original is large enough to migrate off the request. */
+export async function catalogNeedsMigrate(): Promise<boolean> {
+  if (catalogResetRequested()) return false;
+  const current = await catalogFileBytes();
+  const backup = await fileBytes(premigratePath());
+  return current > HEAVY_CATALOG_BYTES || (backup > HEAVY_CATALOG_BYTES && backup > current);
+}
 export function cacheCatalog(file: CatalogFile): void {
   const entry = catalogCache.get(catalogFilePath());
   if (entry) entry.file = file;
 }
 
 export async function readCatalog(): Promise<CatalogFile | null> {
+  await ensureCleanCatalog();
   try {
     const target = catalogFilePath();
     const info = await stat(target);
@@ -49,9 +176,12 @@ export async function readCatalog(): Promise<CatalogFile | null> {
       parsed.disks = parsed.disks.map((disk) => { const replacement = changes.get(disk.id); changes.delete(disk.id); return replacement ?? disk; });
       parsed.disks.push(...changes.values());
     }
-    if (!parsed || parsed.version !== 1 || !Array.isArray(parsed.disks)) {
+    if (!parsed || (parsed.version !== 1 && parsed.version !== 2) || !Array.isArray(parsed.disks)) {
       throw new DriveError(500, "Каталог полки повреждён.");
     }
+    const before = parsed.disks.length;
+    parsed.disks = uniqueDisks(parsed.disks);
+    if (parsed.disks.length !== before) recordStage("catalog-dedupe", 0, before);
     catalogCache.set(target, { stamp, baseStamp, file: parsed });
     return parsed;
   } catch (error) {
@@ -61,15 +191,30 @@ export async function readCatalog(): Promise<CatalogFile | null> {
   }
 }
 
-export async function writeCatalog(file: CatalogFile): Promise<void> {
+async function writeCatalogBody(file: CatalogFile): Promise<void> {
+  file = { ...file, disks: uniqueDisks(file.disks) };
   const target = catalogFilePath();
   await mkdir(path.dirname(target), { recursive: true });
-  const tmp = `${target}.${process.pid}.tmp`;
+  const tmp = uniqueTemp(target);
   await writeFile(tmp, JSON.stringify(file), "utf8");
-  await rename(tmp, target);
+  try {
+    await rename(tmp, target);
+  } catch (error) {
+    await unlink(tmp).catch(() => undefined);
+    throw error;
+  }
+  try {
+    await unlink(`${target}.overlay`);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
   const info = await stat(target);
   const baseStamp = `${info.mtimeMs}:${info.size}`;
   catalogCache.set(target, { stamp: `${baseStamp}|`, baseStamp, file });
+}
+
+export function writeCatalog(file: CatalogFile): Promise<void> {
+  return withCatalogWrite(() => writeCatalogBody(file));
 }
 
 /** Persist a small changed volume without serializing the million-row system disk.
@@ -77,7 +222,12 @@ export async function writeCatalog(file: CatalogFile): Promise<void> {
  */
 export async function writeCatalogChanges(file: CatalogFile, previous: CatalogFile | null): Promise<void> {
   const changed = file.disks.filter((disk) => previous?.disks.find((old) => old.id === disk.id)?.files !== disk.files);
-  if (!previous || changed.some((disk) => disk.files.length > 100_000)) return writeCatalog(file);
+  if (!previous || changed.some((disk) => disk.files.length > 20_000 || disk.fileStore)) return persistLargeCatalog(file.disks);
+  return withCatalogWrite(() => writeCatalogChangesBody(file, previous));
+}
+
+async function writeCatalogChangesBody(file: CatalogFile, previous: CatalogFile): Promise<void> {
+  const changed = file.disks.filter((disk) => previous.disks.find((old) => old.id === disk.id)?.files !== disk.files);
   const target = catalogFilePath();
   const info = await stat(target);
   const baseStamp = `${info.mtimeMs}:${info.size}`;
@@ -85,7 +235,7 @@ export async function writeCatalogChanges(file: CatalogFile, previous: CatalogFi
   try { old = JSON.parse(await readFile(`${target}.overlay`, "utf8")); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
   const changes = new Map((old.baseStamp === baseStamp ? old.disks ?? [] : []).map((disk) => [disk.id, disk]));
   for (const disk of changed) changes.set(disk.id, disk);
-  const tmp = `${target}.overlay.${process.pid}.tmp`;
+  const tmp = uniqueTemp(`${target}.overlay`);
   await writeFile(tmp, JSON.stringify({ baseStamp, disks: [...changes.values()] }), "utf8");
   await rename(tmp, `${target}.overlay`);
   const meta = await stat(`${target}.overlay`);
@@ -120,6 +270,121 @@ export async function readAgentConfig(): Promise<AgentConfigFile> {
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return fallback;
     throw new DriveError(500, "Не удалось прочитать адреса агентов.");
+  }
+}
+
+export function persistLargeCatalog(disks: DiskRecord[]): Promise<void> {
+  return withCatalogWrite(() => persistLargeCatalogUnlocked(disks));
+}
+
+/** A shard already on disk for this revision. Reloading it into memory is not a new snapshot. */
+export function shardIsCurrent(disk: DiskRecord): boolean {
+  if (!disk.fileStore || !disk.shardRevision) return false;
+  if ((disk.shardBytes ?? 0) <= 0 && (disk.summary?.fileCount ?? 0) <= 0) return false;
+  if (disk.indexRevision && disk.shardRevision !== disk.indexRevision) return false;
+  return true;
+}
+
+export async function attachShardStats(disks: readonly DiskRecord[]): Promise<void> {
+  const dir = path.join(dataDir(), "drive-files");
+  for (const disk of disks) {
+    if ((disk.shardBytes ?? 0) > 0 && disk.fileStore) continue;
+    const name = disk.id.replace(/[^a-zA-Z0-9._-]/g, "");
+    const candidate = disk.fileStore || (name === disk.id ? path.join(dir, `${name}.ndjson`) : "");
+    if (!candidate) continue;
+    const bytes = await fileBytes(candidate);
+    if (bytes <= 0) continue;
+    disk.fileStore = candidate;
+    disk.shardBytes = bytes;
+    if (!disk.shardRevision) disk.shardRevision = disk.indexRevision || `stored:${bytes}`;
+  }
+}
+
+export async function persistLargeCatalogUnlocked(disks: DiskRecord[]): Promise<void> {
+  const merged = uniqueDisks(mergeVolumeRecords(uniqueDisks([...(liveDisks() ?? []), ...disks])));
+  const dir = path.join(dataDir(), "drive-files");
+  await mkdir(dir, { recursive: true });
+  for (const disk of merged) {
+    if (disk.files.length <= 20_000) continue;
+    if (shardIsCurrent(disk)) {
+      recordStage("shard-skip", 0, disk.summary?.fileCount || disk.files.length);
+      continue;
+    }
+    const started = performance.now();
+    const target = path.join(dir, `${safeShardName(disk.id)}.ndjson`);
+    await writeNdjson(target, disk.files);
+    disk.fileStore = target;
+    disk.shardBytes = await fileBytes(target);
+    disk.shardRevision = disk.indexRevision || `stored:${disk.shardBytes}`;
+    disk.summary = summarizeIndexed(disk.files);
+    recordStage("shard-write", performance.now() - started, disk.files.length);
+  }
+  const installed = uniqueDisks(merged);
+  await writeCatalogBody({
+    version: 2,
+    seeded: true,
+    disks: installed.map((disk) => {
+      const summary = disk.summary && disk.summary.fileCount === 0 && disk.files.length === 0 && !disk.fileStore ? undefined : disk.summary;
+      return { ...disk, files: disk.fileStore ? [] : disk.files, summary };
+    }),
+  });
+  setLiveDisks(installed);
+}
+
+function safeShardName(id: string): string {
+  const cleaned = id.replace(/[^a-zA-Z0-9._-]/g, "");
+  if (!cleaned || cleaned !== id) throw new DriveError(400, "Некорректный идентификатор диска.");
+  return cleaned;
+}
+
+export async function preserveCatalogOriginal(): Promise<string | null> {
+  const catalog = catalogFilePath();
+  const backup = premigratePath();
+  const current = await fileBytes(catalog);
+  const saved = await fileBytes(backup);
+  if (saved > current && saved > HEAVY_CATALOG_BYTES) return backup;
+  if (current > HEAVY_CATALOG_BYTES && saved === 0) {
+    await copyFile(catalog, backup);
+    return backup;
+  }
+  if (saved > HEAVY_CATALOG_BYTES) return backup;
+  return null;
+}
+
+export async function ensureDiskFiles(disk: DiskRecord): Promise<void> {
+  if (disk.files.length > 0 || !disk.fileStore) return;
+  const files: IndexedFile[] = [];
+  const lines = createInterface({ input: createReadStream(disk.fileStore), crlfDelay: Infinity });
+  let count = 0;
+  for await (const line of lines) {
+    if (!line) continue;
+    files.push(JSON.parse(line) as IndexedFile);
+    count += 1;
+    if (count % 20_000 === 0) await new Promise((resolve) => setImmediate(resolve));
+  }
+  disk.files = files;
+  if (!disk.summary) disk.summary = summarizeIndexed(files);
+}
+
+async function writeNdjson(target: string, files: readonly IndexedFile[]): Promise<void> {
+  if (files.length === 0) return;
+  const temp = uniqueTemp(target);
+  const stream = createWriteStream(temp);
+  for (let i = 0; i < files.length; i += 1) {
+    if (!stream.write(`${JSON.stringify(files[i])}\n`)) {
+      await new Promise<void>((resolve) => stream.once("drain", () => resolve()));
+    }
+    if (i > 0 && i % 20_000 === 0) await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+  await new Promise<void>((resolve, reject) => {
+    stream.on("error", reject);
+    stream.end(() => resolve());
+  });
+  try {
+    await rename(temp, target);
+  } catch (error) {
+    await unlink(temp).catch(() => undefined);
+    throw error;
   }
 }
 

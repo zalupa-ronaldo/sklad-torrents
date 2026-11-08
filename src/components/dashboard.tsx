@@ -1,23 +1,27 @@
 "use client";
 
 import { ChevronLeft, ChevronRight, Folder, File as FileIcon, Plus, Search } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { AddTorrentDialog } from "@/components/add-torrent-dialog";
 import { HostDialog } from "@/components/host-dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { displayDiskName, displayDiskPickerLabel, displayDiskTitle, isStripDisk } from "@/addons/drives/inventory";
+import { compactExplanation, COMPACT_ALGORITHMS } from "@/addons/drives/compact-target";
+import { canGoBack, canGoForward, createFolderHistory, currentPlace, goBack, goForward, pushPlace, retargetDisk } from "@/addons/drives/folder-history";
+import { createMouseNavSession } from "@/addons/drives/mouse-nav";
+import { savingsOf } from "@/addons/drives/ondisk";
+import { dedupeShelfDisks, displayDiskName, displayDiskPickerLabel, displayDiskTitle } from "@/addons/drives/inventory";
 import type { TransferDestination, TransferJob } from "@/addons/drives/transfer/jobs";
 import type { BrowseEntry, BrowseResponse } from "@/addons/drives/browse";
 import type { DiskView, MediaCategory, SearchHit, SearchResponse, ShelfResponse } from "@/addons/drives/types";
 import { api } from "@/lib/api-client";
-import { formatBytes } from "@/lib/format";
+import { formatBytes, formatPercent } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import type { DashboardPayload, HostView } from "@/lib/qbittorrent/types";
 import type { ProgressPayload } from "@/lib/progress/jobs";
 
-type SortKey = "size" | "name" | "mtime" | "type";
+type SortKey = "size" | "ondisk" | "name" | "mtime" | "type";
 
 const CATEGORY_CHIPS: { id: "all" | MediaCategory; label: string }[] = [
   { id: "all", label: "Все" },
@@ -35,6 +39,85 @@ function formatMtime(ms: number): string {
   const date = new Date(ms);
   if (Number.isNaN(date.getTime())) return "—";
   return new Intl.DateTimeFormat("ru-RU", { dateStyle: "short", timeStyle: "short" }).format(date);
+}
+
+/** Logical size plus share of the open folder. Share is bytes / folder bytes, never a file count. */
+function formatSizeShare(size: number | null, scopeBytes: number): string {
+  if (size == null) return "—";
+  const bytes = formatBytes(size);
+  if (!(scopeBytes > 0)) return bytes;
+  const share = size <= 0 ? 0 : Math.min(1, size / scopeBytes);
+  return `${bytes} · ${formatPercent(share)}`;
+}
+
+function needsManualScan(disk: { online: boolean; fileCount: number; scan: { status: string } }): boolean {
+  if (!disk.online || disk.scan.status === "running") return false;
+  return disk.scan.status === "error" || disk.scan.status === "idle" || disk.fileCount === 0;
+}
+
+function folderHint(size: number | null, fileCount: number, onDisk: number | null): string {
+  const parts = [size == null ? "размер неизвестен" : formatBytes(size), `${fileCount.toLocaleString("ru-RU")} ф.`];
+  if (onDisk == null) parts.push("на диске неизвестно");
+  else parts.push(`на диске ${formatBytes(onDisk)}`);
+  const saved = savingsOf(size, onDisk);
+  if (saved) parts.push(`экономия ${formatBytes(saved.bytes)} · ${formatPercent(saved.ratio)}`);
+  return parts.join(" · ");
+}
+
+function compareKnownDesc(a: number | null, b: number | null): number {
+  if (a == null && b == null) return 0;
+  if (a == null) return 1;
+  if (b == null) return -1;
+  return b - a;
+}
+
+function OnDiskCell({
+  size,
+  onDisk,
+  compression,
+  canCompress,
+  onCompress,
+}: {
+  size: number | null;
+  onDisk: number | null;
+  compression: "wof" | "ntfs" | "mixed" | null;
+  canCompress: boolean;
+  onCompress: () => void;
+}) {
+  const saved = savingsOf(size, onDisk);
+  const used = size != null && onDisk != null && size > 0 ? Math.max(0, Math.min(1, onDisk / size)) : null;
+  const kind = compression === "wof" || compression === "mixed" ? "CompactGUI/WOF" : compression === "ntfs" ? "сжатие NTFS" : null;
+  const title = onDisk == null
+    ? "Занятое место неизвестно. Длина файла не считается экономией."
+    : [formatBytes(onDisk), kind, saved ? `экономия ${formatBytes(saved.bytes)}` : "экономии нет"].filter(Boolean).join(" · ");
+  return (
+    <div className="ml-auto flex w-[9.5rem] flex-col items-end gap-0.5" title={title}>
+      <span className="tabular-nums">{onDisk == null || size == null ? "—" : formatBytes(onDisk)}</span>
+      {saved ? (
+        <span className="text-[10px] tabular-nums text-emerald-400/90">−{formatBytes(saved.bytes)} · {formatPercent(saved.ratio)}</span>
+      ) : onDisk != null && size != null ? (
+        <span className="text-[10px] text-muted-foreground">без экономии</span>
+      ) : (
+        <span className="text-[10px] text-muted-foreground">нет данных</span>
+      )}
+      {used != null ? (
+        <span className="h-1 w-full overflow-hidden rounded-full bg-zinc-800">
+          <span
+            className="block h-full"
+            style={{
+              width: `${Math.max(used === 0 ? 0 : 4, used * 100)}%`,
+              background: saved ? "linear-gradient(90deg, #34d399, #fbbf24)" : "#71717a",
+            }}
+          />
+        </span>
+      ) : null}
+      {canCompress ? (
+        <button type="button" className="h-5 rounded border border-border px-1.5 text-[10px] hover:bg-muted" onClick={(event) => { event.stopPropagation(); onCompress(); }}>
+          Сжать
+        </button>
+      ) : null}
+    </div>
+  );
 }
 
 export function Dashboard() {
@@ -60,6 +143,21 @@ export function Dashboard() {
   const [copyBusy, setCopyBusy] = useState(false);
   const [copyNotice, setCopyNotice] = useState<string | null>(null);
   const [copyJob, setCopyJob] = useState<TransferJob | null>(null);
+  const [compactTarget, setCompactTarget] = useState<BrowseEntry | null>(null);
+  const [compactAlgorithm, setCompactAlgorithm] = useState<(typeof COMPACT_ALGORITHMS)[number]>("XPRESS16K");
+  const [compactAck, setCompactAck] = useState(false);
+  const [compactBusy, setCompactBusy] = useState(false);
+  const [compactNote, setCompactNote] = useState<string | null>(null);
+  const [compactJobId, setCompactJobId] = useState<string | null>(null);
+  const [scanBusy, setScanBusy] = useState(false);
+  const [scanNote, setScanNote] = useState<string | null>(null);
+  const [aliasId, setAliasId] = useState<string | null>(null);
+  const [aliasDraft, setAliasDraft] = useState("");
+  const [aliasError, setAliasError] = useState<string | null>(null);
+  const [aliasBusy, setAliasBusy] = useState(false);
+  const panelRef = useRef<HTMLDivElement>(null);
+  const historyRef = useRef(createFolderHistory());
+  const [nav, setNav] = useState(historyRef.current);
 
   const refreshMeta = useCallback(async () => {
     try {
@@ -101,6 +199,63 @@ export function Dashboard() {
       setBrowseLoading(false);
     }
   }, []);
+
+  const visit = useCallback((nextDiskId: string | null, nextPath: string) => {
+    const next = pushPlace(historyRef.current, { diskId: nextDiskId, path: nextPath });
+    historyRef.current = next;
+    setNav(next);
+    void loadBrowse(nextDiskId, nextPath);
+  }, [loadBrowse]);
+
+  const travel = useCallback((direction: "back" | "forward") => {
+    const next = direction === "back" ? goBack(historyRef.current) : goForward(historyRef.current);
+    if (next === historyRef.current) return;
+    historyRef.current = next;
+    setNav(next);
+    const place = currentPlace(next);
+    void loadBrowse(place.diskId, place.path);
+  }, [loadBrowse]);
+
+  useEffect(() => {
+    const root = panelRef.current;
+    if (!root) return;
+    const session = createMouseNavSession((action) => travel(action));
+    const down = (event: MouseEvent) => session.mousedown(event);
+    const up = (event: MouseEvent) => session.mouseup(event);
+    const aux = (event: MouseEvent) => session.auxclick(event);
+    root.addEventListener("mousedown", down);
+    root.addEventListener("mouseup", up);
+    root.addEventListener("auxclick", aux);
+    return () => {
+      root.removeEventListener("mousedown", down);
+      root.removeEventListener("mouseup", up);
+      root.removeEventListener("auxclick", aux);
+    };
+  }, [travel]);
+
+  useEffect(() => {
+    if (!compactJobId) return;
+    const timer = window.setInterval(() => {
+      void (async () => {
+        try {
+          const job = await api<{ state: string; message: string; error: string | null }>(`/api/drives/compact?id=${encodeURIComponent(compactJobId)}`);
+          if (job.state === "completed") {
+            setCompactNote(job.message);
+            setCompactJobId(null);
+            void loadBrowse(diskId, path);
+            void refreshMeta();
+          } else if (job.state === "failed") {
+            setCompactNote(job.error || job.message);
+            setCompactJobId(null);
+          }
+        } catch (error) {
+          setCompactNote(error instanceof Error ? error.message : "Статус сжатия недоступен.");
+          setCompactJobId(null);
+        }
+      })();
+    }, 1500);
+    return () => window.clearInterval(timer);
+  }, [compactJobId, diskId, path, loadBrowse, refreshMeta]);
 
   useEffect(() => {
     if (!copyJob || (copyJob.status !== "running" && copyJob.status !== "queued")) return;
@@ -153,6 +308,8 @@ export function Dashboard() {
     const kick = window.setTimeout(() => {
       void refreshMeta();
       void (async () => {
+        historyRef.current = createFolderHistory({ diskId: startDisk, path: startPath });
+        setNav(historyRef.current);
         await loadBrowse(startDisk, startPath);
         if (selectName) {
           // selection applied in a follow-up effect once browse arrives
@@ -193,13 +350,12 @@ export function Dashboard() {
   }, [query]);
 
   const stripDisks = useMemo(() => {
-    return (shelf?.disks ?? []).filter(isStripDisk).sort((a, b) => b.fileCount - a.fileCount || a.label.localeCompare(b.label, "ru"));
+    return dedupeShelfDisks(shelf?.disks ?? []).sort((a, b) => b.fileCount - a.fileCount || b.totalBytes - a.totalBytes || a.label.localeCompare(b.label, "ru"));
   }, [shelf]);
 
   const treeDisks = useMemo(() => {
     if (browse?.roots) return browse.entries;
     return stripDisks
-      .filter((disk) => disk.fileCount > 0)
       .map((disk) => ({
         diskId: disk.id,
         diskLabel: displayDiskTitle(disk),
@@ -208,15 +364,31 @@ export function Dashboard() {
         relativePath: "",
         displayPath: disk.mountPaths[0] || disk.lastMountPath,
         kind: "dir" as const,
-        size: 0,
+        size: disk.sizesKnown === false ? null : disk.indexedBytes,
         allocated: null,
+        onDisk: null,
+        compression: null,
         mtimeMs: 0,
         extension: "",
         categories: [],
         fileCount: disk.fileCount,
         dirCount: 0,
+        sizesReady: disk.sizesReady,
       }));
   }, [browse, stripDisks]);
+
+  useEffect(() => {
+    if (!diskId || !shelf) return;
+    if (stripDisks.some((disk) => disk.id === diskId)) return;
+    const current = shelf.disks.find((disk) => disk.id === diskId);
+    if (!current?.volumeUuid) return;
+    const uuid = current.volumeUuid.replace(/-/g, "").toLowerCase();
+    const keeper = stripDisks.find((disk) => disk.volumeUuid.replace(/-/g, "").toLowerCase() === uuid);
+    if (!keeper || keeper.id === diskId) return;
+    historyRef.current = retargetDisk(historyRef.current, diskId, keeper.id);
+    setNav(historyRef.current);
+    setDiskId(keeper.id);
+  }, [diskId, shelf, stripDisks]);
 
   const rows = useMemo(() => {
     if (query.trim() && hits) {
@@ -229,6 +401,9 @@ export function Dashboard() {
           extension: hit.kind === "dir" ? "" : (hit.name.split(".").pop() || "").toLowerCase(),
           size: null as number | null,
           allocated: null as number | null,
+          onDisk: null as number | null,
+          compression: null,
+          fileCount: 0,
           mtimeMs: 0,
           diskLabel: hit.label,
           path: hit.path,
@@ -244,8 +419,9 @@ export function Dashboard() {
     sorted.sort((a, b) => {
       if (sortKey === "name") return a.name.localeCompare(b.name, "ru");
       if (sortKey === "mtime") return (b.mtimeMs || 0) - (a.mtimeMs || 0);
-      if (sortKey === "type") return (a.extension || a.kind).localeCompare(b.extension || b.kind) || b.size - a.size || b.fileCount - a.fileCount;
-      return b.size - a.size || b.fileCount - a.fileCount || a.name.localeCompare(b.name, "ru");
+      if (sortKey === "type") return (a.extension || a.kind).localeCompare(b.extension || b.kind) || compareKnownDesc(a.size, b.size) || b.fileCount - a.fileCount;
+      if (sortKey === "ondisk") return compareKnownDesc(a.onDisk, b.onDisk) || compareKnownDesc(a.size, b.size) || a.name.localeCompare(b.name, "ru");
+      return compareKnownDesc(a.size, b.size) || compareKnownDesc(a.onDisk, b.onDisk) || b.fileCount - a.fileCount || a.name.localeCompare(b.name, "ru");
     });
     return sorted.map((entry) => ({
       key: `${entry.diskId}:${entry.relativePath}`,
@@ -254,6 +430,9 @@ export function Dashboard() {
       extension: entry.extension,
       size: entry.size,
       allocated: entry.allocated,
+      onDisk: entry.onDisk,
+      compression: entry.compression,
+      fileCount: entry.fileCount,
       mtimeMs: entry.mtimeMs,
       diskLabel: entry.diskLabel,
       path: entry.displayPath,
@@ -262,28 +441,35 @@ export function Dashboard() {
     }));
   }, [browse, hits, query, libFilter, sortKey]);
 
+  function openCompact(entry: BrowseEntry) {
+    setCompactTarget(entry);
+    setCompactAck(false);
+    setCompactNote(null);
+    setCompactJobId(null);
+  }
+
   function openEntry(entry: BrowseEntry) {
     if (entry.kind !== "dir") {
       setSelected(entry);
       return;
     }
     // Root disk row from roots list has empty relativePath and diskId.
-    void loadBrowse(entry.diskId, entry.relativePath || "");
+    visit(entry.diskId, entry.relativePath || "");
     setTreeOpen((current) => ({ ...current, [entry.diskId]: true }));
   }
 
   function goUp() {
     if (!diskId) return;
     if (!path) {
-      void loadBrowse(null, "");
+      visit(null, "");
       return;
     }
     const parent = path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "";
-    void loadBrowse(diskId, parent);
+    visit(diskId, parent);
   }
 
   function openDisk(disk: DiskView) {
-    void loadBrowse(disk.id, "");
+    visit(disk.id, "");
     setTreeOpen((current) => ({ ...current, [disk.id]: true }));
   }
 
@@ -407,8 +593,87 @@ export function Dashboard() {
     }
   }
 
+  const compactDisk = compactTarget ? stripDisks.find((disk) => disk.id === compactTarget.diskId) ?? null : null;
+  const compactOs = compactDisk && (compactDisk.mountPaths.some((path) => path.startsWith("/")) || compactDisk.lastMountPath.startsWith("/"))
+    ? "darwin" as const
+    : compactDisk && (/^[A-Za-z]:\\/.test(compactDisk.lastMountPath) || compactDisk.mountPaths.some((path) => /^[A-Za-z]:\\/.test(path)))
+      ? "win32" as const
+      : null;
+  const compactBlock = compactTarget
+    ? compactExplanation({
+        kind: compactTarget.kind,
+        online: compactTarget.online,
+        os: compactOs,
+        filesystem: compactDisk?.filesystem || "",
+        displayPath: compactTarget.displayPath,
+      })
+    : null;
+
+  const currentDisk = diskId ? (stripDisks.find((disk) => disk.id === diskId) ?? shelf?.disks.find((disk) => disk.id === diskId) ?? null) : null;
+
+  async function saveAlias(id: string, reset: boolean) {
+    setAliasBusy(true);
+    setAliasError(null);
+    try {
+      await api(`/api/drives/${encodeURIComponent(id)}`, {
+        method: "PATCH",
+        body: JSON.stringify(reset ? { reset: true } : { label: aliasDraft }),
+      });
+      setAliasId(null);
+      await refreshMeta();
+    } catch (error) {
+      setAliasError(error instanceof Error ? error.message : "Не удалось сохранить имя.");
+    } finally {
+      setAliasBusy(false);
+    }
+  }
+
+  async function startRescan(id: string) {
+    setScanBusy(true);
+    setScanNote(null);
+    try {
+      const result = await api<{ message: string }>("/api/drives/rescan", {
+        method: "POST",
+        body: JSON.stringify({ diskId: id }),
+      });
+      setScanNote(result.message);
+      void refreshMeta();
+    } catch (error) {
+      setScanNote(error instanceof Error ? error.message : "Сканирование не запускалось.");
+    } finally {
+      setScanBusy(false);
+    }
+  }
+
+  async function submitCompact() {
+    if (!compactTarget || compactBlock || !compactAck) return;
+    setCompactBusy(true);
+    setCompactNote(null);
+    try {
+      const result = await api<{ id: string; state: string; message: string; error: string | null }>("/api/drives/compact", {
+        method: "POST",
+        body: JSON.stringify({
+          diskId: compactTarget.diskId,
+          path: compactTarget.relativePath,
+          algorithm: compactAlgorithm,
+          confirm: true,
+        }),
+      });
+      if (result.state === "failed") {
+        setCompactNote(result.error || result.message);
+        return;
+      }
+      setCompactJobId(result.id);
+      setCompactNote(result.message);
+    } catch (error) {
+      setCompactNote(error instanceof Error ? error.message : "Сжатие не запускалось.");
+    } finally {
+      setCompactBusy(false);
+    }
+  }
+
   return (
-    <div className="flex h-dvh flex-col bg-background">
+    <div ref={panelRef} className="flex h-dvh flex-col bg-background">
       <header className="flex flex-wrap items-center gap-2 border-b px-3 py-2">
         <div className="flex items-center gap-2">
           <span className="grid size-8 place-items-center rounded-md bg-primary text-xs font-bold text-primary-foreground">С</span>
@@ -464,8 +729,50 @@ export function Dashboard() {
         </div>
       </div>
 
+      <div data-testid="disk-strip" className="flex gap-1 overflow-auto border-b px-2 py-1.5 text-[11px]">
+        {stripDisks.map((disk) => {
+          const system = [disk.volumeName, disk.mountPaths[0] || disk.lastMountPath, disk.volumeUuid].filter(Boolean).join(" · ");
+          if (aliasId === disk.id) {
+            return (
+              <form
+                key={disk.id}
+                className="inline-flex shrink-0 items-center gap-1 rounded-md border border-primary px-1.5 py-1"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  void saveAlias(disk.id, false);
+                }}
+              >
+                <input
+                  aria-label="Псевдоним диска"
+                  className="h-6 w-28 rounded border border-input bg-transparent px-1"
+                  value={aliasDraft}
+                  maxLength={80}
+                  onChange={(event) => setAliasDraft(event.target.value)}
+                />
+                <button type="submit" className="rounded px-1 hover:bg-muted" disabled={aliasBusy}>Ок</button>
+                <button type="button" className="rounded px-1 hover:bg-muted" onClick={() => { setAliasId(null); setAliasError(null); }}>Отмена</button>
+                <button type="button" className="rounded px-1 hover:bg-muted" disabled={aliasBusy} onClick={() => void saveAlias(disk.id, true)}>Сбросить</button>
+                {aliasError ? <span className="text-destructive">{aliasError}</span> : null}
+              </form>
+            );
+          }
+          return (
+            <span key={disk.id} className={cn("inline-flex shrink-0 items-center gap-1 rounded-md border px-1.5 py-1", diskId === disk.id && "border-primary bg-primary/10")}>
+              <button type="button" onClick={() => openDisk(disk)} className="inline-flex items-center gap-1.5" title={system}>
+                <span className={cn("size-1.5 rounded-full", disk.online ? "bg-seed" : "bg-muted-foreground")} />
+                <span className="font-medium">{displayDiskTitle(disk)}</span>
+                <span className="text-muted-foreground">{formatBytes(disk.freeBytes)} / {formatBytes(disk.totalBytes)}</span>
+              </button>
+              <button type="button" className="rounded px-1 text-muted-foreground hover:bg-muted" title={system} onClick={() => { setAliasId(disk.id); setAliasDraft(disk.namedByUser ? disk.label : disk.volumeName || disk.label); setAliasError(null); }}>
+                Имя
+              </button>
+            </span>
+          );
+        })}
+      </div>
+
       <div className="flex min-h-0 flex-1">
-        <aside className="flex w-[220px] shrink-0 flex-col border-r bg-card/20">
+        <aside data-testid="file-tree" className="flex w-[220px] shrink-0 flex-col border-r bg-card/20">
           <div className="border-b px-2 py-1.5 text-[11px] font-semibold tracking-wide text-muted-foreground uppercase">Диски</div>
           <div className="min-h-0 flex-1 overflow-auto p-1">
             {(browse?.roots ? browse.entries : treeDisks).map((entry) => {
@@ -481,7 +788,7 @@ export function Dashboard() {
                     type="button"
                     onClick={() => {
                       setTreeOpen((current) => ({ ...current, [entry.diskId]: true }));
-                      void loadBrowse(entry.diskId, "");
+                      visit(entry.diskId, "");
                     }}
                     className={cn(
                       "flex w-full items-center gap-1 rounded-md px-1.5 py-1 text-left text-xs hover:bg-muted/50",
@@ -491,14 +798,16 @@ export function Dashboard() {
                     <span className="text-muted-foreground">{open && diskActive ? "▾" : "▸"}</span>
                     <span className={cn("size-1.5 rounded-full", entry.online ? "bg-seed" : "bg-muted-foreground")} />
                     <span className="min-w-0 flex-1 truncate font-medium">{entry.name}</span>
-                    <span className="text-[10px] text-muted-foreground">{entry.size ? formatBytes(entry.size) : entry.fileCount ? `${entry.fileCount}` : ""}</span>
+                    <span className="shrink-0 text-[10px] tabular-nums text-muted-foreground" title={entry.sizesReady === false ? "Считаем объём индекса" : entry.fileCount === 0 ? "Индекс ещё не построен" : entry.size == null ? "Размер в снимке неизвестен" : folderHint(entry.size, entry.fileCount, entry.onDisk)}>
+                      {entry.sizesReady === false ? "считаем" : entry.fileCount === 0 ? "нет индекса" : entry.size == null ? "—" : formatBytes(entry.size)}
+                    </span>
                   </button>
                   {open && diskActive
                     ? childDirs.map((child) => (
                         <button
                           key={child.relativePath}
                           type="button"
-                          onClick={() => void loadBrowse(child.diskId, child.relativePath)}
+                          onClick={() => visit(child.diskId, child.relativePath)}
                           className={cn(
                             "flex w-full items-center gap-1 rounded-md py-0.5 pr-1.5 pl-6 text-left text-[11px] hover:bg-muted/50",
                             path === child.relativePath && "bg-muted",
@@ -506,8 +815,8 @@ export function Dashboard() {
                         >
                           <Folder className="size-3 shrink-0 text-amber-400" />
                           <span className="min-w-0 flex-1 truncate">{child.name}</span>
-                          <span className="text-[10px] text-muted-foreground">
-                            {child.size ? formatBytes(child.size) : child.fileCount ? `${child.fileCount}` : ""}
+                          <span className="shrink-0 text-[10px] tabular-nums text-muted-foreground" title={folderHint(child.size, child.fileCount, child.onDisk)}>
+                            {child.size == null ? "—" : formatBytes(child.size)}
                           </span>
                         </button>
                       ))
@@ -520,6 +829,12 @@ export function Dashboard() {
 
         <main className="flex min-w-0 flex-1 flex-col">
           <div className="flex items-center gap-1 border-b px-2 py-1.5">
+            <Button type="button" variant="ghost" size="sm" className="h-7 px-2" onClick={() => travel("back")} disabled={!canGoBack(nav)} title="Назад по папкам">
+              Назад
+            </Button>
+            <Button type="button" variant="ghost" size="sm" className="h-7 px-2" onClick={() => travel("forward")} disabled={!canGoForward(nav)} title="Вперёд по папкам">
+              Вперёд
+            </Button>
             <Button type="button" variant="ghost" size="sm" className="h-7 px-2" onClick={goUp} disabled={!diskId}>
               <ChevronLeft className="size-3.5" />
               Вверх
@@ -530,7 +845,7 @@ export function Dashboard() {
                   key={`${crumb.diskId}:${crumb.path}:${index}`}
                   type="button"
                   className="inline-flex items-center gap-0.5 rounded px-1 py-0.5 hover:bg-muted"
-                  onClick={() => void loadBrowse(crumb.diskId, crumb.path)}
+                  onClick={() => visit(crumb.diskId, crumb.path)}
                 >
                   {index > 0 ? <ChevronRight className="size-3 text-muted-foreground" /> : null}
                   <span className={cn(index === crumbs.length - 1 && "font-semibold")}>{crumb.label}</span>
@@ -540,6 +855,12 @@ export function Dashboard() {
             <span className="text-[11px] text-muted-foreground">
               {query.trim() ? (searching ? "поиск…" : `${rows.length}`) : browse ? `${browse.total}` : ""}
             </span>
+            {currentDisk && needsManualScan(currentDisk) ? (
+              <Button type="button" variant="outline" size="sm" className="h-7 px-2" disabled={scanBusy} title={currentDisk.scan.message} onClick={() => void startRescan(currentDisk.id)}>
+                {scanBusy ? "Сканирование…" : "Сканировать"}
+              </Button>
+            ) : null}
+            {scanNote ? <span className="max-w-[240px] truncate text-[11px] text-muted-foreground" title={scanNote}>{scanNote}</span> : null}
             <select
               aria-label="Сортировка"
               className="h-7 rounded border border-input bg-transparent px-1 text-[11px]"
@@ -547,6 +868,7 @@ export function Dashboard() {
               onChange={(event) => setSortKey(event.target.value as SortKey)}
             >
               <option value="size">Размер</option>
+              <option value="ondisk">На диске</option>
               <option value="name">Имя</option>
               <option value="type">Тип</option>
               <option value="mtime">Изменён</option>
@@ -560,8 +882,8 @@ export function Dashboard() {
                 <tr className="border-b">
                   <th className="px-2 py-1.5 font-medium">Имя</th>
                   <th className="w-16 px-2 py-1.5 font-medium">Тип</th>
-                  <th className="w-24 px-2 py-1.5 text-right font-medium">Размер</th>
-                  <th className="w-24 px-2 py-1.5 text-right font-medium">Выделено</th>
+                  <th className="w-36 px-2 py-1.5 text-right font-medium">Размер</th>
+                  <th className="w-40 px-2 py-1.5 text-right font-medium">На диске</th>
                   <th className="w-32 px-2 py-1.5 font-medium">Изменён</th>
                   <th className="px-2 py-1.5 font-medium">Путь</th>
                 </tr>
@@ -576,7 +898,7 @@ export function Dashboard() {
                 ) : rows.length === 0 ? (
                   <tr>
                     <td colSpan={6} className="px-3 py-8 text-muted-foreground">
-                      {query.trim() ? "Ничего не найдено." : "Папка пуста в снимке каталога."}
+                      {query.trim() ? "Ничего не найдено." : currentDisk?.scan.status === "error" ? currentDisk.scan.message : currentDisk && currentDisk.fileCount === 0 ? "Индекса ещё нет. Сканирование само не запускается." : "Папка пуста в снимке каталога."}
                     </td>
                   </tr>
                 ) : (
@@ -609,16 +931,23 @@ export function Dashboard() {
                           </button>
                         </td>
                         <td className="px-2 py-1 text-muted-foreground">{row.kind === "dir" ? "папка" : row.extension || "файл"}</td>
-                        <td className="px-2 py-1 text-right tabular-nums">
-                          {row.size == null
-                            ? "—"
-                            : row.size > 0
-                              ? formatBytes(row.size)
-                              : row.kind === "dir" && "fileCount" in row.raw && (row.raw as BrowseEntry).fileCount > 0
-                                ? <span title="В индексе размер 0"><span className="text-muted-foreground">{(row.raw as BrowseEntry).fileCount.toLocaleString("ru-RU")} ф.</span></span>
-                                : formatBytes(0)}
+                        <td
+                          className="px-2 py-1 text-right whitespace-nowrap tabular-nums"
+                          title={row.kind === "dir" && row.size != null ? folderHint(row.size, row.fileCount, row.onDisk) : undefined}
+                        >
+                          {row.size == null ? "—" : formatSizeShare(row.size, query.trim() ? 0 : browse?.scopeBytes ?? 0)}
                         </td>
-                        <td className="px-2 py-1 text-right tabular-nums text-muted-foreground">—</td>
+                        <td className="px-2 py-1 text-right">
+                          <OnDiskCell
+                            size={row.size}
+                            onDisk={row.onDisk}
+                            compression={row.compression}
+                            canCompress={row.kind === "dir" && "relativePath" in row.raw}
+                            onCompress={() => {
+                              if ("diskId" in row.raw && row.kind === "dir") openCompact(row.raw as BrowseEntry);
+                            }}
+                          />
+                        </td>
                         <td className="px-2 py-1 text-muted-foreground">{formatMtime(row.mtimeMs)}</td>
                         <td className="max-w-[280px] truncate px-2 py-1 font-mono text-[10px] text-muted-foreground" title={row.path}>
                           {row.path}
@@ -667,12 +996,13 @@ export function Dashboard() {
               <div className="font-medium">{selected.name}</div>
               <div className="mt-1 break-all font-mono text-[10px] text-muted-foreground">{selected.displayPath}</div>
               {"size" in selected ? (
-                <div className="mt-1 text-muted-foreground">
-                  {selected.size > 0
-                    ? formatBytes(selected.size)
-                    : selected.kind === "file"
-                      ? "Размер в индексе неизвестен — возьмём с диска"
-                      : formatBytes(0)}
+                <div className="mt-1 space-y-0.5 text-muted-foreground">
+                  <div>Размер {selected.size == null ? "—" : formatBytes(selected.size)}</div>
+                  <div>{selected.onDisk == null ? "На диске неизвестно" : `На диске ${formatBytes(selected.onDisk)}`}</div>
+                  {savingsOf(selected.size, selected.onDisk) ? (
+                    <div>Экономия {formatBytes(savingsOf(selected.size, selected.onDisk)!.bytes)} · {formatPercent(savingsOf(selected.size, selected.onDisk)!.ratio)}</div>
+                  ) : null}
+                  {selected.kind === "dir" ? <div>{selected.fileCount.toLocaleString("ru-RU")} файлов</div> : null}
                 </div>
               ) : null}
               {selectedFile ? (
@@ -704,27 +1034,50 @@ export function Dashboard() {
         </aside>
       </div>
 
-      <footer className="flex gap-1 overflow-auto border-t px-2 py-1 text-[11px]">
-        {stripDisks.map((disk) => (
-          <button
-            key={disk.id}
-            type="button"
-            onClick={() => openDisk(disk)}
-            className={cn(
-              "inline-flex shrink-0 items-center gap-1.5 rounded-md border px-2 py-1 hover:bg-muted/40",
-              diskId === disk.id && "border-primary bg-primary/10",
-            )}
-            title={disk.mountPaths[0] || disk.lastMountPath}
-          >
-            <span className={cn("size-1.5 rounded-full", disk.online ? "bg-seed" : "bg-muted-foreground")} />
-            <span className="font-medium">{displayDiskTitle(disk)}</span>
-            <span className="text-muted-foreground">
-              {formatBytes(disk.freeBytes)} / {formatBytes(disk.totalBytes)}
-            </span>
-          </button>
-        ))}
-      </footer>
-
+      {compactTarget ? (
+        <div className="fixed inset-0 z-50 grid place-items-center bg-black/60 p-4" role="dialog" aria-modal="true" aria-label="Сжать папку">
+          <div className="w-full max-w-md rounded-lg border bg-background shadow-xl">
+            <div className="border-b px-3 py-2">
+              <div className="text-sm font-semibold">Сжать</div>
+              <div className="mt-1 break-all font-mono text-[10px] text-muted-foreground">{compactTarget.displayPath}</div>
+            </div>
+            <div className="space-y-3 p-3 text-xs">
+              {compactBlock ? (
+                <p>{compactBlock}</p>
+              ) : (
+                <>
+                  <p>Windows compact.exe, алгоритм WOF. Папка и режим ниже. Системные каталоги сервер отклонит.</p>
+                  <label className="block space-y-1">
+                    <span className="text-muted-foreground">Алгоритм</span>
+                    <select
+                      className="h-8 w-full rounded border border-input bg-transparent px-2"
+                      value={compactAlgorithm}
+                      onChange={(event) => setCompactAlgorithm(event.target.value as (typeof COMPACT_ALGORITHMS)[number])}
+                    >
+                      {COMPACT_ALGORITHMS.map((item) => (
+                        <option key={item} value={item}>{item}</option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="flex items-start gap-2">
+                    <input type="checkbox" className="mt-0.5" checked={compactAck} onChange={(event) => setCompactAck(event.target.checked)} />
+                    <span>Сжать именно «{compactTarget.name}» алгоритмом {compactAlgorithm}. Файлы на диске изменятся.</span>
+                  </label>
+                </>
+              )}
+              {compactNote ? <p className="text-muted-foreground">{compactNote}</p> : null}
+            </div>
+            <div className="flex justify-end gap-2 border-t px-3 py-2">
+              <Button type="button" variant="outline" size="sm" onClick={() => setCompactTarget(null)}>Закрыть</Button>
+              {compactBlock ? null : (
+                <Button type="button" size="sm" disabled={!compactAck || compactBusy || Boolean(compactJobId)} onClick={() => void submitCompact()}>
+                  {compactBusy ? "Запуск…" : "Сжать эту папку"}
+                </Button>
+              )}
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       {copyOpen ? (
         <div className="fixed inset-0 z-50 grid place-items-center bg-black/60 p-4" role="dialog" aria-modal="true" aria-label="Куда копировать">

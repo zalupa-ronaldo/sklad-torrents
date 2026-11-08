@@ -1,6 +1,8 @@
+import { listGames, publicGame } from "@/lib/games/library";
 import { getJobStore } from "@/lib/jobs/engine";
 import { enqueueFromBody, jobGuard, jobJson, listQuery, publicJob, readJson } from "@/lib/jobs/http";
 import { ensureJobWorkers } from "@/lib/jobs/runtime";
+import { dataDir } from "@/lib/qbittorrent/store";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -9,7 +11,8 @@ export async function GET(request: Request) {
   return jobGuard(async () => {
     ensureJobWorkers();
     const page = await getJobStore().list(listQuery(new URL(request.url)));
-    return jobJson({ ...page, jobs: page.jobs.map(publicJob) });
+    const games = (await listGames(dataDir())).map(publicGame);
+    return jobJson({ ...page, jobs: page.jobs.map(publicJob), games });
   });
 }
 

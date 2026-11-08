@@ -10,8 +10,12 @@ export function connectHint(label: string, isOnline: boolean): string | null {
 export function searchDisks(disks: readonly DiskRecord[], query: string, limit = 100): SearchHit[] {
   const needle = query.trim().toLowerCase();
   if (!needle) return [];
-  const categoryNeedles: Record<string,string[]> = { фильм:["media"], фильмы:["media"], кино:["media"], сериал:["series"], сериалы:["series"], игра:["game"], игры:["game"], установщик:["installer"], установщики:["installer"], музыка:["music"], софт:["software"], программы:["software"], документы:["documents"], торрент:["torrent"] };
-  const categoryFilters = categoryNeedles[needle] ?? [];
+  const categoryNeedles = new Map<string, string[]>([
+    ["фильм", ["media"]], ["фильмы", ["media"]], ["кино", ["media"]], ["сериал", ["series"]], ["сериалы", ["series"]],
+    ["игра", ["game"]], ["игры", ["game"]], ["установщик", ["installer"]], ["установщики", ["installer"]],
+    ["музыка", ["music"]], ["софт", ["software"]], ["программы", ["software"]], ["документы", ["documents"]], ["торрент", ["torrent"]],
+  ]);
+  const categoryFilters = categoryNeedles.get(needle) ?? [];
   const hits: SearchHit[] = [];
   for (const disk of disks) {
     const isOnline = online(disk);

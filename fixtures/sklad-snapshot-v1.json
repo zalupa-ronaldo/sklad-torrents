@@ -1,0 +1,11 @@
+{
+  "format": "sklad-snapshot-v1",
+  "serial": "FIXTURE-SNAP",
+  "volumeUuid": "11111111-2222-4333-8444-555555555555",
+  "label": "Fixture",
+  "letter": "D",
+  "files": [
+    { "relativePath": "Keep", "name": "Keep", "kind": "dir", "size": 0, "mtimeMs": 0 },
+    { "relativePath": "Keep/a.txt", "name": "a.txt", "kind": "file", "size": 4, "mtimeMs": 0 }
+  ]
+}

@@ -22,7 +22,7 @@ function disk(partial: Partial<DiskRecord> & { files: IndexedFile[] }): DiskReco
     pathStyle: "win32",
     lastMountPath: partial.lastMountPath || "S:\\",
     priorMountPath: "",
-    connectedHosts: [],
+    connectedHosts: partial.connectedHosts ?? [],
     duplicateMounts: false,
     possibleClone: false,
     cloneOfIds: [],
@@ -54,21 +54,82 @@ describe("browse aggregates", () => {
     expect(page.entries[0]?.name).toBe("Hades");
     expect(page.entries[0]?.size).toBe(200);
     expect(page.entries.map((e) => e.name)).toContain("RimWorld");
+    expect(page.scopeBytes).toBe(350);
   });
 
-  it("exposes disk roots including C: and skips empty Z:", () => {
+  it("sorts folders by summed bytes, not by how many files they contain", () => {
+    const mixed: IndexedFile[] = [
+      { relativePath: "small/a.bin", name: "a.bin", kind: "file", size: 10, mtimeMs: 1, sidecarCategory: null, categories: [] },
+      { relativePath: "small/b.bin", name: "b.bin", kind: "file", size: 10, mtimeMs: 1, sidecarCategory: null, categories: [] },
+      { relativePath: "small/c.bin", name: "c.bin", kind: "file", size: 10, mtimeMs: 1, sidecarCategory: null, categories: [] },
+      { relativePath: "big/movie.mkv", name: "movie.mkv", kind: "file", size: 5_000, allocated: 8_192, mtimeMs: 1, sidecarCategory: null, categories: [] },
+    ];
+    const page = browseDisk([disk({ files: mixed })], "disk-s", "");
+    expect(page.entries.map((entry) => entry.name)).toEqual(["big", "small"]);
+    expect(page.entries[0]?.size).toBe(5_000);
+    expect(page.entries[0]?.allocated).toBe(8_192);
+    expect(page.entries[0]?.fileCount).toBe(1);
+    expect(page.entries[1]?.size).toBe(30);
+    expect(page.entries[1]?.fileCount).toBe(3);
+    expect(page.scopeBytes).toBe(5_030);
+  });
+
+  it("does not invent folder savings when one file has no measured on-disk size", () => {
+    const mixed: IndexedFile[] = [
+      { relativePath: "Games/a.bin", name: "a.bin", kind: "file", size: 1_000, onDisk: 400, compression: "wof", mtimeMs: 1, sidecarCategory: null, categories: [] },
+      { relativePath: "Games/b.bin", name: "b.bin", kind: "file", size: 1_000, mtimeMs: 1, sidecarCategory: null, categories: [] },
+    ];
+    const page = browseDisk([disk({ files: mixed })], "disk-s", "");
+    expect(page.entries[0]?.size).toBe(2_000);
+    expect(page.entries[0]?.onDisk).toBeNull();
+    const known: IndexedFile[] = [
+      { relativePath: "Games/a.bin", name: "a.bin", kind: "file", size: 1_000, onDisk: 400, compression: "wof", mtimeMs: 1, sidecarCategory: null, categories: [] },
+      { relativePath: "Games/b.bin", name: "b.bin", kind: "file", size: 1_000, onDisk: 1_000, mtimeMs: 1, sidecarCategory: null, categories: [] },
+    ];
+    const summed = browseDisk([disk({ indexRevision: "known", files: known })], "disk-s", "");
+    expect(summed.entries[0]?.onDisk).toBe(1_400);
+    expect(summed.entries[0]?.compression).toBe("wof");
+  });
+
+  it("shows a connected empty disk, including Z:, and skips an offline empty placeholder", () => {
     const c = disk({
       id: "disk-c",
       label: "System",
       lastMountPath: "C:\\",
       files: [{ relativePath: "Users/a.txt", name: "a.txt", kind: "file", size: 1, mtimeMs: 1, sidecarCategory: null, categories: [] }],
     });
-    const z = disk({ id: "disk-z", label: "Data", lastMountPath: "Z:\\", files: [] });
-    const roots = browseRoots([c, disk({ files }), z]);
+    const z = disk({
+      id: "disk-z",
+      label: "Data",
+      lastMountPath: "Z:\\",
+      files: [],
+      connectedHosts: [{ id: "windows-pc", name: "Windows PC", os: "win32", elevated: true, mountPaths: ["Z:\\"] }],
+    });
+    const offline = disk({ id: "disk-off", label: "Spare", lastMountPath: "E:\\", files: [] });
+    const roots = browseRoots([c, disk({ files }), z, offline]);
     const names = roots.entries.map((e) => e.name);
     expect(names).toContain("C:");
     expect(names).toContain("S:");
-    expect(names.some((n) => /^Z:/i.test(n))).toBe(false);
+    expect(names).toContain("Z:");
+    expect(names).not.toContain("E:");
+    expect(browseDisk([z], "disk-z", "").entries).toEqual([]);
+  });
+
+  it("does not show a pending snapshot root as a finished zero", () => {
+    const data = disk({
+      id: "disk-data",
+      label: "Data",
+      lastMountPath: "/System/Volumes/Data",
+      files: [],
+      connectedHosts: [{ id: "mac-mini", name: "Mac mini", os: "darwin", elevated: false, mountPaths: ["/System/Volumes/Data"] }],
+    });
+    data.reportedRecords = 1_540_488;
+    data.pendingRevision = "snap-data";
+    data.totalBytes = 250_000_000_000;
+    const root = browseRoots([data]).entries.find((entry) => entry.diskId === "disk-data");
+    expect(root?.sizesReady).toBe(false);
+    expect(root?.size).toBeNull();
+    expect(root?.fileCount).toBe(1_540_488);
   });
 
   it("is case-sensitive on path segments when browsing", () => {
@@ -98,5 +159,19 @@ describe("browse aggregates", () => {
     expect(first.nextCursor).toBe(10);
     const second = browseDisk([disk({ files: many })], "disk-s", "", 10, 10);
     expect(second.entries[0]?.name).not.toBe(first.entries[0]?.name);
+  });
+
+  it("shows an unknown logical size as empty of a number and keeps a real zero", () => {
+    const page = browseDisk([disk({
+      files: [
+        { relativePath: "Archives/empty.zip", name: "empty.zip", kind: "file", size: 0, mtimeMs: 1, sidecarCategory: null, categories: [] },
+        { relativePath: "Archives/lost.iso", name: "lost.iso", kind: "file", size: null, mtimeMs: 1, sidecarCategory: null, categories: [] },
+      ],
+    })], "disk-s", "Archives");
+    const empty = page.entries.find((entry) => entry.name === "empty.zip");
+    const lost = page.entries.find((entry) => entry.name === "lost.iso");
+    expect(empty?.size).toBe(0);
+    expect(lost?.size).toBeNull();
+    expect(page.entries.find((entry) => entry.name === "Archives")).toBeUndefined();
   });
 });

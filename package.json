@@ -8,6 +8,7 @@
     "start": "next start --hostname 0.0.0.0 --port 4317",
     "lint": "eslint",
     "test": "vitest run",
+    "sklad": "node --import ./agents/register.mjs agents/sklad.mts",
     "pc-agent": "node agents/pc-agent/server.mjs"
   },
   "dependencies": {
