@@ -2,7 +2,10 @@ import { describe, expect, it } from "vitest";
 
 import {
   assertEncodePaths,
+  advertisedHardwareBlock,
+  containerFromPath,
   encodeArgv,
+  formatMatchesContainer,
   mediaFromProbe,
   pathInside,
   requirementBlock,
@@ -46,11 +49,16 @@ describe("encode plan", () => {
       source: "/tmp/in clip.mp4",
       output: "/tmp/out.mp4",
       codec: "av1",
+      container: "mp4",
       sourceFacts: { ...quiet(), subtitles: 1 },
       encoders: capability.encoders,
     });
     expect(argv).toContain("svt_av1");
-    expect(argv.join("\n")).not.toMatch(/x26[45]|hevc|h264/i);
+    expect(argv).toContain("av_mp4");
+    expect(argv).toContain("--all-audio");
+    expect(argv).toContain("copy");
+    expect(argv).toContain("-s");
+    expect(argv.join("\n")).not.toMatch(/x26[45]|hevc|h264|vce_|av_mkv/i);
     expect(argv[0]).toBe("/usr/bin/HandBrakeCLI");
     expect(argv).toContain("/tmp/in clip.mp4");
   });
@@ -59,6 +67,7 @@ describe("encode plan", () => {
     const source = { ...quiet(), duration: 1, audio: 1 };
     const bad = verifyMedia({
       codec: "av1",
+      container: "mp4",
       source,
       output: { ...quiet(), format: "mp4", duration: 1, videoCodec: "h264", audio: 1 },
       decodeOk: true,
@@ -68,19 +77,40 @@ describe("encode plan", () => {
     expect(bad.presetAccepted).toBe(false);
     const good = verifyMedia({
       codec: "av1",
+      container: "mp4",
       source,
-      output: { ...quiet(), format: "mov,mp4", duration: 1.02, videoCodec: "av1", audio: 1 },
+      output: { ...quiet(), format: "mov,mp4,m4a,3gp,3g2,mj2", duration: 1.02, videoCodec: "av1", audio: 1 },
       decodeOk: true,
       exitCode: 0,
     });
     expect(good.verified).toBe(true);
     const unread = verifyMedia({
       codec: "av1",
+      container: "mp4",
       source,
       output: { ...quiet(), format: "mp4", duration: 1, videoCodec: "av1", audio: 0 },
       decodeOk: false,
       exitCode: 0,
     });
+    const wrongContainer = verifyMedia({
+      codec: "av1",
+      container: "mkv",
+      source,
+      output: { ...quiet(), format: "mov,mp4,m4a,3gp,3g2,mj2", duration: 1, videoCodec: "av1", audio: 1 },
+      decodeOk: true,
+      exitCode: 0,
+    });
+    expect(wrongContainer.verified).toBe(false);
+    expect(wrongContainer.containerOk).toBe(false);
+    const mkv = verifyMedia({
+      codec: "av1",
+      container: "mkv",
+      source,
+      output: { ...quiet(), format: "matroska,webm", duration: 1, videoCodec: "av1", audio: 1 },
+      decodeOk: true,
+      exitCode: 0,
+    });
+    expect(mkv.verified).toBe(true);
     expect(unread.verified).toBe(false);
   });
 
@@ -103,6 +133,23 @@ describe("encode plan", () => {
     expect(win.advertisedHardwareAv1).toEqual(["vce_av1", "vce_av1_10bit"]);
     expect(win.hardwareAv1).toBe(false);
     expect(win.encoders).not.toContain("amf_av1");
+    expect(advertisedHardwareBlock(win.encoders)).toMatch(/3221225477/);
+    expect(advertisedHardwareBlock(win.encoders)).toMatch(/encavcodecInit/);
+    expect(advertisedHardwareBlock(mac.encoders)).toBeNull();
+    const mkvArgv = encodeArgv({
+      binary: "/usr/bin/HandBrakeCLI",
+      source: "/tmp/in.mp4",
+      output: "/tmp/out.mkv",
+      codec: "av1",
+      container: containerFromPath("/tmp/out.mkv")!,
+      sourceFacts: quiet(),
+      encoders: capability.encoders,
+    });
+    expect(mkvArgv).toContain("av_mkv");
+    expect(mkvArgv).not.toContain("av_mp4");
+    expect(mkvArgv).toContain("--all-audio");
+    expect(formatMatchesContainer("mov,mp4,m4a,3gp,3g2,mj2", "mkv")).toBe(false);
+    expect(containerFromPath("/tmp/out.avi")).toBeNull();
   });
 
   it("reads HDR from the probe instead of assuming it is absent", () => {

@@ -3,11 +3,14 @@ import { spawn } from "node:child_process";
 import { buildCompactArgv, DEFAULT_COMPACT_EXE } from "@/addons/media-games/compact";
 import { systemCompactReason } from "@/addons/drives/compact-target";
 import type { CompactAlgorithm } from "@/addons/media-games/types";
+import { listOwnedFiles, measureWindowsRoot } from "@/lib/games/compact-measure";
 import { assertEncodePaths } from "@/lib/transcode/encode-plan";
 
 export interface CompactMetrics {
   allocated: number | null;
   wof: number | null;
+  logical?: number | null;
+  files?: number;
 }
 
 export interface CompactRun {
@@ -15,8 +18,9 @@ export interface CompactRun {
   executed: boolean;
   /** True only after a Windows NTFS run with measured allocated or WOF bytes. */
   compressed: boolean;
-  /** This cloud run has not compacted a physical NTFS volume. */
-  ntfsSmoke: false;
+  /** True only when this Windows process measured a smaller owned root. */
+  ntfsSmoke: boolean;
+  logical: number | null;
   /** Exit 0 and known metrics would allow ready. Still not a physical smoke result. */
   contractReady: boolean;
   reason: string;
@@ -54,6 +58,7 @@ export async function executeCompact(input: {
     contractReady: false,
     reason,
     argv,
+    logical: null,
     allocated: null,
     wof: null,
     exitCode: null,
@@ -68,6 +73,12 @@ export async function executeCompact(input: {
     return none("compact.exe только на NTFS Windows. Здесь он не запускался и сжатие не засчитано.");
   }
   if (input.role !== "game-pool" && input.role !== "cold-archive") return none("Этот том не пул и не холодный архив. Сжатие не запускается.");
+  const native = process.platform === "win32" && input.os === "win32" && !input.measure && !input.spawnImpl;
+  if (native) {
+    const owned = await listOwnedFiles(input.root);
+    if (!owned.ok) return none(owned.reason);
+    if (owned.files.length === 0) return none("В корне нет файлов. Сжатие не запускается.");
+  }
   const banned = systemCompactReason(input.root);
   if (banned) return none(banned);
   let argv: string[];
@@ -91,8 +102,23 @@ export async function executeCompact(input: {
   if (outcome.cancelled) return { ...none("Сжатие отменено. Папка не помечена сжатой.", argv), executed: true, argv, exitCode: outcome.code };
   if (outcome.timedOut) return { ...none("Сжатие превысило время. Папка не помечена сжатой.", argv), executed: true, argv, exitCode: outcome.code };
   if (outcome.code !== 0) return { ...none(`compact.exe завершился с кодом ${outcome.code ?? "нет"}. Это не сжатие.`, argv), executed: true, argv, exitCode: outcome.code };
-  const metrics = input.measure ? await input.measure() : { allocated: null, wof: null };
-  const known = metrics.allocated != null || metrics.wof != null;
+  if (native) {
+    const measured = await measureWindowsRoot(input.root);
+    return {
+      executed: true,
+      compressed: measured.compressed,
+      ntfsSmoke: measured.compressed,
+      contractReady: measured.compressed,
+      reason: measured.reason,
+      argv,
+      logical: measured.logical,
+      allocated: measured.allocated,
+      wof: measured.wof,
+      exitCode: 0,
+    };
+  }
+  const metrics = input.measure ? await input.measure() : { allocated: null, wof: null, logical: null };
+  const known = metrics.allocated != null && metrics.wof != null;
   if (!known) {
     return {
       executed: true,
@@ -101,21 +127,20 @@ export async function executeCompact(input: {
       contractReady: false,
       reason: "После compact.exe allocated и WOF неизвестны. Неизвестный размер не записывается как 0, и сжатие не засчитано.",
       argv,
+      logical: metrics.logical ?? null,
       allocated: null,
       wof: null,
       exitCode: 0,
     };
   }
-  const injected = Boolean(input.measure);
   return {
     executed: true,
-    compressed: !injected,
+    compressed: false,
     ntfsSmoke: false,
     contractReady: true,
-    reason: injected
-      ? "Контракт процесса выполнен на подставных метриках. Физический NTFS не проверялся, сжатие диска не засчитано."
-      : "compact.exe завершился и метрики прочитаны. Физический прогон этим агентом не заявляется.",
+    reason: "Контракт процесса выполнен на подставных метриках. Физический NTFS не проверялся, сжатие диска не засчитано.",
     argv,
+    logical: metrics.logical ?? null,
     allocated: metrics.allocated,
     wof: metrics.wof,
     exitCode: 0,
@@ -124,7 +149,7 @@ export async function executeCompact(input: {
 
 /** Ready only when compact.exe itself reported a measured result. A stand-in process does not. */
 export function compactAllowsLaunch(result: CompactRun): boolean {
-  return result.compressed === true && result.exitCode === 0 && (result.allocated != null || result.wof != null);
+  return result.compressed === true && result.exitCode === 0 && result.allocated != null && result.wof != null && (result.logical == null || result.allocated < result.logical);
 }
 
 function spawnCompact(bin: string, args: string[], cwd: string): Promise<CompactSpawnResult> {

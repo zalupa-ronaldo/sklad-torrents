@@ -146,6 +146,39 @@ export function requirementBlock(source: MediaFacts, capability: HandBrakeCapabi
   return null;
 }
 
+/** Observed on the Windows 1.11.1 smoke. The log does not name an AMF error code or a driver. */
+export const VCE_AV1_SMOKE = {
+  code: 3221225477,
+  geometry: "160x120",
+  quality: 30,
+  mux: "mkv",
+} as const;
+
+export function advertisedHardwareBlock(encoders: readonly string[]): string | null {
+  const names = encoders.filter((name) => (ADVERTISED_VCE_AV1 as readonly string[]).includes(name));
+  if (names.length === 0) return null;
+  return `В справке есть ${names.join(", ")}. Это не рабочий прогон. Прямой vce_av1 HandBrake 1.11.1 на ролике ${VCE_AV1_SMOKE.geometry}, CQ ${VCE_AV1_SMOKE.quality}, mux ${VCE_AV1_SMOKE.mux} завершился кодом ${VCE_AV1_SMOKE.code} на encavcodecInit: AV1 (AMD VCE). stdout пустой, исходник не изменился, HEVC и svt_av1 не подставлялись. Причина AMF этим логом не установлена. Автоповтор выключен.`;
+}
+
+export type OutputContainer = "mp4" | "mkv";
+
+export function containerFromPath(file: string): OutputContainer | null {
+  const ext = path.extname(file).toLowerCase();
+  if (ext === ".mp4" || ext === ".m4v") return "mp4";
+  if (ext === ".mkv") return "mkv";
+  return null;
+}
+
+export function handbrakeMux(container: OutputContainer): "av_mp4" | "av_mkv" {
+  return container === "mkv" ? "av_mkv" : "av_mp4";
+}
+
+export function formatMatchesContainer(formatName: string, container: OutputContainer): boolean {
+  const parts = formatName.toLowerCase().split(",").map((part) => part.trim());
+  if (container === "mkv") return parts.some((part) => part === "matroska" || part === "mkv");
+  return parts.some((part) => part === "mp4" || part === "mov" || part === "m4v");
+}
+
 export function videoEncoder(codec: EncodeCodec, hdr: boolean, encoders: readonly string[]): string | null {
   if (codec === "av1") {
     if (hdr) return encoders.includes("svt_av1_10bit") ? "svt_av1_10bit" : null;
@@ -164,6 +197,7 @@ export function encodeArgv(input: {
   source: string;
   output: string;
   codec: EncodeCodec;
+  container: OutputContainer;
   sourceFacts: MediaFacts;
   encoders: readonly string[];
 }): string[] {
@@ -172,6 +206,7 @@ export function encodeArgv(input: {
   if (input.codec === "av1" && !encoder.startsWith("svt_av1")) {
     throw new Error("AV1 не подменяется другим кодеком.");
   }
+  if (/^vce_/.test(encoder)) throw new Error(advertisedHardwareBlock([encoder]) || "Аппаратный кодировщик VCE автоматически не запускается.");
   const quality = String(CONSERVATIVE_PRESET.quality[input.codec]);
   const args = [
     input.binary,
@@ -187,7 +222,7 @@ export function encodeArgv(input: {
     "-q",
     quality,
     "-f",
-    "av_mp4",
+    handbrakeMux(input.container),
     "--all-audio",
     "-E",
     "copy",
@@ -220,6 +255,7 @@ export function codecFamily(name: string | null): EncodeCodec | null {
 
 export function verifyMedia(input: {
   codec: EncodeCodec;
+  container: OutputContainer;
   source: MediaFacts;
   output: MediaFacts;
   decodeOk: boolean;
@@ -232,7 +268,7 @@ export function verifyMedia(input: {
   presetAccepted: boolean;
   verified: boolean;
 } {
-  const containerOk = /mp4|mov|matroska|mkv/i.test(input.output.format);
+  const containerOk = formatMatchesContainer(input.output.format, input.container);
   const durationOk = durationClose(input.source.duration, input.output.duration);
   const tracksOk = input.output.audio >= input.source.audio && input.output.subtitles >= input.source.subtitles;
   const presetAccepted = input.exitCode === 0 && codecFamily(input.output.videoCodec) === input.codec && containerOk && input.decodeOk && durationOk && tracksOk;

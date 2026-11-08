@@ -5,6 +5,7 @@ import path from "node:path";
 import { pipeline } from "node:stream/promises";
 
 import { createJobStore } from "@/lib/jobs/engine";
+import { localJobHost } from "@/lib/jobs/local-host";
 import type { Job } from "@/lib/jobs/model";
 import { coldGameBlocksDelete, listGames } from "@/lib/games/library";
 import {
@@ -122,11 +123,17 @@ export async function reconcileProtocol(
       notes.push({ hash, action: "blocked", reason: "Источник, назначение или корень правила закрыты." });
       continue;
     }
+    const host = localJobHost();
+    if (!host) {
+      blocked += 1;
+      notes.push({ hash, action: "blocked", reason: "Платформа процесса не Mac, Windows и не Linux. Задание не ставится." });
+      continue;
+    }
     const store = createJobStore(directory);
     const queued = await store.enqueue(
       {
         kind: "copy",
-        host: "linux-local",
+        host,
         source,
         destination,
         diskId: `torrent:${hash}`.slice(0, 80),
@@ -146,8 +153,10 @@ export async function reconcileProtocol(
 }
 
 export async function runTorrentOnce(directory = dataDir(), now = Math.floor(Date.now() / 1000)): Promise<{ processed: boolean; verified?: boolean; deleted?: boolean; eligible?: boolean }> {
+  const host = localJobHost();
+  if (!host) return { processed: false };
   const store = createJobStore(directory);
-  const job = await store.claimNext("linux-local", (item) => item.kind === "copy" && item.payload.diskId.startsWith("torrent:"));
+  const job = await store.claimNext(host, (item) => item.kind === "copy" && item.payload.diskId.startsWith("torrent:"));
   if (!job?.workerToken) return { processed: false };
   try {
     const outcome = await verifyTorrentJob(directory, job, now);

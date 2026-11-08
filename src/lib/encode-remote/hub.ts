@@ -7,16 +7,19 @@ import { pipeline } from "node:stream/promises";
 import { spawn } from "node:child_process";
 
 import { createJobStore } from "@/lib/jobs/engine";
+import { localJobHost } from "@/lib/jobs/local-host";
 import type { Job } from "@/lib/jobs/model";
 import { dataDir } from "@/lib/qbittorrent/store";
 import { assignEncodeJobs, type EncodeCodec } from "@/lib/transcode/assign";
-import { assertEncodePaths } from "@/lib/transcode/encode-plan";
+import { resolveTool } from "@/lib/transcode/binaries";
+import { assertEncodePaths, containerFromPath, formatMatchesContainer } from "@/lib/transcode/encode-plan";
 
 const CHUNK = 64 * 1024;
 
 interface WorkerInfo {
   id: string;
   role: "pc" | "mac";
+  platform: "darwin" | "win32" | "linux";
   encoders: string[];
   slots: number;
   freeBytes: number;
@@ -126,7 +129,18 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: { token: s
       send(res, 200, { job: null, reason: error instanceof Error ? error.message : "Путь закрыт." });
       return;
     }
-    const claim = await store.claim(open.id, "linux-local");
+    const host = localJobHost();
+    if (!host) {
+      send(res, 200, { job: null, reason: "Платформа координатора не Mac, Windows и не Linux." });
+      return;
+    }
+    const container = containerFromPath(open.payload.destination);
+    if (!container) {
+      await store.cancel(open.id, "Назначение должно заканчиваться на .mp4 или .mkv.");
+      send(res, 200, { job: null, reason: "Контейнер назначения не .mp4 и не .mkv." });
+      return;
+    }
+    const claim = await store.claim(open.id, host);
     if (!claim.ok || !claim.job.workerToken) {
       send(res, 200, { job: null });
       return;
@@ -153,7 +167,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: { token: s
     ctx.leases.set(open.id, lease);
     worker.busy += 1;
     await mkdir(path.join(ctx.directory, "remote-incoming"), { recursive: true });
-    send(res, 200, { job: { jobId: open.id, lease: lease.token, revision, codec, bytes: info.size, sourceSha256: sourceSha } });
+    send(res, 200, { job: { jobId: open.id, lease: lease.token, revision, codec, container, bytes: info.size, sourceSha256: sourceSha } });
     return;
   }
   const jobId = parts[2] || "";
@@ -246,7 +260,15 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: { token: s
       send(res, 400, { error: "Итоговый хэш не сошёлся.", verified: false, receivedSha: outputShaDisk });
       return;
     }
-    const codec = await probeCodec(file);
+    const probed = await probeOutput(file);
+    const codec = probed.codec;
+    const container = containerFromPath(job.payload.destination);
+    if (!container || !probed.format || !formatMatchesContainer(probed.format, container)) {
+      await unlinkQuiet(file);
+      await failJob(ctx, lease, `Контейнер результата «${probed.format || "пусто"}» не совпал с ${container || "незаданным"}.`);
+      send(res, 409, { error: "Контейнер результата не совпал с назначением.", verified: false, format: probed.format });
+      return;
+    }
     if (codec !== lease.codec) {
       await unlinkQuiet(file);
       await failJob(ctx, lease, "Результат не того кодека. Подмена не принимается.");
@@ -272,6 +294,17 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: { token: s
     return;
   }
   if (req.method === "POST" && parts[3] === "fail") {
+    const body = await jsonBody(req);
+    if (body.crash === true) {
+      const store = createJobStore(ctx.directory);
+      await store.cancel(lease.jobId, "HandBrake завершился аварийно. Автоповтор выключен, другой кодек не подставляется.").catch(() => undefined);
+      const worker = ctx.workers.get(lease.workerId);
+      if (worker) worker.busy = Math.max(0, worker.busy - 1);
+      ctx.leases.delete(lease.jobId);
+      await unlinkQuiet(incoming(ctx.directory, lease.jobId));
+      send(res, 200, { verified: false, hardwareBlocked: true });
+      return;
+    }
     await failJob(ctx, lease, "Воркер остановил задание.");
     send(res, 200, { verified: false });
     return;
@@ -286,7 +319,7 @@ function fits(worker: WorkerInfo, job: Job): boolean {
     [{ id: job.id, codec, allowSoftware: job.payload.handbrakeProfile.endsWith(":sw") }],
     [{
       id: worker.id,
-      os: "linux",
+      os: worker.platform,
       slots: Math.max(0, worker.slots - worker.busy),
       probe: { hardwareAv1: false, videoToolbox: null, amf: null, encoders: worker.encoders },
     }],
@@ -332,8 +365,9 @@ function readWorker(body: Record<string, unknown>): Omit<WorkerInfo, "lastSeen" 
   const encoders = Array.isArray(body.encoders) ? body.encoders.filter((item): item is string => typeof item === "string") : [];
   const slots = Number(body.slots);
   const freeBytes = Number(body.freeBytes);
-  if (!/^[a-z0-9-]{1,40}$/i.test(id) || !role || !Number.isInteger(slots) || slots < 1) return null;
-  return { id, role, encoders, slots, freeBytes: Number.isFinite(freeBytes) ? freeBytes : 0 };
+  const platform = body.platform === "darwin" || body.platform === "win32" || body.platform === "linux" ? body.platform : null;
+  if (!/^[a-z0-9-]{1,40}$/i.test(id) || !role || !platform || !Number.isInteger(slots) || slots < 1) return null;
+  return { id, role, platform, encoders, slots, freeBytes: Number.isFinite(freeBytes) ? freeBytes : 0 };
 }
 
 async function jobOf(directory: string, id: string): Promise<Job | null> {
@@ -362,19 +396,21 @@ async function readSlice(file: string, offset: number, length: number): Promise<
   }
 }
 
-async function probeCodec(file: string): Promise<string | null> {
-  const bin = process.env.FFPROBE || "ffprobe";
+async function probeOutput(file: string): Promise<{ codec: string | null; format: string }> {
+  const tool = await resolveTool({ envName: "SKLAD_FFPROBE", names: ["ffprobe"] });
+  if (!tool.path) return { codec: null, format: "" };
   const text = await new Promise<string>((resolve) => {
-    const child = spawn(bin, ["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=codec_name", "-of", "csv=p=0", file], { shell: false, stdio: ["ignore", "pipe", "ignore"] });
+    const child = spawn(tool.path!, ["-v", "error", "-show_entries", "stream=codec_name:format=format_name", "-of", "default=nw=1", file], { shell: false, stdio: ["ignore", "pipe", "ignore"] });
     let out = "";
     child.stdout?.on("data", (chunk: Buffer) => { out += chunk.toString("utf8"); });
     child.on("close", () => resolve(out.trim().toLowerCase()));
     child.on("error", () => resolve(""));
   });
-  if (text.includes("av1")) return "av1";
-  if (text.includes("hevc") || text.includes("265")) return "hevc";
-  if (text.includes("264")) return "h264";
-  return null;
+  const format = /format_name=(.+)/.exec(text)?.[1]?.trim() || "";
+  const codecLine = text.split("\n").find((line) => line.startsWith("codec_name=")) || "";
+  const codecName = codecLine.slice("codec_name=".length);
+  const codec = codecName.includes("av1") ? "av1" : codecName.includes("hevc") || codecName.includes("265") ? "hevc" : codecName.includes("264") ? "h264" : null;
+  return { codec, format };
 }
 
 function bearer(header: string | undefined, token: string): boolean {

@@ -7,14 +7,18 @@ import path from "node:path";
 import { pipeline } from "node:stream/promises";
 
 import { createJobStore, type JobStore } from "@/lib/jobs/engine";
-import type { Job } from "@/lib/jobs/model";
+import { hostFacts, localEncodeOs, localJobHost } from "@/lib/jobs/local-host";
+import type { Job, JobHost } from "@/lib/jobs/model";
 import { decideSourceRetirement, type FileIdentity } from "@/lib/policies/source-retirement";
 import { dataDir } from "@/lib/qbittorrent/store";
 import { assignEncodeJobs, type EncodeCodec } from "@/lib/transcode/assign";
+import { missingToolError, resolveTool } from "@/lib/transcode/binaries";
 import {
+  advertisedHardwareBlock,
   assertEncodePaths,
   capabilityFromHelp,
   CONSERVATIVE_PRESET,
+  containerFromPath,
   ENCODE_LIMITS,
   encodeArgv,
   mediaFromProbe,
@@ -24,6 +28,7 @@ import {
   verifyMedia,
   type HandBrakeCapability,
   type MediaFacts,
+  type OutputContainer,
 } from "@/lib/transcode/encode-plan";
 
 export interface EncodeProbe {
@@ -36,29 +41,34 @@ export interface EncodeProbe {
   advertisedHardwareAv1: string[];
   videoToolbox: null;
   platform: NodeJS.Platform;
+  localHost: JobHost | null;
   pcVerified: false;
   macVerified: false;
-  remote: { host: "pc-agent" | "mac-local"; state: "blocked"; reason: string }[];
+  remote: { host: JobHost; state: "local" | "unconfigured"; reason: string }[];
+  ffprobe: "env" | "path" | "missing";
+  ffmpeg: "env" | "path" | "missing";
   preset: { id: string; configured: true; label: string };
   compact: false;
+  hardwareBlock: string | null;
 }
-
-const REMOTE_BLOCKED = [
-  { host: "pc-agent" as const, state: "blocked" as const, reason: "Путь Windows и LAN не доступны с этой машины. Процесс Linux это не проверяет." },
-  { host: "mac-local" as const, state: "blocked" as const, reason: "Путь Mac и LAN не доступны с этой машины. Процесс Linux это не проверяет." },
-];
 
 export async function probeEncoder(): Promise<EncodeProbe> {
   const binary = await findBinary(process.env.SKLAD_HANDBRAKE || "HandBrakeCLI");
+  const ffprobe = await resolveTool({ envName: "SKLAD_FFPROBE", names: ["ffprobe"] });
+  const ffmpeg = await resolveTool({ envName: "SKLAD_FFMPEG", names: ["ffmpeg"] });
   const base = {
     binary,
     platform: process.platform,
+    localHost: localJobHost(),
     pcVerified: false as const,
     macVerified: false as const,
-    remote: REMOTE_BLOCKED,
+    remote: hostFacts(),
+    ffprobe: ffprobe.source,
+    ffmpeg: ffmpeg.source,
     preset: { id: CONSERVATIVE_PRESET.id, configured: true as const, label: CONSERVATIVE_PRESET.label },
     compact: false as const,
     videoToolbox: null,
+    hardwareBlock: null as string | null,
   };
   if (!binary) {
     return { ok: false, present: false, version: null, encoders: [], hardwareAv1: false, advertisedHardwareAv1: [], ...base };
@@ -76,6 +86,7 @@ export async function probeEncoder(): Promise<EncodeProbe> {
     hardwareAv1: false,
     advertisedHardwareAv1: capability.advertisedHardwareAv1,
     ...base,
+    hardwareBlock: advertisedHardwareBlock(capability.encoders),
   };
 }
 
@@ -114,15 +125,22 @@ export async function enqueueEncode(input: {
   const space = await freeBytes(parent);
   const room = scratchFits(space, info.size);
   if (!room.ok) return { ok: false, state: "blocked", started: false, error: room.reason };
-  const facts = await probeMedia(input.source);
+  const container = containerFromPath(input.destination);
+  if (!container) return { ok: false, state: "blocked", started: false, error: "Назначение должно заканчиваться на .mp4 или .mkv. Другой контейнер молча не выбирается." };
   const capability = await readCapability(probe.binary);
+  const hardware = !input.allowSoftware && input.codec === "av1" ? advertisedHardwareBlock(capability.encoders) : null;
+  if (hardware) return { ok: false, state: "blocked", started: false, codec: input.codec, error: hardware, hardwareBlocked: true, pcVerified: false, macVerified: false };
+  const host = localJobHost();
+  const os = localEncodeOs();
+  if (!host || !os) return { ok: false, state: "blocked", started: false, error: "Платформа процесса не Mac, Windows и не Linux. Метка linux не подставляется." };
+  const facts = await probeMedia(input.source);
   const blocked = requirementBlock(facts, capability, input.codec);
   if (blocked) return { ok: false, state: "blocked", started: false, error: blocked, codec: input.codec };
   const assignment = assignEncodeJobs(
     [{ id: "next", codec: input.codec, allowSoftware: input.allowSoftware }],
     [{
-      id: "linux-local",
-      os: "linux",
+      id: host,
+      os,
       slots: 1,
       probe: { hardwareAv1: capability.hardwareAv1, videoToolbox: null, amf: null, encoders: capability.encoders },
     }],
@@ -133,7 +151,7 @@ export async function enqueueEncode(input: {
   const store = createJobStore(directory);
   const queued = await store.enqueue({
     kind: "transcode",
-    host: "linux-local",
+    host,
     source: input.source,
     destination: input.destination,
     handbrakeProfile: `c:${input.codec}:${input.allowSoftware ? "sw" : "hw"}`,
@@ -147,7 +165,8 @@ export async function enqueueEncode(input: {
     created: queued.created,
     codec: input.codec,
     encoder: assignment[0]?.encoder,
-    host: "linux-local",
+    host,
+    container,
     platform: process.platform,
     pcVerified: false,
     macVerified: false,
@@ -158,9 +177,11 @@ export async function enqueueEncode(input: {
 }
 
 export async function runEncodeOnce(directory = dataDir()): Promise<Record<string, unknown>> {
+  const host = localJobHost();
+  if (!host) return { processed: false, state: "idle", error: "Платформа процесса не Mac, Windows и не Linux." };
   const store = createJobStore(directory);
-  await store.requeueStale("linux-local", (job) => job.kind === "transcode" && staleLease(directory, job));
-  const job = await store.claimNext("linux-local", (item) => item.kind === "transcode");
+  await store.requeueStale(host, (job) => job.kind === "transcode" && staleLease(directory, job));
+  const job = await store.claimNext(host, (item) => item.kind === "transcode");
   if (!job?.workerToken) return { processed: false, state: "idle" };
   const jobDir = path.join(directory, "encode-work", job.id);
   await mkdir(jobDir, { recursive: true });
@@ -189,13 +210,26 @@ async function executeClaimed(store: JobStore, directory: string, jobDir: string
   const binary = await findBinary(process.env.SKLAD_HANDBRAKE || "HandBrakeCLI");
   if (!binary) throw new Error("HandBrakeCLI не найден во время выполнения.");
   const capability = await readCapability(binary);
+  const os = localEncodeOs();
+  if (!os) throw new Error("Платформа процесса не Mac, Windows и не Linux.");
+  const hardware = !allowSoftware && codec === "av1" ? advertisedHardwareBlock(capability.encoders) : null;
+  if (hardware) {
+    await store.cancel(job.id, hardware);
+    await writeJournal(directory, job.id, { verified: false, error: hardware, hardwareBlocked: true, sourceDeleted: false });
+    return { processed: true, state: "error", jobId: job.id, verified: false, hardwareBlocked: true, error: hardware };
+  }
   const assignment = assignEncodeJobs(
     [{ id: job.id, codec, allowSoftware }],
-    [{ id: "linux-local", os: "linux", slots: 1, probe: { hardwareAv1: capability.hardwareAv1, videoToolbox: null, amf: null, encoders: capability.encoders } }],
+    [{ id: job.host, os, slots: 1, probe: { hardwareAv1: capability.hardwareAv1, videoToolbox: null, amf: null, encoders: capability.encoders } }],
   );
   if (assignment[0]?.state !== "leased" || assignment[0].encoder == null) {
-    throw new Error(assignment[0]?.reason || "Запрошенный кодек недоступен. Подмена не делается.");
+    const reason = assignment[0]?.reason || "Запрошенный кодек недоступен. Подмена не делается.";
+    await store.cancel(job.id, reason);
+    await writeJournal(directory, job.id, { verified: false, error: reason, sourceDeleted: false });
+    return { processed: true, state: "error", jobId: job.id, verified: false, error: reason };
   }
+  const container = containerFromPath(job.payload.destination);
+  if (!container) throw new Error("Назначение должно заканчиваться на .mp4 или .mkv. Другой контейнер молча не выбирается.");
   const sourceInfo = await stat(job.payload.source);
   if (!sourceInfo.isFile() || sourceInfo.size > ENCODE_LIMITS.maxSourceBytes) throw new Error("Источник не подходит под предел этого прогона.");
   const room = scratchFits(await freeBytes(jobDir), sourceInfo.size);
@@ -212,10 +246,10 @@ async function executeClaimed(store: JobStore, directory: string, jobDir: string
   if (blocked) throw new Error(blocked);
   const recorded = await fileIdentity(job.payload.source);
   const staging = path.join(jobDir, "staging" + path.extname(job.payload.source));
-  const partial = path.join(jobDir, "output.part.mp4");
+  const partial = path.join(jobDir, `output.part.${container}`);
   await pipeline(createReadStream(job.payload.source), createWriteStream(staging));
-  const args = encodeArgv({ binary, source: staging, output: partial, codec, sourceFacts: facts, encoders: capability.encoders });
-  if (args.some((arg) => arg !== binary && arg.includes("x265")) && codec === "av1") throw new Error("AV1 не подменяется на HEVC.");
+  const args = encodeArgv({ binary, source: staging, output: partial, codec, container, sourceFacts: facts, encoders: capability.encoders });
+  if (args.some((arg) => arg !== binary && /x26[45]|vce_/i.test(arg)) && codec === "av1") throw new Error("AV1 не подменяется на HEVC и VCE сам не запускается.");
   const timeoutMs = Number(process.env.SKLAD_ENCODE_TIMEOUT_MS || ENCODE_LIMITS.timeoutMs);
   const child = await runHandBrake(args, timeoutMs, async (percent) => {
     await writeLease(directory, job.id, token);
@@ -230,13 +264,21 @@ async function executeClaimed(store: JobStore, directory: string, jobDir: string
   }, async () => cancelled(store, job.id));
   if (child.stopped) return finishCancel(directory, jobDir, job.id);
   if (child.timedOut) throw new Error("Кодирование превысило предел времени. Готовый файл не публикуется.");
+  if (isNativeCrash(child.code)) {
+    const where = child.stderr.includes("encavcodecInit") ? " на encavcodecInit" : "";
+    const reason = `HandBrake завершился кодом ${child.code}${where}. Это аварийный код, автоповтор выключен, другой кодек не подставляется.`;
+    await cleanupOwned(jobDir);
+    await store.cancel(job.id, reason);
+    await writeJournal(directory, job.id, { verified: false, error: reason, hardwareBlocked: true, sourceDeleted: false, platform: process.platform, host: job.host });
+    return { processed: true, state: "error", jobId: job.id, verified: false, hardwareBlocked: true, error: reason };
+  }
   if (child.code !== 0) throw new Error(`HandBrake завершился с кодом ${child.code ?? "нет"}. Результат не принят.`);
   if (await cancelled(store, job.id)) return finishCancel(directory, jobDir, job.id);
   const outputFacts = await probeMedia(partial);
   const decodeOk = await decodeSample(partial);
-  const check = verifyMedia({ codec, source: facts, output: outputFacts, decodeOk, exitCode: child.code });
+  const check = verifyMedia({ codec, container, source: facts, output: outputFacts, decodeOk, exitCode: child.code });
   if (!check.verified) {
-    throw new Error("Проверка контейнера, декодирования, длительности или дорожек не прошла. Код выхода 0 этого не заменяет.");
+    throw new Error(`Проверка контейнера, декодирования, длительности или дорожек не прошла. Запрошен ${container}, ffprobe сообщил «${outputFacts.format || "пусто"}». Код выхода 0 этого не заменяет.`);
   }
   await commitOutput(partial, job.payload.destination);
   const outputInfo = await stat(job.payload.destination);
@@ -269,8 +311,12 @@ async function executeClaimed(store: JobStore, directory: string, jobDir: string
     retirement,
     sourceDeleted: retirement.applied,
     subjectiveQuality: false,
-    pcVerified: false,
-    macVerified: false,
+    container,
+    format: outputFacts.format,
+    host: job.host,
+    platform: process.platform,
+    pcVerified: process.platform === "win32",
+    macVerified: process.platform === "darwin",
   });
   return {
     processed: true,
@@ -280,8 +326,12 @@ async function executeClaimed(store: JobStore, directory: string, jobDir: string
     codec,
     sizeBenefit,
     sourceDeleted: retirement.applied,
-    pcVerified: false,
-    macVerified: false,
+    container,
+    format: outputFacts.format,
+    host: job.host,
+    platform: process.platform,
+    pcVerified: process.platform === "win32",
+    macVerified: process.platform === "darwin",
     subjectiveQuality: false,
   };
 }
@@ -368,13 +418,14 @@ async function runHandBrake(
   timeoutMs: number,
   onProgress: (percent: number) => Promise<void>,
   stop: () => Promise<boolean>,
-): Promise<{ code: number | null; timedOut: boolean; stopped: boolean }> {
+): Promise<{ code: number | null; timedOut: boolean; stopped: boolean; stderr: string }> {
   const bin = args[0];
   if (!bin) throw new Error("Нет пути к HandBrakeCLI.");
   const child = spawn(bin, args.slice(1), { shell: false, stdio: ["ignore", "pipe", "pipe"] });
   let timedOut = false;
   let stopped = false;
   let buffer = "";
+  let stderr = "";
   const started = Date.now();
   const consume = (chunk: Buffer) => {
     buffer += chunk.toString("utf8");
@@ -386,7 +437,10 @@ async function runHandBrake(
     if (buffer.length > 64_000) buffer = buffer.slice(-32_000);
   };
   child.stdout?.on("data", consume);
-  child.stderr?.on("data", consume);
+  child.stderr?.on("data", (chunk: Buffer) => {
+    consume(chunk);
+    if (stderr.length < 64_000) stderr += chunk.toString("utf8");
+  });
   const killer = setInterval(() => {
     void (async () => {
       if (Date.now() - started > timeoutMs) {
@@ -403,7 +457,11 @@ async function runHandBrake(
     child.on("close", (exit) => resolve(exit));
   });
   clearInterval(killer);
-  return { code, timedOut, stopped };
+  return { code, timedOut, stopped, stderr };
+}
+
+function isNativeCrash(code: number | null): boolean {
+  return code === 3221225477 || code === 139;
 }
 
 function acceptJson(buffer: string, onObject: (value: unknown) => void): string {
@@ -434,15 +492,16 @@ function acceptJson(buffer: string, onObject: (value: unknown) => void): string 
 }
 
 async function probeMedia(file: string): Promise<MediaFacts> {
-  const bin = await findBinary("ffprobe");
-  if (!bin) throw new Error("ffprobe не найден. Проверка результата невозможна, успех не ставится.");
-  const result = await collect(bin, ["-v", "error", "-print_format", "json", "-show_format", "-show_streams", "-show_chapters", file], 20_000);
+  const tool = await resolveTool({ envName: "SKLAD_FFPROBE", names: ["ffprobe"] });
+  if (!tool.path) throw new Error(process.env.SKLAD_FFPROBE ? "SKLAD_FFPROBE указан, но файл не запускается. Проверка не начинается." : missingToolError("SKLAD_FFPROBE", "ffprobe"));
+  const result = await collect(tool.path, ["-v", "error", "-print_format", "json", "-show_format", "-show_streams", "-show_chapters", file], 20_000);
   if (result.code !== 0) throw new Error("ffprobe не прочитал файл. Кодирование или приёмка не продолжаются.");
   return mediaFromProbe(JSON.parse(result.stdout));
 }
 
 async function decodeSample(file: string): Promise<boolean> {
-  const bin = await findBinary("ffmpeg");
+  const tool = await resolveTool({ envName: "SKLAD_FFMPEG", names: ["ffmpeg"] });
+  const bin = tool.path;
   if (!bin) return false;
   const result = await collect(bin, ["-v", "error", "-t", "1", "-i", file, "-f", "null", "-"], 20_000);
   return result.code === 0;

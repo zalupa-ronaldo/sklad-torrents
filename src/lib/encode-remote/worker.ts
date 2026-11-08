@@ -6,7 +6,7 @@ import { spawn } from "node:child_process";
 import { pipeline } from "node:stream/promises";
 
 import { dataDir } from "@/lib/qbittorrent/store";
-import { encodeArgv, type MediaFacts } from "@/lib/transcode/encode-plan";
+import { encodeArgv, type MediaFacts, type OutputContainer } from "@/lib/transcode/encode-plan";
 import { probeEncoder } from "@/lib/transcode/encode-worker";
 
 const CHUNK = 64 * 1024;
@@ -20,14 +20,16 @@ export async function runEncodeWorker(input: { hub: string; token: string; id: s
   const advertised = encoders.length > 0 ? encoders : probe?.encoders ?? [];
   const binary = probe?.binary;
   if (!binary && encoders.length === 0) throw new Error("HandBrakeCLI не найден у воркера.");
-  await post(hub, "/v1/workers", headers, { id: input.id, role: input.role, encoders: advertised, slots: 1, freeBytes: await freeBytes(directory) });
+  const platform = process.platform === "darwin" || process.platform === "win32" || process.platform === "linux" ? process.platform : null;
+  if (!platform) throw new Error("Платформа воркера не Mac, Windows и не Linux.");
+  await post(hub, "/v1/workers", headers, { id: input.id, role: input.role, platform, encoders: advertised, slots: 1, freeBytes: await freeBytes(directory) });
   let stop = false;
   process.on("SIGTERM", () => { stop = true; });
   process.on("SIGINT", () => { stop = true; });
   while (!stop) {
     await post(hub, "/v1/workers/heartbeat", headers, { id: input.id, freeBytes: await freeBytes(directory) }).catch(() => undefined);
     const claimed = await post(hub, "/v1/jobs/claim", headers, { id: input.id });
-    const job = claimed.job as { jobId: string; lease: string; revision: number; codec: "av1" | "hevc" | "h264"; bytes: number; sourceSha256: string } | null;
+    const job = claimed.job as { jobId: string; lease: string; revision: number; codec: "av1" | "hevc" | "h264"; container?: OutputContainer; bytes: number; sourceSha256: string } | null;
     if (!job) {
       await delay(200);
       continue;
@@ -36,19 +38,26 @@ export async function runEncodeWorker(input: { hub: string; token: string; id: s
     const staging = path.join(directory, "staging", job.jobId);
     await mkdir(staging, { recursive: true });
     const source = path.join(staging, "in.mp4");
-    const output = path.join(staging, "out.mp4");
+    const container = job.container === "mkv" ? "mkv" : job.container === "mp4" ? "mp4" : null;
+    const output = path.join(staging, `out.${container ?? "bin"}`);
     try {
+      if (!container) throw new Error("Координатор не назвал контейнер .mp4 или .mkv.");
       await download(hub, headers, job, source);
       const hold = Number(process.env.SKLAD_ENCODE_HOLD_MS || 0);
       if (hold > 0) await delay(hold);
       if (!binary) throw new Error("Нет HandBrakeCLI для настоящего кодирования.");
-      const facts: MediaFacts = { format: "mp4", duration: 1, videoCodec: "h264", audio: 1, subtitles: 0, chapters: 0, hdr: false };
-      const args = encodeArgv({ binary, source, output, codec: job.codec, sourceFacts: facts, encoders: advertised });
+      const facts: MediaFacts = { format: container === "mkv" ? "matroska" : "mp4", duration: 1, videoCodec: "h264", audio: 1, subtitles: 0, chapters: 0, hdr: false };
+      const args = encodeArgv({ binary, source, output, codec: job.codec, container, sourceFacts: facts, encoders: advertised });
       const beat = setInterval(() => {
         void post(hub, `/v1/jobs/${job.jobId}/heartbeat`, { ...headers, "x-lease": job.lease }, {}).catch(() => undefined);
       }, 400);
       const code = await run(args);
       clearInterval(beat);
+      if (code === 3221225477 || code === 139) {
+        await post(hub, `/v1/jobs/${job.jobId}/fail`, { ...headers, "x-lease": job.lease }, { crash: true });
+        await appendLog(directory, { pid: process.pid, id: input.id, role: input.role, platform, jobId: job.jobId, startedAt, finishedAt: Date.now(), verified: false, codec: job.codec, crash: true });
+        continue;
+      }
       if (code !== 0) throw new Error(`HandBrake завершился с кодом ${code ?? "нет"}.`);
       const outputSha256 = await shaFile(output);
       await upload(hub, headers, job, output);

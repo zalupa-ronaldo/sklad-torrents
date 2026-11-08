@@ -41,9 +41,12 @@ export interface GameRecord {
   compact: "skipped" | "blocked" | "hold" | "unknown" | "done" | "not-run";
   compactReason: string;
   compressed: boolean;
-  /** Physical NTFS compact has not been run by this cloud agent. */
-  ntfsSmoke: false;
-  pcIntegration: "not-verified";
+  /** True only after this Windows process measured the owned root. A cloud run stays false. */
+  ntfsSmoke: boolean;
+  pcIntegration: "not-verified" | "measured";
+  logicalBytes?: number | null;
+  allocatedBytes?: number | null;
+  wofBytes?: number | null;
   compactDbPath: string | null;
   jobId: string | null;
   managed: true;
@@ -67,6 +70,9 @@ export function publicGame(game: GameRecord) {
     compact: game.compact,
     compressed: game.compressed,
     ntfsSmoke: game.ntfsSmoke,
+    logicalBytes: game.logicalBytes ?? null,
+    allocatedBytes: game.allocatedBytes ?? null,
+    wofBytes: game.wofBytes ?? null,
     needsReview: game.needsReview,
     unmanaged: game.unmanaged,
     pcIntegration: game.pcIntegration,
@@ -175,7 +181,8 @@ function fillGame(game: GameRecord): GameRecord {
     ...game,
     needsReview: game.needsReview === true,
     unmanaged: game.unmanaged === true,
-    ntfsSmoke: false,
+    ntfsSmoke: game.ntfsSmoke === true,
+    pcIntegration: game.pcIntegration === "measured" ? "measured" : "not-verified",
     compactDbPath: game.compactDbPath ?? null,
     compressed: game.compressed === true,
   };

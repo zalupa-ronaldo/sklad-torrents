@@ -9,6 +9,7 @@ import { buildCompactArgv } from "@/addons/media-games/compact";
 import { compactAllowsLaunch, executeCompact } from "@/lib/games/compact-run";
 import { adviseCompression, cacheFromText, lookupCompactResult } from "@/lib/compact-db/database";
 import { createJobStore } from "@/lib/jobs/engine";
+import { localJobHost } from "@/lib/jobs/local-host";
 import type { Job } from "@/lib/jobs/model";
 import { evictPreparedGame, gamePoolSpace, removeFromGamePool } from "@/lib/policies/storage-roles";
 import { dataDir } from "@/lib/qbittorrent/store";
@@ -92,9 +93,11 @@ export async function prepareGame(id: string, compactDb: string | null, director
     await saveGames(games, directory);
     return { ok: false, state: "blocked", ready: false, victim: space.victim, error: game.reason, game: publicGame(game) };
   }
+  const host = localJobHost();
+  if (!host) return blocked("Платформа процесса не Mac, Windows и не Linux. Метка linux не подставляется.", game);
   const store = createJobStore(directory);
   const queued = await store.enqueue(
-    { kind: "copy", host: "linux-local", source: game.root, destination: game.destination, diskId: `game:${game.id}` },
+    { kind: "copy", host, source: game.root, destination: game.destination, diskId: `game:${game.id}` },
     { anyState: true },
   );
   if (queued.job.state === "done" && game.copyVerified && (await directoryExists(game.destination))) {
@@ -112,9 +115,11 @@ export async function prepareGame(id: string, compactDb: string | null, director
 }
 
 export async function runGameOnce(directory = dataDir(), compactDb: string | null = process.env.SKLAD_COMPACT_DB || null): Promise<Record<string, unknown>> {
+  const host = localJobHost();
+  if (!host) return { processed: false, state: "idle", error: "Платформа процесса не Mac, Windows и не Linux." };
   const store = createJobStore(directory);
-  await store.requeueStale("linux-local", (job) => job.kind === "copy" && job.payload.diskId.startsWith("game:") && stale(directory, job));
-  const job = await store.claimNext("linux-local", (item) => item.kind === "copy" && item.payload.diskId.startsWith("game:"));
+  await store.requeueStale(host, (job) => job.kind === "copy" && job.payload.diskId.startsWith("game:") && stale(directory, job));
+  const job = await store.claimNext(host, (item) => item.kind === "copy" && item.payload.diskId.startsWith("game:"));
   if (!job?.workerToken) return { processed: false, state: "idle" };
   await writeLease(directory, job.id);
   try {
@@ -171,7 +176,11 @@ async function execute(store: ReturnType<typeof createJobStore>, directory: stri
   game.compact = compact.state;
   game.compactReason = compact.reason;
   game.compressed = compact.compressed;
-  game.ntfsSmoke = false;
+  game.ntfsSmoke = compact.ntfsSmoke;
+  game.pcIntegration = compact.ntfsSmoke ? "measured" : "not-verified";
+  game.logicalBytes = compact.logical;
+  game.allocatedBytes = compact.allocated;
+  game.wofBytes = compact.wof;
   game.ready = compact.launch;
   game.state = compact.launch ? "available" : "blocked";
   game.reason = compact.launch ? "" : compact.reason;
@@ -185,10 +194,14 @@ async function execute(store: ReturnType<typeof createJobStore>, directory: stri
     state: "done",
     verified: true,
     ready: game.ready,
-    compressed: false,
+    compressed: game.compressed,
     compact: game.compact,
-    pcIntegration: "not-verified",
-    executed: false,
+    pcIntegration: game.pcIntegration,
+    executed: compact.executed,
+    ntfsSmoke: game.ntfsSmoke,
+    logicalBytes: game.logicalBytes ?? null,
+    allocatedBytes: game.allocatedBytes ?? null,
+    wofBytes: game.wofBytes ?? null,
     game: publicGame(game),
     compactArgv: compact.argv,
   };
@@ -252,23 +265,24 @@ function explicitIdentity(explicit: { name: string; steamAppId: number | null; e
   };
 }
 
-async function compactDecision(game: GameRecord, compactDb: string | null): Promise<{ state: GameRecord["compact"]; reason: string; launch: boolean; argv: string[] | null; compressed: boolean; ntfsSmoke: false }> {
+async function compactDecision(game: GameRecord, compactDb: string | null): Promise<{ state: GameRecord["compact"]; reason: string; launch: boolean; argv: string[] | null; compressed: boolean; ntfsSmoke: boolean; executed: boolean; logical: number | null; allocated: number | null; wof: number | null }> {
+  const empty = { argv: null, compressed: false, ntfsSmoke: false, executed: false, logical: null, allocated: null, wof: null };
   if (!game.steamAppId) {
-    return { state: "unknown", reason: "Steam ID нет. Игра в библиотеке есть. База CompactGUI для неё неизвестна: это не пропуск и не успех.", launch: false, argv: null, compressed: false, ntfsSmoke: false };
+    return { ...empty, state: "unknown", reason: "Steam ID нет. Игра в библиотеке есть. База CompactGUI для неё неизвестна: это не пропуск и не успех.", launch: false };
   }
   if (!compactDb) {
-    return { state: "unknown", reason: "База CompactGUI не задана. Неизвестная экономия не считается пропуском и не ставит сжатие выполненным.", launch: false, argv: null, compressed: false, ntfsSmoke: false };
+    return { ...empty, state: "unknown", reason: "База CompactGUI не задана. Неизвестная экономия не считается пропуском и не ставит сжатие выполненным.", launch: false };
   }
   const cache = cacheFromText(await readFile(compactDb, "utf8"), new Date().toISOString());
   const lookup = lookupCompactResult(cache, game.steamAppId, "XPRESS8K");
   const advice = adviseCompression({ lookup, requested: "XPRESS8K", alreadyAlgorithm: null, minSavings: MIN_SAVINGS, manualOverride: false });
-  const windowsPath = `D:\\SkladTest\\${game.id}`;
-  const argv = buildCompactArgv({ os: "win32", binary: "C:\\Windows\\System32\\compact.exe", folder: windowsPath, algorithm: "XPRESS8K" });
+  const folder = process.platform === "win32" ? game.destination : `D:\\SkladTest\\${game.id}`;
+  const argv = buildCompactArgv({ os: "win32", binary: "C:\\Windows\\System32\\compact.exe", folder, algorithm: "XPRESS8K" });
   if (advice.action === "skip") {
-    return { state: "skipped", reason: `${advice.reason} Сжатие не запускалось. Это не гарантия сообщества.`, launch: true, argv, compressed: false, ntfsSmoke: false };
+    return { ...empty, state: "skipped", reason: `${advice.reason} Сжатие не запускалось. Это не гарантия сообщества.`, launch: true, argv };
   }
   if (advice.action !== "eligible") {
-    return { state: "unknown", reason: advice.reason, launch: false, argv, compressed: false, ntfsSmoke: false };
+    return { ...empty, state: "unknown", reason: advice.reason, launch: false, argv };
   }
   const result = await executeCompact({
     os: process.platform,
@@ -283,9 +297,13 @@ async function compactDecision(game: GameRecord, compactDb: string | null): Prom
     state: result.compressed ? "done" : "blocked",
     reason: result.reason,
     launch: compactAllowsLaunch(result),
-    argv,
+    argv: result.argv ?? argv,
     compressed: result.compressed,
-    ntfsSmoke: false,
+    ntfsSmoke: result.ntfsSmoke,
+    executed: result.executed,
+    logical: result.logical,
+    allocated: result.allocated,
+    wof: result.wof,
   };
 }
 

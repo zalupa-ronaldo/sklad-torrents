@@ -155,6 +155,10 @@ async function main(): Promise<void> {
     });
   }
   if (command === "encode") {
+    const ffprobe = flag("--ffprobe");
+    const ffmpeg = flag("--ffmpeg");
+    if (ffprobe) process.env.SKLAD_FFPROBE = ffprobe;
+    if (ffmpeg) process.env.SKLAD_FFMPEG = ffmpeg;
     const encode = await import("../src/lib/transcode/encode-worker.ts");
     if (sub === "probe") {
       const probe = await encode.probeEncoder();

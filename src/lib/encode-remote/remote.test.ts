@@ -110,10 +110,10 @@ it("rejects anonymous calls, bad hashes, expired leases, unsupported codecs, arb
   const queued = await enqueueEncode({ source, destination: path.join(dir, "sec-out.mp4"), codec: "av1", allowSoftware: true, directory: dir });
   expect(queued.ok).toBe(true);
   const auth = { authorization: `Bearer ${token}`, "content-type": "application/json" };
-  await fetch(base + "/v1/workers", { method: "POST", headers: auth, body: JSON.stringify({ id: "only-x264", role: "pc", encoders: ["x264"], slots: 1, freeBytes: 1_000_000_000 }) });
+  await fetch(base + "/v1/workers", { method: "POST", headers: auth, body: JSON.stringify({ id: "only-x264", role: "pc", platform: "linux", encoders: ["x264"], slots: 1, freeBytes: 1_000_000_000 }) });
   const denied = await (await fetch(base + "/v1/jobs/claim", { method: "POST", headers: auth, body: JSON.stringify({ id: "only-x264" }) })).json() as { job: unknown };
   expect(denied.job).toBeNull();
-  await fetch(base + "/v1/workers", { method: "POST", headers: auth, body: JSON.stringify({ id: "av1-worker", role: "mac", encoders: ["svt_av1"], slots: 1, freeBytes: 1_000_000_000 }) });
+  await fetch(base + "/v1/workers", { method: "POST", headers: auth, body: JSON.stringify({ id: "av1-worker", role: "mac", platform: "linux", encoders: ["svt_av1"], slots: 1, freeBytes: 1_000_000_000 }) });
   const claimed = await (await fetch(base + "/v1/jobs/claim", { method: "POST", headers: auth, body: JSON.stringify({ id: "av1-worker" }) })).json() as { job: { jobId: string; lease: string; bytes: number } };
   const bad = await fetch(`${base}/v1/jobs/${claimed.job.jobId}/output?offset=0`, { method: "PUT", headers: { authorization: auth.authorization, "x-lease": claimed.job.lease, "x-chunk-sha256": "0".repeat(64) }, body: Buffer.from("nope") });
   expect(bad.status).toBe(400);
@@ -129,7 +129,7 @@ it("rejects anonymous calls, bad hashes, expired leases, unsupported codecs, arb
   const jobs = JSON.parse(await readFile(path.join(dir, "jobs.json"), "utf8")) as { jobs: { verified: boolean }[] };
   expect(jobs.jobs.every((job) => job.verified === false)).toBe(true);
   await delay(700);
-  await fetch(base + "/v1/workers", { method: "POST", headers: auth, body: JSON.stringify({ id: "second", role: "pc", encoders: ["svt_av1"], slots: 1, freeBytes: 1_000_000_000 }) });
+  await fetch(base + "/v1/workers", { method: "POST", headers: auth, body: JSON.stringify({ id: "second", role: "pc", platform: "linux", encoders: ["svt_av1"], slots: 1, freeBytes: 1_000_000_000 }) });
   const again = await (await fetch(base + "/v1/jobs/claim", { method: "POST", headers: auth, body: JSON.stringify({ id: "second" }) })).json() as { job: { lease: string } | null };
   expect(again.job?.lease).toBeTruthy();
   expect(again.job?.lease).not.toBe(claimed.job.lease);

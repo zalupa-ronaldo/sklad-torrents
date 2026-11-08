@@ -389,7 +389,7 @@ export class JobStore {
     });
   }
 
-  async cancel(id: string): Promise<Job> {
+  async cancel(id: string, reason = "Отменено. Файлы на диске не удалялись."): Promise<Job> {
     return this.transition(id, (job) => {
       if (job.state !== "queued" && job.state !== "running" && job.state !== "paused") {
         throw new JobError("conflict", "Эту задачу уже нельзя отменить.");
@@ -397,7 +397,7 @@ export class JobStore {
       job.state = "error";
       job.cancelled = true;
       job.workerToken = null;
-      job.lastError = "Отменено. Файлы на диске не удалялись.";
+      job.lastError = cleanText(reason, 500) || "Отменено. Файлы на диске не удалялись.";
     });
   }
 
