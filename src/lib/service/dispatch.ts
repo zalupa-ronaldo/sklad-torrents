@@ -25,5 +25,14 @@ export async function dispatchOnce(directory = dataDir()): Promise<{ processed: 
   } catch {
     processed.push("game-error");
   }
+  try {
+    const { reconcileLocalProtocol, runTorrentOnce } = await import("@/lib/torrents/reconcile");
+    const torrent = await reconcileLocalProtocol(directory);
+    if (torrent.enqueued > 0) processed.push("torrent");
+    const verified = await runTorrentOnce(directory);
+    if (verified.processed) processed.push("torrent-verify");
+  } catch {
+    processed.push("torrent-error");
+  }
   return { processed };
 }
