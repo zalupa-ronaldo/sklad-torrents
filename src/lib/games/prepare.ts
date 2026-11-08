@@ -6,6 +6,7 @@ import path from "node:path";
 import { pipeline } from "node:stream/promises";
 
 import { buildCompactArgv } from "@/addons/media-games/compact";
+import { measureWindowsRoot } from "@/lib/games/compact-measure";
 import { compactAllowsLaunch, executeCompact } from "@/lib/games/compact-run";
 import { adviseCompression, cacheFromText, lookupCompactResult } from "@/lib/compact-db/database";
 import { createJobStore } from "@/lib/jobs/engine";
@@ -204,6 +205,47 @@ async function execute(store: ReturnType<typeof createJobStore>, directory: stri
     wofBytes: game.wofBytes ?? null,
     game: publicGame(game),
     compactArgv: compact.argv,
+  };
+}
+
+export async function measureGame(id: string, directory = dataDir()): Promise<Record<string, unknown>> {
+  const games = await listGames(directory);
+  const game = games.find((item) => item.id === id);
+  if (!game) return blocked("Игры в библиотеке нет.");
+  try {
+    assertGamePaths([game.destination]);
+  } catch (error) {
+    return blocked(error instanceof Error ? error.message : "Путь закрыт.", game);
+  }
+  if (!(await directoryExists(game.destination))) return blocked("Управляемой копии в пуле нет. Сжатие заново не запускается.", game);
+  if (process.platform !== "win32") {
+    return { ok: false, ready: false, recompressed: false, executed: false, error: "compact /Q только на Windows. Повторное сжатие не запускается.", game: publicGame(game) };
+  }
+  const account = await measureWindowsRoot(game.destination);
+  const measured = account.compressed && account.logical != null && account.allocated != null && account.allocated < account.logical;
+  game.logicalBytes = account.logical;
+  game.allocatedBytes = account.allocated;
+  game.wofBytes = account.wof;
+  game.compressed = measured;
+  game.ntfsSmoke = measured;
+  game.pcIntegration = measured ? "measured" : "not-verified";
+  game.compact = measured ? "done" : "blocked";
+  game.compactReason = account.reason;
+  game.ready = measured && game.copyVerified;
+  game.state = game.ready ? "available" : "blocked";
+  game.reason = game.ready ? "" : account.reason;
+  await saveGames(games, directory);
+  return {
+    ok: true,
+    ready: game.ready,
+    compressed: game.compressed,
+    recompressed: false,
+    executed: false,
+    logicalBytes: account.logical,
+    allocatedBytes: account.allocated,
+    wofBytes: account.wof,
+    reason: account.reason,
+    game: publicGame(game),
   };
 }
 

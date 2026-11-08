@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { expect, it } from "vitest";
 
-import { accountReadings, decideCompact, listOwnedFiles, parseCompactListing, readingsFromQuery, type OwnedFile } from "@/lib/games/compact-measure";
+import { accountReadings, clipDiag, decideCompact, listOwnedFiles, parseCompactListing, parseCompactSummary, readingsFromQuery, reconcileOwnedRoot, type OwnedFile } from "@/lib/games/compact-measure";
 import { localJobHost, hostFacts } from "@/lib/jobs/local-host";
 
 const smoke = "    36864 :  1048576 = 28.4 to 1 XPRESS8K payload.bin";
@@ -27,6 +27,31 @@ it("accounts the measured Windows root and does not turn an unknown size into ze
   expect(missing.compressed).toBe(false);
   expect(decideCompact({ files: 1, logical: 100, allocated: 40, wof: null }).allocated).toBe(40);
   expect(decideCompact({ files: 1, logical: 100, allocated: 40, wof: null }).known).toBe(false);
+});
+
+it("reads the Russian compact /Q summary that has no per-file line", () => {
+  const text = "\uFEFF\r\nВсего файлов: 1, каталогов: 1.\r\nИз них сжато: 1, не сжато: 0.\r\nДанные объемом 1\u00a0048\u00a0576 байт сохранены в 36\u00a0864 байт.\r\n";
+  expect(parseCompactListing(text).size).toBe(0);
+  expect(parseCompactSummary(text)).toEqual({ fileCount: 1, compressedCount: 1, logical: 1_048_576, stored: 36_864 });
+  const files: OwnedFile[] = [{ relative: "payload.bin", full: "D:\\pool\\payload.bin", logical: 1_048_576 }];
+  const agreed = reconcileOwnedRoot({
+    files,
+    sizes: new Map([[files[0]!.full, 36_864]]),
+    summary: parseCompactSummary(text),
+    perFile: parseCompactListing(text),
+  });
+  expect(agreed).toMatchObject({ known: true, compressed: true, logical: 1_048_576, allocated: 36_864, wof: 36_864 });
+  const mismatch = reconcileOwnedRoot({
+    files,
+    sizes: new Map([[files[0]!.full, 1_048_576]]),
+    summary: parseCompactSummary(text),
+    perFile: parseCompactListing(text),
+  });
+  expect(mismatch.compressed).toBe(false);
+  expect(mismatch.logical).toBe(1_048_576);
+  expect(mismatch.reason).toMatch(/36864/);
+  expect(mismatch.reason).toMatch(/1048576/);
+  expect(clipDiag("fail C:\\Users\\user\\secret\\payload.bin")).toBe("fail <path>");
 });
 
 it("stops at a symlink and at E: before reading a file", async () => {

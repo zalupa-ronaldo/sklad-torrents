@@ -157,7 +157,7 @@ export const VCE_AV1_SMOKE = {
 export function advertisedHardwareBlock(encoders: readonly string[]): string | null {
   const names = encoders.filter((name) => (ADVERTISED_VCE_AV1 as readonly string[]).includes(name));
   if (names.length === 0) return null;
-  return `В справке есть ${names.join(", ")}. Это не рабочий прогон. Прямой vce_av1 HandBrake 1.11.1 на ролике ${VCE_AV1_SMOKE.geometry}, CQ ${VCE_AV1_SMOKE.quality}, mux ${VCE_AV1_SMOKE.mux} завершился кодом ${VCE_AV1_SMOKE.code} на encavcodecInit: AV1 (AMD VCE). stdout пустой, исходник не изменился, HEVC и svt_av1 не подставлялись. Причина AMF этим логом не установлена. Автоповтор выключен.`;
+  return `В справке есть ${names.join(", ")}. Это не рабочий прогон. Два прямых vce_av1 HandBrake 1.11.1, CQ ${VCE_AV1_SMOKE.quality}, mux ${VCE_AV1_SMOKE.mux}, 160x120 и 256x128, оба завершились кодом ${VCE_AV1_SMOKE.code} на encavcodecInit: AV1 (AMD VCE). stdout пустой, исходник не изменился. Причина AMF не установлена. Повторов больше нет.`;
 }
 
 export type OutputContainer = "mp4" | "mkv";

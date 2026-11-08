@@ -273,6 +273,12 @@ async function main(): Promise<void> {
       const result = await games.runGameOnce(undefined, flag("--compact-db"));
       emit(0, { ...result, ok: true, command, action: "work" });
     }
+    if (sub === "measure") {
+      const id = flag("--id");
+      if (!id) emit(2, { ok: false, command, error: "Нужен --id." });
+      const result = await games.measureGame(id);
+      emit(result.ok ? 0 : 3, { command, action: "measure", ...result, ok: result.ok === true });
+    }
     if (sub === "launch") {
       const id = flag("--id");
       if (!id) emit(2, { ok: false, command, error: "Нужен --id." });

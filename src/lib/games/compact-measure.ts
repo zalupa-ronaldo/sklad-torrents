@@ -79,6 +79,70 @@ export function accountReadings(files: readonly CompactReading[]): CompactAccoun
   return decideCompact({ files: files.length, logical, allocated, wof });
 }
 
+export function parseGroupedNumber(raw: string): number | null {
+  const digits = raw.replace(/[\s\u00a0\u202f,_]/g, "");
+  if (!/^\d+$/.test(digits)) return null;
+  const value = Number(digits);
+  return Number.isSafeInteger(value) ? value : null;
+}
+
+export interface CompactSummary {
+  fileCount: number | null;
+  compressedCount: number | null;
+  logical: number | null;
+  stored: number | null;
+}
+
+/** Reads the summary compact.exe actually printed. The Russian retest has no per-file line. */
+export function parseCompactSummary(text: string): CompactSummary {
+  const clean = text.replace(/^\uFEFF/, "");
+  const ru = /Данные объемом\s+([0-9\u00a0\u202f\s]+)\s+байт сохранены в\s+([0-9\u00a0\u202f\s]+)\s+байт/i.exec(clean);
+  const en = /([0-9][0-9,\u00a0\u202f\s]*)\s+total bytes of data are stored in\s+([0-9][0-9,\u00a0\u202f\s]*)\s+bytes/i.exec(clean);
+  const pair = ru ?? en;
+  const fileCount = firstNumber(clean, /Всего файлов:\s*(\d+)/i) ?? firstNumber(clean, /Of\s+(\d+)\s+files/i);
+  const compressedCount = firstNumber(clean, /Из них сжато:\s*(\d+)/i) ?? firstNumber(clean, /(\d+)\s+are compressed/i);
+  return {
+    fileCount,
+    compressedCount,
+    logical: pair ? parseGroupedNumber(pair[1]!) : null,
+    stored: pair ? parseGroupedNumber(pair[2]!) : null,
+  };
+}
+
+function firstNumber(text: string, pattern: RegExp): number | null {
+  const match = pattern.exec(text);
+  return match ? parseGroupedNumber(match[1]!) : null;
+}
+
+export function reconcileOwnedRoot(input: {
+  files: readonly OwnedFile[];
+  sizes: ReadonlyMap<string, number | null>;
+  summary: CompactSummary;
+  perFile: ReadonlyMap<string, { logical: number; stored: number; wof: number | null }>;
+}): CompactAccount {
+  const logical = input.files.reduce((sum, file) => sum + file.logical, 0);
+  const apiValues = input.files.map((file) => input.sizes.get(file.full) ?? null);
+  const apiKnown = apiValues.every((value) => value != null);
+  const allocated = apiKnown ? apiValues.reduce<number>((sum, value) => sum + (value ?? 0), 0) : null;
+  const perFileReadings = readingsFromQuery(input.files, input.sizes, input.perFile);
+  const perFile = accountReadings(perFileReadings);
+  if (perFile.known && perFile.compressed && perFile.logical === logical && perFile.allocated === allocated) return perFile;
+  const summaryAgrees = input.summary.logical === logical
+    && allocated != null
+    && input.summary.stored === allocated
+    && input.summary.fileCount === input.files.length
+    && input.summary.compressedCount === input.files.length
+    && allocated < logical;
+  if (summaryAgrees) {
+    const agreed = decideCompact({ files: input.files.length, logical, allocated, wof: allocated });
+    return { ...agreed, reason: `${agreed.reason} Сводка compact /Q совпала с GetCompressedFileSizeW. Имя алгоритма в сводке не названо.` };
+  }
+  const reason = input.summary.logical == null || input.summary.stored == null
+    ? "compact /Q не содержит строку stored : logical и не содержит сводку объёма. Неизвестный размер не заменяется нулём."
+    : `Сводка compact /Q logical ${input.summary.logical}, stored ${input.summary.stored} не совпала с файлами корня logical ${logical}, GetCompressedFileSizeW ${allocated ?? "не прочитан"}.`;
+  return { files: input.files.length, logical, allocated, wof: null, known: false, compressed: false, reason };
+}
+
 export function parseCompactListing(text: string): Map<string, { logical: number; stored: number; wof: number | null }> {
   const found = new Map<string, { logical: number; stored: number; wof: number | null }>();
   for (const line of text.split(/\r?\n/)) {
@@ -157,11 +221,41 @@ export async function measureWindowsRoot(root: string): Promise<CompactAccount> 
     compressedSizes(listed.files.map((file) => file.full)),
     compactQuery(root),
   ]);
-  if (!sizes || query == null) return decideCompact({ files: listed.files.length, logical: null, allocated: null, wof: null });
-  return accountReadings(readingsFromQuery(listed.files, sizes, parseCompactListing(query)));
+  const logical = listed.files.reduce((sum, file) => sum + file.logical, 0);
+  if (!sizes.ok || !query.ok) {
+    return {
+      files: listed.files.length,
+      logical,
+      allocated: sizes.ok ? sizes.total : null,
+      wof: null,
+      known: false,
+      compressed: false,
+      reason: measurementFailure(sizes, query),
+    };
+  }
+  const account = reconcileOwnedRoot({
+    files: listed.files,
+    sizes: sizes.values,
+    summary: parseCompactSummary(query.text),
+    perFile: parseCompactListing(query.text),
+  });
+  if (!account.known && (sizes.note || query.note)) {
+    return { ...account, reason: `${account.reason} ${[sizes.note, query.note].filter(Boolean).join(" ")}`.trim() };
+  }
+  return account;
 }
 
-async function compressedSizes(files: readonly string[]): Promise<Map<string, number | null> | null> {
+function measurementFailure(
+  sizes: { ok: boolean; code: number | null; note: string },
+  query: { ok: boolean; code: number | null; note: string },
+): string {
+  const parts = ["Измерение корня не сошлось. Сжатие заново не запускается."];
+  if (!sizes.ok) parts.push(`GetCompressedFileSizeW код ${sizes.code ?? "нет"}. ${sizes.note}`.trim());
+  if (!query.ok) parts.push(`compact /Q код ${query.code ?? "нет"}. ${query.note}`.trim());
+  return parts.join(" ");
+}
+
+async function compressedSizes(files: readonly string[]): Promise<{ ok: boolean; values: Map<string, number | null>; total: number | null; code: number | null; note: string }> {
   const script = [
     "$ErrorActionPreference = 'Stop'",
     "Add-Type -TypeDefinition @'",
@@ -186,34 +280,76 @@ async function compressedSizes(files: readonly string[]): Promise<Map<string, nu
     "}",
   ].join("\n");
   const result = await run("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], { SKLAD_COMPACT_FILES: JSON.stringify(files) });
-  if (result.code !== 0) return null;
-  const sizes = new Map<string, number | null>();
-  for (const line of result.stdout.split(/\r?\n/)) {
+  if (result.code !== 0) return { ok: false, values: new Map(), total: null, code: result.code, note: clipDiag(result.stderr || result.error) };
+  const values = new Map<string, number | null>();
+  for (const line of decodeProcessText(result.stdoutBuf).split(/\r?\n/)) {
     if (!line.trim()) continue;
     try {
       const parsed = JSON.parse(line) as { path?: string; allocated?: number | null };
-      if (!parsed.path) return null;
-      sizes.set(parsed.path, typeof parsed.allocated === "number" && Number.isSafeInteger(parsed.allocated) ? parsed.allocated : null);
+      if (!parsed.path) return { ok: false, values, total: null, code: result.code, note: "Ответ GetCompressedFileSizeW не разобран." };
+      values.set(parsed.path, typeof parsed.allocated === "number" && Number.isSafeInteger(parsed.allocated) ? parsed.allocated : null);
     } catch {
-      return null;
+      return { ok: false, values, total: null, code: result.code, note: "Ответ GetCompressedFileSizeW не разобран." };
     }
   }
-  return sizes;
+  const numbers = files.map((file) => values.get(file) ?? null);
+  const total = numbers.every((value) => value != null) ? numbers.reduce<number>((sum, value) => sum + (value ?? 0), 0) : null;
+  return { ok: true, values, total, code: result.code, note: "" };
 }
 
-async function compactQuery(root: string): Promise<string | null> {
+async function compactQuery(root: string): Promise<{ ok: boolean; text: string; code: number | null; note: string }> {
   const result = await run("C:\\Windows\\System32\\compact.exe", ["/Q", `/S:${root}`], {});
-  return result.code === 0 ? result.stdout : null;
+  const text = decodeCompact(result.stdoutBuf);
+  if (result.code !== 0) return { ok: false, text, code: result.code, note: clipDiag(result.stderr || result.error) };
+  return { ok: true, text, code: result.code, note: "" };
 }
 
-function run(bin: string, args: string[], env: Record<string, string>): Promise<{ code: number | null; stdout: string }> {
+function decodeProcessText(buf: Buffer): string {
+  if (buf.length >= 2 && buf[0] === 0xff && buf[1] === 0xfe) return buf.subarray(2).toString("utf16le");
+  if (buf.length >= 4 && buf[1] === 0 && buf[3] === 0) return buf.toString("utf16le");
+  return buf.toString("utf8");
+}
+
+function decodeCompact(buf: Buffer): string {
+  if (buf.length >= 2 && buf[0] === 0xff && buf[1] === 0xfe) return buf.subarray(2).toString("utf16le");
+  const utf8 = buf.toString("utf8").replace(/^\uFEFF/, "");
+  if (parseCompactSummary(utf8).logical != null || parseCompactListing(utf8).size > 0) return utf8;
+  if (buf.includes(0)) {
+    const utf16 = buf.toString("utf16le").replace(/^\uFEFF/, "");
+    if (parseCompactSummary(utf16).logical != null || parseCompactListing(utf16).size > 0) return utf16;
+  }
+  return utf8;
+}
+
+export function clipDiag(text: string): string {
+  return text
+    .replace(/\uFEFF/g, "")
+    .replace(/[A-Za-z]:\\[^\s"']+/g, "<path>")
+    .replace(/\/(?:Users|home)\/[^\s"']+/g, "<path>")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 240);
+}
+
+function run(bin: string, args: string[], env: Record<string, string>): Promise<{ code: number | null; stdout: string; stdoutBuf: Buffer; stderr: string; error: string }> {
   return new Promise((resolve) => {
     const child = spawn(bin, args, { shell: false, windowsHide: true, env: { ...process.env, ...env }, stdio: ["ignore", "pipe", "pipe"] });
-    let stdout = "";
+    const out: Buffer[] = [];
+    const err: Buffer[] = [];
+    let outLen = 0;
+    let errLen = 0;
     child.stdout?.on("data", (chunk: Buffer) => {
-      if (stdout.length < 1_000_000) stdout += chunk.toString("utf8");
+      if (outLen < 1_000_000) out.push(chunk);
+      outLen += chunk.length;
     });
-    child.on("error", () => resolve({ code: null, stdout }));
-    child.on("close", (code) => resolve({ code, stdout }));
+    child.stderr?.on("data", (chunk: Buffer) => {
+      if (errLen < 64_000) err.push(chunk);
+      errLen += chunk.length;
+    });
+    child.on("error", (error) => resolve({ code: null, stdout: "", stdoutBuf: Buffer.alloc(0), stderr: "", error: error.message }));
+    child.on("close", (code) => {
+      const stdoutBuf = Buffer.concat(out);
+      resolve({ code, stdout: stdoutBuf.toString("utf8"), stdoutBuf, stderr: Buffer.concat(err).toString("utf8"), error: "" });
+    });
   });
 }
