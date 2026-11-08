@@ -1,7 +1,8 @@
 /**
  * Community compression results published by CompactGUI.
- * The program is GPL-3.0, copyright Iridium IO. This module does not copy that source.
- * It reads the JSON file the project publishes on the database branch.
+ * The CompactGUI program is GPL-3.0, copyright Iridium IO. This module does not copy that source.
+ * database.json is published by that project and has no separate license notice in the file or the repository LICENSE.
+ * The program license does not by itself prove the JSON is outside the GPL. The data is not redistributed here.
  * The file has no per-game timestamp. updatedAt is when we fetched the file.
  * A fetch sends no catalog and no local file names.
  */
