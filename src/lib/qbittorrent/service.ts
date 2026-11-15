@@ -2,11 +2,22 @@ import type { QbittorrentClient } from "@/lib/qbittorrent/client";
 import { HttpQbittorrentClient } from "@/lib/qbittorrent/http-client";
 import { getMockClient, resetMockHost } from "@/lib/qbittorrent/mock-client";
 import { QbittorrentError, errorMessage } from "@/lib/qbittorrent/errors";
-import { assertHash, assertPathForOs, assertPriority, joinRemotePath } from "@/lib/qbittorrent/paths";
+import {
+  assertAllowedTorrentPath,
+  assertHash,
+  assertPriority,
+  assertSavePath,
+  describeTorrentLocation,
+  isClosedDrive,
+  isForbiddenTorrentVolume,
+  joinRemotePath,
+  pathForWindowsPanel,
+} from "@/lib/qbittorrent/paths";
 import { downloadPhase } from "@/lib/scheduler/phase";
 import { setUserPaused } from "@/lib/scheduler/store";
 import {
   createHost,
+  dataDir,
   deleteHost,
   loadHosts,
   loadMarks,
@@ -17,6 +28,7 @@ import {
   updateHost,
   type HostDraft,
 } from "@/lib/qbittorrent/store";
+import { createTransferJob, type TransferJob } from "@/lib/torrents/transfer";
 
 export function requireHost(id: string) {
   return loadRequiredHost(id);
@@ -24,9 +36,11 @@ export function requireHost(id: string) {
 import type {
   AddTorrentInput,
   DashboardPayload,
+  HostOs,
   HostRecord,
   QbProbe,
   TorrentDetailPayload,
+  TorrentFileSnapshot,
   TorrentSnapshot,
   TorrentView,
 } from "@/lib/qbittorrent/types";
@@ -47,12 +61,16 @@ export async function getDashboard(): Promise<DashboardPayload> {
   const hosts = await loadHosts();
   const marks = await loadMarks();
   const results = await Promise.all(hosts.map((host) => loadHost(host)));
-  const torrents = results.flatMap((result) =>
-    result.torrents.map((torrent) => decorate(torrent, result.host, marks)),
-  );
+  const visible = results.map((result) => ({
+    ...result,
+    torrents: result.torrents.filter(
+      (torrent) => !isForbiddenTorrentVolume(torrent.savePath) && !isForbiddenTorrentVolume(torrent.contentPath),
+    ),
+  }));
+  const torrents = visible.flatMap((result) => result.torrents.map((torrent) => decorate(torrent, result.host, marks)));
   torrents.sort((a, b) => a.hostName.localeCompare(b.hostName, "ru") || a.name.localeCompare(b.name, "ru"));
   return {
-    hosts: results.map((result) => ({
+    hosts: visible.map((result) => ({
       ...toPublic(result.host),
       online: result.error === null,
       error: result.error,
@@ -69,8 +87,7 @@ export async function getTorrentDetail(hostId: string, hash: string): Promise<To
   const host = await requireHost(hostId);
   const client = clientFor(host);
   await client.login();
-  const torrents = await client.listTorrents();
-  const torrent = torrents.find((item) => item.hash === safe);
+  const torrent = (await client.listTorrents()).map((item) => forPanel(host, item)).find((item) => item?.hash === safe);
   if (!torrent) throw new QbittorrentError("not_found", "Раздача не найдена на этом хосте.");
   const files = await client.listFiles(safe);
   const marks = await loadMarks();
@@ -80,6 +97,7 @@ export async function getTorrentDetail(hostId: string, hash: string): Promise<To
       ...file,
       absolutePath: joinRemotePath(host.os, torrent.savePath, file.name),
     })),
+    location: describeTorrentLocation(torrent.savePath, torrent.contentPath),
   };
 }
 
@@ -103,7 +121,8 @@ export async function addTorrent(input: {
   if (!urls && !input.data) {
     throw new QbittorrentError("validation", "Нужен магнет или файл .torrent.");
   }
-  const savePath = assertPathForOs(host.os, input.savePath);
+  assertAllowedTorrentPath(input.savePath);
+  const savePath = assertSavePath(host.os, host.pathStyle, input.savePath);
   const payload: AddTorrentInput = {
     urls: urls || undefined,
     torrent: input.data ? { filename: input.filename || "upload.torrent", data: input.data } : undefined,
@@ -143,12 +162,13 @@ export async function deleteTorrent(hostId: string, hash: string, deleteFiles: b
 
 export async function relocateTorrent(hostId: string, hash: string, location: string): Promise<void> {
   const host = await requireHost(hostId);
+  assertAllowedTorrentPath(location);
+  const next = assertSavePath(host.os, host.pathStyle, location);
   const safe = assertHash(hash);
   const client = clientFor(host);
   const torrents = await client.listTorrents();
   const torrent = torrents.find((item) => item.hash === safe);
   if (!torrent) throw new QbittorrentError("not_found", "Раздача не найдена на этом хосте.");
-  const next = assertPathForOs(host.os, location);
   if (next === torrent.savePath) {
     throw new QbittorrentError("validation", "Это уже текущий каталог.");
   }
@@ -158,13 +178,14 @@ export async function relocateTorrent(hostId: string, hash: string, location: st
 
 export async function markForMove(hostId: string, hash: string, destination: string): Promise<void> {
   const host = await requireHost(hostId);
+  assertAllowedTorrentPath(destination);
+  const path = assertSavePath(host.os, host.pathStyle, destination);
   const safe = assertHash(hash);
   const client = clientFor(host);
   const torrents = await client.listTorrents();
   if (!torrents.some((torrent) => torrent.hash === safe)) {
     throw new QbittorrentError("not_found", "Раздача не найдена на этом хосте.");
   }
-  const path = assertPathForOs(host.os, destination);
   await saveMark({ hostId, hash: safe, destination: path, markedAt: Date.now() });
 }
 
@@ -200,6 +221,41 @@ export async function resetDemo(hostId: string): Promise<void> {
   resetMockHost(host.id, host.os);
 }
 
+export async function startTorrentTransfer(
+  hostId: string,
+  hash: string,
+  destination: string,
+  dir = dataDir(),
+): Promise<TransferJob> {
+  const host = await requireHost(hostId);
+  const safe = assertHash(hash);
+  assertAllowedTorrentPath(destination);
+  const destRoot = assertSavePath(host.os, host.pathStyle, destination);
+  const client = clientFor(host);
+  await client.login();
+  const torrent = (await client.listTorrents()).find((item) => item.hash === safe);
+  if (!torrent) throw new QbittorrentError("not_found", "Раздача не найдена на этом хосте.");
+  if (torrent.progress < 1) {
+    throw new QbittorrentError("validation", "Раздача ещё качается. Перенос начнётся после полной загрузки.");
+  }
+  const files = await client.listFiles(safe);
+  if (files.length === 0) {
+    throw new QbittorrentError("validation", "В раздаче нет файлов для переноса.");
+  }
+  return createTransferJob(
+    dir,
+    {
+      hostId: host.id,
+      hash: safe,
+      name: torrent.name,
+      sourceRoot: torrent.savePath,
+      destRoot,
+      files: buildTransferFiles(torrent, files, destRoot),
+    },
+    Date.now(),
+  );
+}
+
 export async function testHost(input: {
   id?: string;
   baseUrl?: string;
@@ -230,14 +286,63 @@ async function loadHost(host: HostRecord): Promise<{
   try {
     const client = clientFor(host);
     await client.login();
-    const [torrents, probe] = await Promise.all([
+    const [listed, probe] = await Promise.all([
       client.listTorrents(),
       client.probe().catch(() => null),
     ]);
+    const torrents = listed.flatMap((torrent) => {
+      const shown = forPanel(host, torrent);
+      return shown ? [shown] : [];
+    });
     return { host, torrents, probe, error: null };
   } catch (error) {
     return { host, torrents: [], probe: null, error: errorMessage(error) };
   }
+}
+
+function forPanel(host: HostRecord, torrent: TorrentSnapshot): TorrentSnapshot | null {
+  if (isClosedDrive(torrent.savePath) || isClosedDrive(torrent.contentPath)) return null;
+  if (host.os !== "win32") return torrent;
+  return {
+    ...torrent,
+    savePath: pathForWindowsPanel(torrent.savePath),
+    contentPath: pathForWindowsPanel(torrent.contentPath),
+  };
+}
+
+function buildTransferFiles(
+  torrent: TorrentSnapshot,
+  files: TorrentFileSnapshot[],
+  destRoot: string,
+): { relativeName: string; size: number; sourcePath: string; destPath: string }[] {
+  if (files.length === 1) {
+    const file = files[0];
+    const sourcePath = torrent.contentPath.trim() || joinUnder(torrent.savePath, file.name);
+    return [
+      {
+        relativeName: file.name,
+        size: file.size,
+        sourcePath,
+        destPath: joinUnder(destRoot, file.name),
+      },
+    ];
+  }
+  return files.map((file) => ({
+    relativeName: file.name,
+    size: file.size,
+    sourcePath: joinUnder(torrent.savePath, file.name),
+    destPath: joinUnder(destRoot, file.name),
+  }));
+}
+
+function joinUnder(root: string, child: string): string {
+  const os: HostOs = looksLikeWindows(root) ? "win32" : "darwin";
+  return joinRemotePath(os, root, child);
+}
+
+function looksLikeWindows(input: string): boolean {
+  const trimmed = input.trim().replace(/^\\\\\?\\/, "");
+  return /^[A-Za-z]:[\\/]/.test(trimmed) || trimmed.startsWith("\\\\");
 }
 
 function decorate(torrent: TorrentSnapshot, host: HostRecord, marks: { hostId: string; hash: string; destination: string; markedAt: number }[]): TorrentView {

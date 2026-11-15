@@ -4,14 +4,23 @@ import { inboxPathForHost, safeTickAutomaticPlacement } from "@/lib/policies/aut
 import { QbittorrentError } from "@/lib/qbittorrent/errors";
 import { addTorrent } from "@/lib/qbittorrent/service";
 import { ensureSchedulerLoop, tickScheduler } from "@/lib/scheduler/apply";
+import { searchTorrents } from "@/lib/torrents/search";
 
 export const runtime = "nodejs";
 
-export async function GET() {
+export async function GET(request: Request) {
   return guard(async () => {
     ensureSchedulerLoop();
     const tick = await tickScheduler();
-    return json(tick.dashboard);
+    const url = new URL(request.url);
+    const q = url.searchParams.get("q")?.trim() || undefined;
+    const hostId = url.searchParams.get("hostId")?.trim() || undefined;
+    const state = url.searchParams.get("state")?.trim() || undefined;
+    if (!q && !hostId && !state) return json(tick.dashboard);
+    return json({
+      ...tick.dashboard,
+      torrents: searchTorrents(tick.dashboard.torrents, { q, hostId, state }),
+    });
   });
 }
 

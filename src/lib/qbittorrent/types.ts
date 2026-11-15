@@ -1,5 +1,6 @@
 export type HostOs = "darwin" | "win32";
 export type HostKind = "mock" | "http";
+export type PathStyle = "windows" | "wsl" | "posix";
 
 export type NormalizedState =
   | "downloading"
@@ -28,6 +29,7 @@ export interface HostRecord {
   username: string;
   password: string;
   os: HostOs;
+  pathStyle?: PathStyle;
   pathPresets: PathPreset[];
 }
 
@@ -38,6 +40,7 @@ export interface HostPublic {
   baseUrl: string;
   username: string;
   os: HostOs;
+  pathStyle?: PathStyle;
   pathPresets: PathPreset[];
   hasPassword: boolean;
 }
@@ -118,9 +121,17 @@ export interface DashboardPayload {
   torrents: TorrentView[];
 }
 
+export interface TorrentLocation {
+  seedingFrom: string;
+  contentPath: string;
+  windowsPath: string | null;
+  wslPath: string | null;
+}
+
 export interface TorrentDetailPayload {
   torrent: TorrentView;
   files: TorrentFileView[];
+  location: TorrentLocation;
 }
 
 export interface RawTorrent {

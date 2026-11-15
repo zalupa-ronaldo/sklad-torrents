@@ -4,8 +4,8 @@ import path from "node:path";
 
 import { demoHosts } from "@/lib/qbittorrent/demo-data";
 import { QbittorrentError } from "@/lib/qbittorrent/errors";
-import { normalizeRemotePath } from "@/lib/qbittorrent/paths";
-import type { HostOs, HostPublic, HostRecord, MoveMark, PathPreset } from "@/lib/qbittorrent/types";
+import { assertAllowedTorrentPath, assertSavePath, normalizeRemotePath } from "@/lib/qbittorrent/paths";
+import type { HostOs, HostPublic, HostRecord, MoveMark, PathPreset, PathStyle } from "@/lib/qbittorrent/types";
 import { normalizeBaseUrl } from "@/lib/qbittorrent/urls";
 
 interface HostsFile {
@@ -22,6 +22,7 @@ export interface HostDraft {
   username: string;
   password?: string;
   os: HostOs;
+  pathStyle?: PathStyle;
   pathPresets?: PathPreset[];
 }
 
@@ -37,6 +38,7 @@ export function toPublic(host: HostRecord): HostPublic {
     baseUrl: host.baseUrl,
     username: host.username,
     os: host.os,
+    pathStyle: host.pathStyle ?? (host.os === "darwin" ? "posix" : "windows"),
     pathPresets: host.pathPresets,
     hasPassword: host.password.length > 0,
   };
@@ -76,7 +78,8 @@ export async function updateHost(id: string, draft: HostDraft): Promise<HostPubl
   if (index < 0) throw new QbittorrentError("not_found", "Хост не найден.");
   const current = hosts[index];
   const password = draft.password && draft.password.length > 0 ? draft.password : current.password;
-  hosts[index] = recordFromDraft({ ...draft, password }, id, false);
+  const pathStyle = draft.pathStyle === undefined ? current.pathStyle : draft.pathStyle;
+  hosts[index] = recordFromDraft({ ...draft, password, pathStyle }, id, false);
   await writeCustomHosts(hosts);
   return toPublic(hosts[index]);
 }
@@ -124,6 +127,7 @@ function recordFromDraft(draft: HostDraft, id: string, requirePassword: boolean)
   if (requirePassword && !password) {
     throw new QbittorrentError("validation", "Укажите пароль Web UI.");
   }
+  const pathStyle = explicitPathStyle(draft.pathStyle);
   return {
     id,
     name,
@@ -132,15 +136,25 @@ function recordFromDraft(draft: HostDraft, id: string, requirePassword: boolean)
     username,
     password,
     os: draft.os,
-    pathPresets: cleanPresets(draft.os, draft.pathPresets),
+    ...(pathStyle ? { pathStyle } : {}),
+    pathPresets: cleanPresets(draft.os, pathStyle, draft.pathPresets),
   };
 }
 
-function cleanPresets(os: HostOs, presets: PathPreset[] | undefined): PathPreset[] {
+function explicitPathStyle(value: unknown): PathStyle | undefined {
+  if (value === undefined) return undefined;
+  if (value === "windows" || value === "wsl" || value === "posix") return value;
+  throw new QbittorrentError("validation", "Неизвестный стиль пути.");
+}
+
+function cleanPresets(os: HostOs, pathStyle: PathStyle | undefined, presets: PathPreset[] | undefined): PathPreset[] {
   if (!Array.isArray(presets)) return [];
   const cleaned: PathPreset[] = [];
   for (const preset of presets.slice(0, 24)) {
-    const presetPath = normalizeRemotePath(os, String(preset?.path || ""));
+    const raw = String(preset?.path || "");
+    if (!raw.trim()) continue;
+    assertAllowedTorrentPath(raw);
+    const presetPath = pathStyle === "wsl" ? assertSavePath(os, "wsl", raw) : normalizeRemotePath(os, raw);
     if (!presetPath) continue;
     cleaned.push({
       id: typeof preset.id === "string" && preset.id ? preset.id : randomUUID(),

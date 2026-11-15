@@ -18,9 +18,11 @@ import {
   resetDemo,
   resumeTorrent,
   skipIncomplete,
+  startTorrentTransfer,
   testHost,
   updateHost,
 } from "@/lib/qbittorrent/service";
+import { listTransferJobs, stepTorrentTransfers } from "@/lib/torrents/transfer";
 
 describe("torrent service", () => {
   let dir: string;
@@ -154,5 +156,123 @@ describe("torrent service", () => {
       pathPresets: [{ id: "dl", label: "Загрузки", path: "D:\\Downloads" }],
     });
     await expect(testHost({ id: created.id })).resolves.toMatchObject({ appVersion: "v5.1.2" });
+  });
+
+  it("shows a WSL mount as a Windows path and hides drive Z", async () => {
+    const secret = "private-on-z.mkv";
+    const fake = await startFakeQbittorrent({
+      password: "secret-pass",
+      torrents: [
+        {
+          hash: "e".repeat(40),
+          name: "From WSL",
+          state: "uploading",
+          progress: 1,
+          size: 10,
+          save_path: "/mnt/d/Downloads",
+          content_path: "/mnt/d/Downloads/From WSL",
+        },
+        {
+          hash: "f".repeat(40),
+          name: secret,
+          state: "uploading",
+          progress: 1,
+          size: 10,
+          save_path: "Z:\\Archive",
+          content_path: `Z:\\Archive\\${secret}`,
+        },
+      ],
+    });
+    servers.push(fake);
+    await createHost({
+      name: "WSL",
+      baseUrl: fake.url,
+      username: "admin",
+      password: "secret-pass",
+      os: "win32",
+    });
+    const dashboard = await getDashboard();
+    expect(JSON.stringify(dashboard)).not.toContain(secret);
+    expect(JSON.stringify(dashboard)).not.toContain("Z:");
+    expect(dashboard.torrents.find((torrent) => torrent.name === "From WSL")).toMatchObject({
+      savePath: "D:\\Downloads",
+      contentPath: "D:\\Downloads\\From WSL",
+    });
+    const before = (await getDashboard()).torrents.find((torrent) => torrent.hash === DEMO_HASH.control);
+    await expect(relocateTorrent(DEMO_PC_ID, DEMO_HASH.control, "Z:\\Archive")).rejects.toThrow(/Диск Z:/);
+    expect((await getDashboard()).torrents.find((torrent) => torrent.hash === DEMO_HASH.control)?.savePath).toBe(before?.savePath);
+    await relocateTorrent(DEMO_PC_ID, DEMO_HASH.control, "/mnt/s/Software");
+    expect((await getTorrentDetail(DEMO_PC_ID, DEMO_HASH.control)).torrent.savePath).toBe("S:\\Software");
+  });
+
+  it("rejects drive Z without changing the library and keeps a finished torrent seeding", async () => {
+    const before = (await getDashboard()).torrents.map((torrent) => [torrent.hash, torrent.savePath, torrent.state, torrent.rawState]);
+    await expect(
+      addTorrent({
+        hostId: DEMO_PC_ID,
+        urls: `magnet:?xt=urn:btih:${"b".repeat(40)}&dn=Nope`,
+        savePath: "Z:\\Games",
+      }),
+    ).rejects.toThrow("Диск Z: не используется. Выберите другой каталог.");
+    await expect(markForMove(DEMO_PC_ID, DEMO_HASH.blender, "Z:\\Games")).rejects.toThrow(/Диск Z:/);
+    expect((await getDashboard()).torrents.map((torrent) => [torrent.hash, torrent.savePath, torrent.state, torrent.rawState])).toEqual(before);
+
+    await expect(startTorrentTransfer(DEMO_PC_ID, DEMO_HASH.control, "E:\\Moved")).rejects.toThrow(
+      "Раздача ещё качается. Перенос начнётся после полной загрузки.",
+    );
+    const finished = await getTorrentDetail(DEMO_PC_ID, DEMO_HASH.blender);
+    const job = await startTorrentTransfer(DEMO_PC_ID, DEMO_HASH.blender, "E:\\Moved");
+    await stepTorrentTransfers(dir, Date.now());
+    const still = await getTorrentDetail(DEMO_PC_ID, DEMO_HASH.blender);
+    expect(still.torrent.state).toBe(finished.torrent.state);
+    expect(still.torrent.rawState).toBe(finished.torrent.rawState);
+    expect(still.torrent.savePath).toBe(finished.torrent.savePath);
+    expect(job.seedingPreserved).toBe(true);
+    expect(job.status).toBe("queued");
+    expect((await listTransferJobs(dir))[0]).toMatchObject({ status: "queued", files: [{ copiedBytes: 0 }] });
+
+    const games = await getTorrentDetail(DEMO_PC_ID, DEMO_HASH.control);
+    expect(games.location).toMatchObject({ seedingFrom: "D:\\Games", windowsPath: "D:\\Games", wslPath: "/mnt/d/Games" });
+    const film = await getTorrentDetail(DEMO_MAC_ID, DEMO_HASH.interstellar);
+    expect(film.location.windowsPath).toBeNull();
+    expect(film.location.wslPath).toBeNull();
+  });
+
+  it("persists an explicit WSL path style and refuses Z or an unknown style", async () => {
+    const created = await createHost({
+      name: "WSL стиль",
+      baseUrl: "http://127.0.0.1:9",
+      username: "broker",
+      password: "secret-pass",
+      os: "win32",
+      pathStyle: "wsl",
+      pathPresets: [{ id: "dl", label: "Загрузки", path: "D:\\Downloads" }],
+    });
+    expect(created.pathStyle).toBe("wsl");
+    expect(created.pathPresets[0]?.path).toBe("/mnt/d/Downloads");
+    const dashboard = await getDashboard();
+    expect(dashboard.hosts.find((host) => host.id === DEMO_MAC_ID)?.pathStyle).toBe("posix");
+    expect(dashboard.hosts.find((host) => host.id === DEMO_PC_ID)?.pathStyle).toBe("windows");
+    await expect(
+      createHost({
+        name: "Плохой стиль",
+        baseUrl: "http://127.0.0.1:9",
+        username: "broker",
+        password: "secret-pass",
+        os: "win32",
+        pathStyle: "mac" as "wsl",
+      }),
+    ).rejects.toThrow("Неизвестный стиль пути.");
+    await expect(
+      createHost({
+        name: "Диск Z",
+        baseUrl: "http://127.0.0.1:9",
+        username: "broker",
+        password: "secret-pass",
+        os: "win32",
+        pathStyle: "wsl",
+        pathPresets: [{ id: "z", label: "Z", path: "Z:\\Games" }],
+      }),
+    ).rejects.toThrow("Диск Z: не используется. Выберите другой каталог.");
   });
 });

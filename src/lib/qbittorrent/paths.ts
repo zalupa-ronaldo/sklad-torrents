@@ -1,5 +1,46 @@
 import { QbittorrentError } from "@/lib/qbittorrent/errors";
-import type { HostOs } from "@/lib/qbittorrent/types";
+import type { HostOs, PathStyle, TorrentLocation } from "@/lib/qbittorrent/types";
+
+export type { PathStyle } from "@/lib/qbittorrent/types";
+
+export const FORBIDDEN_VOLUME_MESSAGE = "Диск Z: не используется. Выберите другой каталог.";
+
+const CLOSED_DRIVE = /^(?:\\\\\?\\)?[Zz]:(?:[\\/]|$)/;
+const CLOSED_MOUNT = /^\/mnt\/z(?:\/|$)/i;
+
+/** Drive Z: and its WSL mount are never accepted, listed, or logged. */
+export function isClosedDrive(input: string): boolean {
+  const trimmed = input.trim();
+  if (!trimmed) return false;
+  if (CLOSED_DRIVE.test(trimmed)) return true;
+  return CLOSED_MOUNT.test(trimmed.replace(/\\/g, "/"));
+}
+
+export function rejectClosedDrive(input: string): void {
+  if (isForbiddenTorrentVolume(input)) {
+    throw new QbittorrentError("validation", FORBIDDEN_VOLUME_MESSAGE);
+  }
+}
+
+/**
+ * `/mnt/d/Downloads` is the path qbittorrent-nox sees. The panel stores `D:\\Downloads`.
+ * Returns null when the string is not a WSL drive mount. Letter Z never converts.
+ */
+export function windowsPathFromWsl(input: string): string | null {
+  const slash = input.trim().replace(/\\/g, "/");
+  const match = /^\/mnt\/([a-yA-Y])(?:\/(.*))?$/.exec(slash);
+  if (!match) return null;
+  const rest = (match[2] ?? "").replace(/\/+$/, "").replace(/\//g, "\\");
+  return rest ? `${match[1].toUpperCase()}:\\${rest}` : `${match[1].toUpperCase()}:\\`;
+}
+
+export function pathForWindowsPanel(input: string): string {
+  rejectClosedDrive(input);
+  const translated = windowsPathFromWsl(input);
+  if (!translated) return input;
+  rejectClosedDrive(translated);
+  return normalizeRemotePath("win32", translated);
+}
 
 export function normalizeRemotePath(os: HostOs, input: string): string {
   const trimmed = input.trim();
@@ -30,7 +71,11 @@ export function joinRemotePath(os: HostOs, base: string, child: string): string 
 }
 
 export function assertPathForOs(os: HostOs, input: string): string {
-  const normalized = normalizeRemotePath(os, input);
+  rejectClosedDrive(input);
+  const panel = os === "win32" ? windowsPathFromWsl(input) : null;
+  if (panel) rejectClosedDrive(panel);
+  const normalized = normalizeRemotePath(os, panel ?? input);
+  rejectClosedDrive(normalized);
   if (!normalized) {
     throw new QbittorrentError("validation", "Укажите каталог назначения.");
   }
@@ -60,4 +105,84 @@ export function assertPriority(priority: number): number {
     throw new QbittorrentError("validation", "Приоритет файла должен быть целым числом от 0 до 7.");
   }
   return priority;
+}
+
+export function isForbiddenTorrentVolume(input: string): boolean {
+  if (isClosedDrive(input)) return true;
+  const slashed = input.trim().replace(/\\/g, "/").replace(/\/{2,}/g, "/");
+  return slashed !== input.trim() && isClosedDrive(slashed);
+}
+
+export function assertAllowedTorrentPath(input: string): void {
+  if (isForbiddenTorrentVolume(input)) {
+    throw new QbittorrentError("validation", FORBIDDEN_VOLUME_MESSAGE);
+  }
+}
+
+export function windowsPathToWsl(input: string): string | null {
+  if (isForbiddenTorrentVolume(input)) return null;
+  const raw = input.trim().replace(/^\\\\\?\\/, "");
+  const match = raw.match(/^([A-Za-z]):(?:[\\/](.*))?$/);
+  if (!match) return null;
+  const letter = match[1].toLowerCase();
+  if (letter === "z") return null;
+  const rest = (match[2] ?? "").replace(/[\\/]+/g, "/").replace(/^\/+|\/+$/g, "");
+  return rest ? `/mnt/${letter}/${rest}` : `/mnt/${letter}`;
+}
+
+export function wslPathToWindows(input: string): string | null {
+  if (isForbiddenTorrentVolume(input)) return null;
+  const raw = input.trim().replace(/\\/g, "/").replace(/\/{2,}/g, "/");
+  const match = raw.match(/^\/mnt\/([a-y])(?:\/(.*))?$/i);
+  if (!match) return null;
+  const letter = match[1].toUpperCase();
+  const rest = (match[2] ?? "").replace(/^\/+|\/+$/g, "");
+  if (!rest) return `${letter}:\\`;
+  return `${letter}:\\${rest.replace(/\//g, "\\")}`;
+}
+
+export function describeTorrentLocation(savePath: string, contentPath: string): TorrentLocation {
+  return {
+    seedingFrom: savePath,
+    contentPath,
+    windowsPath: windowsFamily(savePath),
+    wslPath: wslFamily(savePath),
+  };
+}
+
+export function assertSavePath(os: HostOs, pathStyle: PathStyle | undefined, input: string): string {
+  assertAllowedTorrentPath(input);
+  if (pathStyle === "wsl") {
+    const fromWindows = windowsPathToWsl(input);
+    if (fromWindows) return fromWindows;
+    const normalized = normalizeWslMount(input);
+    if (normalized) return normalized;
+    throw new QbittorrentError("validation", "Для WSL путь выглядит как /mnt/d/Downloads или D:\\Downloads");
+  }
+  return assertPathForOs(os, input);
+}
+
+function windowsFamily(input: string): string | null {
+  if (!input || isForbiddenTorrentVolume(input)) return null;
+  const fromWsl = wslPathToWindows(input);
+  if (fromWsl) return fromWsl;
+  const asWsl = windowsPathToWsl(input);
+  return asWsl ? wslPathToWindows(asWsl) : null;
+}
+
+function wslFamily(input: string): string | null {
+  if (!input || isForbiddenTorrentVolume(input)) return null;
+  const fromWindows = windowsPathToWsl(input);
+  if (fromWindows) return fromWindows;
+  const asWindows = wslPathToWindows(input);
+  return asWindows ? windowsPathToWsl(asWindows) : null;
+}
+
+function normalizeWslMount(input: string): string | null {
+  const normalized = normalizeRemotePath("darwin", input);
+  const match = normalized.match(/^\/mnt\/([a-y])(?:\/(.*))?$/i);
+  if (!match) return null;
+  const letter = match[1].toLowerCase();
+  const rest = (match[2] ?? "").replace(/^\/+|\/+$/g, "");
+  return rest ? `/mnt/${letter}/${rest}` : `/mnt/${letter}`;
 }

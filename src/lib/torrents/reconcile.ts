@@ -59,7 +59,16 @@ export interface ProtocolSnapshot {
 }
 
 export function forbiddenVolume(value: string): boolean {
-  return /^(?:\\\\\?\\)?[EeZz]:(?:[\\/]|$)/.test(value.trim());
+  const trimmed = value.trim();
+  if (/^(?:\\\\\?\\)?[EeZz]:(?:[\\/]|$)/.test(trimmed)) return true;
+  return /^\/mnt\/[ez](?:\/|$)/i.test(trimmed.replace(/\\/g, "/"));
+}
+
+function touchesForbiddenVolume(os: HostOs, torrent: ProtocolTorrent): boolean {
+  if (forbiddenVolume(torrent.savePath)) return true;
+  return torrent.files.some(
+    (file) => forbiddenVolume(file.name) || forbiddenVolume(joinRemotePath(os, torrent.savePath, file.name)),
+  );
 }
 
 export async function reconcileLocalProtocol(directory = dataDir(), now = Math.floor(Date.now() / 1000)): Promise<{ enqueued: number; blocked: number }> {
@@ -81,7 +90,7 @@ export async function reconcileProtocol(
   const notes: Record<string, unknown>[] = [];
   for (const torrent of protocol.torrents) {
     const hash = torrent.hash.toLowerCase();
-    if (forbiddenVolume(torrent.savePath) || torrent.files.some((file) => forbiddenVolume(joinRemotePath(protocol.os, torrent.savePath, file.name)))) {
+    if (touchesForbiddenVolume(protocol.os, torrent)) {
       blocked += 1;
       notes.push({ hash, action: "blocked", reason: "E и Z не открываются. Метаданные тома не читались." });
       continue;
@@ -145,7 +154,14 @@ export async function reconcileProtocol(
     notes.push({ hash, action: "queued", created: queued.created, jobId: queued.job.id, completedAt: next.completedAt, completedAtSource: next.completedAtSource });
   }
   const seen = await readJson<Record<string, ProtocolTorrent>>(path.join(directory, "torrent-seen.json"), {});
-  for (const torrent of protocol.torrents) seen[torrent.hash.toLowerCase()] = torrent;
+  for (const torrent of protocol.torrents) {
+    const hash = torrent.hash.toLowerCase();
+    if (touchesForbiddenVolume(protocol.os, torrent)) {
+      delete seen[hash];
+      continue;
+    }
+    seen[hash] = torrent;
+  }
   await writeJson(path.join(directory, "torrent-seen.json"), seen);
   await writeJson(path.join(directory, "torrent-completion.json"), memory);
   await writeJson(path.join(directory, "torrent-notes.json"), { notes });
