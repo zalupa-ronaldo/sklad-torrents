@@ -1,4 +1,5 @@
 import { enqueueCompress, enqueueMove, enqueueTranscode } from "@/addons/media-games/service";
+import { assertEncodePaths } from "@/lib/transcode/encode-plan";
 import { writeEncodePolicy } from "@/lib/transcode/policy";
 
 import { json, readBody, toolsGuard } from "@/app/api/tools/guard";
@@ -29,6 +30,11 @@ export async function POST(request: Request) {
       return json(job, 201);
     }
     if (body.kind === "compress") {
+      try {
+        assertEncodePaths([String(body.folderPath || "")]);
+      } catch (error) {
+        return json({ error: error instanceof Error ? error.message : "Путь закрыт." }, 400);
+      }
       const job = await enqueueCompress({
         hostId,
         folderPath: String(body.folderPath || ""),

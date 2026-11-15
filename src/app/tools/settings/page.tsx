@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { toast } from "sonner";
 
 import { COMPACT_GUI_NOTE } from "@/addons/media-games/compact";
@@ -58,6 +58,7 @@ export default function SettingsPage() {
           Стартовые пути можно заменить. Они пишутся в data/ на машине, где запущен Склад, и в git не попадают.
         </p>
       </div>
+      <ReplaceOriginalSetting />
       <label className="flex items-start gap-2 text-sm">
         <Checkbox checked={draft.demoMode} onCheckedChange={(value) => setDraft({ ...draft, demoMode: value === true })} />
         <span>
@@ -138,5 +139,29 @@ export default function SettingsPage() {
         Сохранить
       </Button>
     </div>
+  );
+}
+
+function ReplaceOriginalSetting() {
+  const [enabled, setEnabled] = useState(false);
+  useEffect(() => {
+    void api<{ replaceOriginal?: boolean }>("/api/tools/encode-policy")
+      .then((policy) => setEnabled(policy.replaceOriginal === true))
+      .catch(() => undefined);
+  }, []);
+  return (
+    <label className="flex items-start gap-2 text-sm">
+      <Checkbox
+        checked={enabled}
+        onCheckedChange={(value) => {
+          const next = value === true;
+          setEnabled(next);
+          void api("/api/tools/encode-policy", { method: "PUT", body: JSON.stringify({ replaceOriginal: next }) }).catch(() => undefined);
+        }}
+      />
+      <span>
+        Заменять оригинал видео после проверки длительности, дорожек и воспроизведения. Пока галка снята, автопережатие пишет новый файл рядом, исходник остаётся.
+      </span>
+    </label>
   );
 }

@@ -77,4 +77,45 @@ describe("compact.exe contract", () => {
     expect(compactAllowsLaunch(result)).toBe(false);
     expect(compactAllowsLaunch({ ...result, compressed: true, reason: "native" })).toBe(true);
   });
+
+  it("compresses one file at a time, keeps the bytes, and does not continue after a pause or a changed hash", async () => {
+    const files = [
+      { path: "D:\\Pool\\Game\\a.bin", sha256: "ab".repeat(32) },
+      { path: "D:\\Pool\\Game\\b.bin", sha256: "cd".repeat(32) },
+    ];
+    const calls: string[] = [];
+    const paused = await executeCompact({
+      os: "win32",
+      filesystem: "NTFS",
+      role: "game-pool",
+      root: "D:\\Pool\\Game",
+      escapes: [],
+      algorithm: "XPRESS8K",
+      files,
+      paused: true,
+      hashFile: async (file) => files.find((item) => item.path === file)!.sha256,
+      spawnImpl: async (_bin, args) => {
+        calls.push(args[args.length - 1] ?? "");
+        return { code: 0, stdout: "", stderr: "" };
+      },
+    });
+    expect(calls).toEqual([]);
+    expect(paused.filesDone).toEqual([]);
+    expect(paused.executed).toBe(false);
+
+    const changed = await executeCompact({
+      os: "win32",
+      filesystem: "NTFS",
+      role: "game-pool",
+      root: "D:\\Pool\\Game",
+      escapes: [],
+      algorithm: "XPRESS8K",
+      files: [files[0]!],
+      hashFile: async () => "ff".repeat(32),
+      spawnImpl: async () => ({ code: 0, stdout: "", stderr: "" }),
+    });
+    expect(changed.compressed).toBe(false);
+    expect(changed.filesDone).toEqual([]);
+    expect(changed.reason).toMatch(/SHA-256/);
+  });
 });

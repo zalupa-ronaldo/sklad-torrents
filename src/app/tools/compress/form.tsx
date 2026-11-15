@@ -33,12 +33,20 @@ export function CompressForm() {
 
   const host = data.config.hosts.find((item) => item.id === hostId) ?? data.config.hosts[0];
   const availability = compressAvailability(host.os, folderPath);
+  const drive = /^([A-Za-z]):/.exec(folderPath.trim());
+  const forbiddenDrive = drive?.[1]?.toUpperCase() === "Z" || drive?.[1]?.toUpperCase() === "E";
   const macBlocked = host.os !== "win32";
   const pathBlocked = folderPath.trim().length > 0 && !availability.ok;
-  const blocked = macBlocked || !availability.ok;
-  const reason = macBlocked ? "Только Windows, NTFS." : availability.ok ? null : availability.reason;
+  const blocked = macBlocked || forbiddenDrive || !availability.ok;
+  const reason = forbiddenDrive
+    ? "E и Z не сжимаются."
+    : macBlocked
+      ? "Только Windows, NTFS."
+      : availability.ok
+        ? null
+        : availability.reason;
   let command = "";
-  if (host.os === "win32" && availability.ok) {
+  if (host.os === "win32" && availability.ok && !forbiddenDrive) {
     try {
       command = formatArgv(
         buildCompactArgv({

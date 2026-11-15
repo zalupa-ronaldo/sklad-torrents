@@ -1,7 +1,7 @@
 "use client";
 
 import { useRouter, useSearchParams } from "next/navigation";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { toast } from "sonner";
 
 import { buildHandBrakeArgv, suggestTranscodeOutput } from "@/addons/media-games/handbrake";
@@ -26,6 +26,11 @@ export function TranscodeForm() {
   const [outputPath, setOutputPath] = useState(() => suggestTranscodeOutput(query.os, query.path));
   const [busy, setBusy] = useState(false);
   const [replaceOriginal, setReplaceOriginal] = useState(false);
+  useEffect(() => {
+    void api<{ replaceOriginal?: boolean }>("/api/tools/encode-policy")
+      .then((policy) => setReplaceOriginal(policy.replaceOriginal === true))
+      .catch(() => undefined);
+  }, []);
 
   if (loading && !data) return <p className="text-sm text-muted-foreground">Загрузка формы…</p>;
   if (error && !data) {
@@ -131,7 +136,15 @@ export function TranscodeForm() {
         </div>
       ) : null}
       <label className="flex items-start gap-2 text-sm">
-        <input type="checkbox" checked={replaceOriginal} onChange={(event) => setReplaceOriginal(event.target.checked)} />
+        <input
+          type="checkbox"
+          checked={replaceOriginal}
+          onChange={(event) => {
+            const next = event.target.checked;
+            setReplaceOriginal(next);
+            void api("/api/tools/encode-policy", { method: "PUT", body: JSON.stringify({ replaceOriginal: next }) }).catch(() => undefined);
+          }}
+        />
         <span>Заменить оригинал после проверки длительности, дорожек и воспроизведения. Пока галка снята, исходник остаётся, пишутся SHA-256 исходника и результата.</span>
       </label>
       <Field label="Куда сохранить">
