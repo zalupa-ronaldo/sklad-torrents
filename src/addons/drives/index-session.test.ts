@@ -4,6 +4,7 @@ import {
   chunkGapMs,
   controlIndex,
   defaultIndexPolicy,
+  disksToIndexJobs,
   jobProgress,
   jobTemplate,
   mergeIndexFiles,
@@ -14,6 +15,7 @@ import {
   scheduleIndex,
   type IndexJob,
 } from "@/addons/drives/index-session";
+import type { DiskRecord } from "@/addons/drives/types";
 
 function job(id: string, partial: Partial<IndexJob> = {}) {
   return jobTemplate({ id, label: id, ...partial });
@@ -90,6 +92,20 @@ describe("index load and pause", () => {
     expect(queue.active).toBe(1);
     expect(queue.paused).toBe(1);
     expect(queue.processedBytes).toBe(700);
+  });
+
+  it("does not queue a disk whose letter or mount is Z", () => {
+    const disk = {
+      id: "z",
+      label: "Data",
+      volumeName: "Data",
+      lastMountPath: "Z:\\",
+      totalBytes: 4_000_000_000_000,
+      freeBytes: 1,
+      filesystem: "NTFS",
+      scan: { status: "idle", strategy: "mft-usn", progress: 0, message: "", elevated: true },
+    } as DiskRecord;
+    expect(disksToIndexJobs([disk])).toEqual([]);
   });
 
   it("pauses and cancels the whole queue without dropping cursors", () => {

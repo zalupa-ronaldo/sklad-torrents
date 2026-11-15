@@ -1,4 +1,5 @@
 import { planVolumeCompact, type CompactPlan } from "@/addons/drives/compact-target";
+import { isIgnoredVolume } from "@/addons/drives/volume-letters";
 import { readAgentConfig, readCatalog } from "@/addons/drives/store";
 import type { DiskRecord } from "@/addons/drives/types";
 import { DriveError } from "@/addons/drives/types";
@@ -39,6 +40,7 @@ export async function startVolumeCompact(input: {
   const stored = await readCatalog();
   const disk = stored?.disks.find((item) => item.id === input.diskId);
   if (!disk) throw new DriveError(404, "Диск в каталоге не найден. Сжатие не запускалось.");
+  if (isIgnoredVolume(disk)) throw new DriveError(403, "Диск исключён. Сжатие не запускалось.");
   if (disk.snapshotOnly) throw new DriveError(403, "Это офлайн-снимок. Сжатие не запускается.");
   const host = disk.connectedHosts.find((item) => item.os === "win32");
   const agent = config.agents.find((item) => item.os === "win32" && (item.id === host?.id || item.id === disk.lastHostId));
