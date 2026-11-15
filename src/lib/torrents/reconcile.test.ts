@@ -71,6 +71,45 @@ it("retains below the gate, passes on ratio or 72h, and blocks an unknown date u
   expect((await journal(withRatio, hashA)).gate).toBe("ratio");
 });
 
+it("does not write filenames of a blocked Z: torrent into torrent-seen.json", async () => {
+  const dir = await scratch();
+  const { rules } = await layout(dir);
+  const secret = "private-on-z.bin";
+  const closed = await reconcileProtocol(
+    dir,
+    {
+      hostId: "local",
+      os: "win32",
+      torrents: [
+        {
+          hash: hashB,
+          name: "hidden-volume",
+          progress: 1,
+          state: "seeding",
+          ratio: 1,
+          downloaded: 4,
+          uploaded: 0,
+          addedOn: 1,
+          completionOn: 1,
+          savePath: "Z:\\Archive",
+          files: [{ name: secret, size: 4, progress: 1 }],
+        },
+      ],
+    },
+    rules,
+    200,
+  );
+  expect(closed).toMatchObject({ enqueued: 0, blocked: 1 });
+  const seenText = await readFile(path.join(dir, "torrent-seen.json"), "utf8");
+  const notesText = await readFile(path.join(dir, "torrent-notes.json"), "utf8");
+  expect(seenText).not.toContain(secret);
+  expect(seenText).not.toContain("hidden-volume");
+  expect(seenText).not.toContain("Z:");
+  expect(notesText).not.toContain(secret);
+  expect(notesText).not.toContain("Z:");
+  expect(JSON.parse(notesText).notes[0]).toMatchObject({ hash: hashB, action: "blocked" });
+});
+
 it("blocks a partial torrent, a shared file, a corrupt copy, and E:", async () => {
   const dir = await scratch();
   const { source, rules } = await layout(dir);

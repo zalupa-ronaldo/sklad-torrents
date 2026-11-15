@@ -1,6 +1,6 @@
 import type { QbittorrentClient } from "@/lib/qbittorrent/client";
 import { QbittorrentError } from "@/lib/qbittorrent/errors";
-import { assertHash, assertPriority } from "@/lib/qbittorrent/paths";
+import { assertHash, assertPriority, rejectClosedDrive } from "@/lib/qbittorrent/paths";
 import { mapRawFile, mapRawTorrent, usesStopApi } from "@/lib/qbittorrent/state";
 import type { AddTorrentInput, QbProbe, RawFile, RawTorrent, TorrentFileSnapshot, TorrentSnapshot } from "@/lib/qbittorrent/types";
 import { normalizeBaseUrl } from "@/lib/qbittorrent/urls";
@@ -75,6 +75,7 @@ export class HttpQbittorrentClient implements QbittorrentClient {
   }
 
   async add(input: AddTorrentInput): Promise<{ hashes: string[] }> {
+    if (input.savePath) rejectClosedDrive(input.savePath);
     await this.ready();
     const modern = usesStopApi(await this.webapi());
     const form = new FormData();
@@ -109,6 +110,7 @@ export class HttpQbittorrentClient implements QbittorrentClient {
   }
 
   async setLocation(hashes: string[], location: string): Promise<void> {
+    rejectClosedDrive(location);
     const safe = this.requireHashes(hashes);
     await this.ready();
     await this.form("/api/v2/torrents/setLocation", {

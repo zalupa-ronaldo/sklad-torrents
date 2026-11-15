@@ -114,6 +114,14 @@ describe("qBittorrent HTTP adapter", () => {
     expect(new URLSearchParams(remove?.body || "").get("deleteFiles")).toBe("true");
   });
 
+  it("does not send setLocation for drive Z", async () => {
+    const fake = await boot();
+    const client = new HttpQbittorrentClient(fake.url, "admin", "secret");
+    await expect(client.setLocation([HASH], "Z:\\Archive")).rejects.toThrow(/Диск Z:/);
+    await expect(client.setLocation([HASH], "/mnt/z/Archive")).rejects.toThrow(/Диск Z:/);
+    expect(fake.calls.some((call) => call.path === "/api/v2/torrents/setLocation")).toBe(false);
+  });
+
   it("rejects a bad password before listing torrents", async () => {
     const fake = await boot();
     const client = new HttpQbittorrentClient(fake.url, "admin", "nope");
