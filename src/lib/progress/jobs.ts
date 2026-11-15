@@ -52,6 +52,12 @@ async function registerLocalsendJobs(): Promise<void> {
     // The progress page still lists the other engines if LocalSend failed to load.
   }
   try {
+    const { registerTorrentTransferProgress } = await import("@/lib/torrents/transfer-progress");
+    registerTorrentTransferProgress();
+  } catch {
+    // Torrent copy progress is optional until that module loads.
+  }
+  try {
     const { registerTransferProgress } = await import("@/addons/drives/transfer/jobs");
     registerTransferProgress();
   } catch {
@@ -100,6 +106,13 @@ export async function performJobAction(
     }
     if (!cancelTransferJob(id)) throw new QbittorrentError("validation", "Задачу нельзя отменить.");
     return { notice: "Копирование остановлено. Исходный файл не удалялся." };
+  }
+  if (id.startsWith("torrent-transfer__")) {
+    const { controlTorrentTransfer } = await import("@/lib/torrents/transfer");
+    await controlTorrentTransfer(id, action);
+    if (action === "pause") return { notice: "Копирование на паузе. Раздача продолжается." };
+    if (action === "cancel") return { notice: "Копирование остановлено. Исходник не удалялся." };
+    return { notice: "Копирование продолжается с места остановки. Раздача не прерывалась." };
   }
   const parsed = parseJobId(id);
   if (parsed.kind === "local" && parsed.id.startsWith("kernel__")) {

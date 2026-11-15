@@ -227,6 +227,14 @@ export async function stepTorrentTransfers(dir: string, now: number, copier: Tra
     return jobs;
   }
 
+  for (const job of jobs) {
+    if (job.status === "paused" && (job.pauseReason === "busy" || job.pauseReason === "schedule")) {
+      job.status = "queued";
+      job.pauseReason = null;
+      job.updatedAt = now;
+    }
+  }
+
   const running = jobs.filter((job) => job.status === "running");
   for (const job of jobs.filter((item) => item.status === "queued").sort(byAge)) {
     if (running.length >= policy.maxParallel) break;

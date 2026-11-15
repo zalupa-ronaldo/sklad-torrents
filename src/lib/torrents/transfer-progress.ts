@@ -1,7 +1,7 @@
 import { registerJobSource } from "@/lib/progress/sources";
 import type { JobSnapshot } from "@/lib/progress/types";
 import { dataDir } from "@/lib/qbittorrent/store";
-import { listTransferJobs, type TransferJob } from "@/lib/torrents/transfer";
+import { listTransferJobs, stepTorrentTransfers, type TransferJob } from "@/lib/torrents/transfer";
 
 const UNKNOWN_ETA = 8_640_000;
 
@@ -12,7 +12,12 @@ export function registerTorrentTransferProgress(): void {
   registered = true;
   registerJobSource({
     id: "torrent-transfer",
-    list: async () => (await listTransferJobs(dataDir())).map(transferJobSnapshot),
+    list: async () => {
+      const dir = dataDir();
+      const existing = await listTransferJobs(dir);
+      if (existing.length === 0) return [];
+      return (await stepTorrentTransfers(dir, Date.now())).map(transferJobSnapshot);
+    },
   });
 }
 

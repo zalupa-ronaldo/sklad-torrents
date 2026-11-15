@@ -95,6 +95,12 @@ describe("resumable torrent copy", () => {
     expect(job?.status).toBe("paused");
     expect(job?.pauseReason).toBe("busy");
     expect(job?.files[0]?.copiedBytes).toBe(mid);
+    await saveTransferPolicy(dir, { busy: false });
+    await stepTorrentTransfers(dir, 6_000);
+    const resumed = (await listTransferJobs(dir))[0];
+    expect(resumed?.status).toBe("running");
+    expect(resumed?.pauseReason).toBeNull();
+    expect(resumed?.files[0]?.copiedBytes).toBeGreaterThanOrEqual(mid ?? 0);
     const source = readFileSync(fileURLToPath(new URL("./transfer.ts", import.meta.url)), "utf8");
     expect(source.includes("pauseTorrent")).toBe(false);
     expect(source.includes("setLocation")).toBe(false);
@@ -159,9 +165,11 @@ describe("resumable torrent copy", () => {
     const night = await seed(dir, "night", Buffer.alloc(50, 9));
     const job = await createTransferJob(dir, { ...night.input, name: "night" }, 2);
     await stepTorrentTransfers(dir, Date.UTC(2026, 0, 15, 23, 0, 0));
-    const copied = (await listTransferJobs(dir)).find((item) => item.id === job.id);
-    expect(copied?.status).toBe("running");
-    expect(copied?.files[0]?.copiedBytes).toBe(10);
+    const jobs = await listTransferJobs(dir);
+    const resumed = jobs.find((item) => item.name === "hours");
+    const waiting = jobs.find((item) => item.id === job.id);
+    expect(resumed).toMatchObject({ status: "running", pauseReason: null, files: [{ copiedBytes: 10 }] });
+    expect(waiting).toMatchObject({ status: "queued", files: [{ copiedBytes: 0 }] });
   });
 
   it("rejects drive Z and a destination inside the source", async () => {
