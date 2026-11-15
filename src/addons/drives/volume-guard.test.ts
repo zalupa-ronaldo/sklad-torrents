@@ -39,11 +39,14 @@ describe("volume guard", () => {
     expect(matchesExcluded(guard, { letter: "S", serial: "S-SERIAL", volumeUuid: "22222222-2222-4222-8222-222222222222" })).toBe(false);
   });
 
-  it("keeps manualOnly separate from exclude", () => {
-    const guard = parseVolumeGuard({ letters: ["Z"], exclude: [] });
-    expect([...guard.manualOnly]).toEqual(["Z"]);
-    expect(guard.excludeLetters.size).toBe(0);
-    expect(lettersToProbe(["C", "Z"], [...guard.excludeLetters])).toEqual(["C", "Z"]);
+  it("keeps manualOnly separate from exclude and never opens Z", () => {
+    const guard = parseVolumeGuard({ letters: ["D"], exclude: [] });
+    expect([...guard.manualOnly]).toEqual(["D"]);
+    expect(guard.excludeLetters.has("Z")).toBe(true);
+    expect(lettersToProbe(["C", "D", "Z"], [])).toEqual(["C", "D"]);
+    const forced = parseVolumeGuard({ letters: ["Z"], exclude: [] });
+    expect(forced.manualOnly.has("Z")).toBe(false);
+    expect(forced.excludeLetters.has("Z")).toBe(true);
   });
 
   it("puts the letter gate before every volume, partition, and CIM query", () => {
@@ -67,6 +70,7 @@ describe("volume guard", () => {
     expect(script).not.toMatch(/Win32_DiskDrive(?! -Filter)/);
     expect(script).not.toMatch(/LogicalDisk(?! -Filter)/);
     expect(script).not.toMatch(/Z:/);
+    expect(script).toContain("Add('Z')");
     expect(script).toContain("SKLAD_EXCLUDE_LETTERS");
     expect(script).toContain("'HKLM:\\SYSTEM\\MountedDevices'");
     expect(script).toContain("'\\\\DosDevices\\\\([A-Z]):$'");

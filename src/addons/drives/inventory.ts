@@ -1,6 +1,7 @@
 import { normalizeUuid } from "@/addons/drives/identity";
 import { mountPathsOf } from "@/addons/drives/reconcile";
-import type { DiskRecord, DiskView } from "@/addons/drives/types";
+import type { DiskRecord, DiskStrip, DiskView } from "@/addons/drives/types";
+import { isIgnoredVolume } from "@/addons/drives/volume-letters";
 import { formatBytes } from "@/lib/format";
 
 const JUNK_NAME = /^(efi|recovery|preboot|update|vm|xart|hardware|iscpreboot)$/i;
@@ -53,11 +54,25 @@ export function hiddenByDataTwin(disk: DiskFace, siblings: readonly DiskFace[]):
   return siblings.some((other) => other !== disk && other.id !== disk.id && isDataVolume(other) && samePhysicalDisk(disk, other));
 }
 
-function isJunkVolume(disk: DiskFace): boolean {
-  if (JUNK_NAME.test(disk.label.trim())) return true;
-  if (disk.volumeName && JUNK_NAME.test(disk.volumeName.trim())) return true;
-  const mounts = faceMounts(disk);
+const SERVICE_NAME = /^(system reserved|microsoft reserved|winre|win re)$/i;
+
+export function isServiceVolumeName(value: string | null | undefined): boolean {
+  const name = String(value ?? "").trim();
+  if (!name) return false;
+  if (JUNK_NAME.test(name)) return true;
+  return SERVICE_NAME.test(name);
+}
+
+export function isServiceVolume(disk: { label?: string | null; volumeName?: string | null; lastMountPath?: string | null; mountPaths?: readonly string[] }): boolean {
+  if (isServiceVolumeName(disk.label) || isServiceVolumeName(disk.volumeName)) return true;
+  const mounts = [...(disk.mountPaths ?? []), disk.lastMountPath ?? ""].filter(Boolean);
   return mounts.length > 0 && mounts.every((path) => JUNK_MOUNT.test(path));
+}
+
+function isJunkVolume(disk: DiskFace): boolean {
+  if (isServiceVolume(disk)) return true;
+  if (isIgnoredVolume(disk)) return true;
+  return false;
 }
 
 /** Volumes shown in the file browser. Preboot/VM/Recovery stay hidden. Data and an empty online disk stay. */
@@ -156,6 +171,50 @@ export function isRemovableDisk(disk: Pick<DiskView, "filesystem" | "lastMountPa
   if (fatLike && mounts.some((path) => path.startsWith("/Volumes/"))) return true;
   if (fatLike && disk.totalBytes > 0 && disk.totalBytes < 128_000_000_000) return true;
   return false;
+}
+
+export function diskLetter(disk: { lastMountPath?: string | null; mountPaths?: readonly string[] }): string | null {
+  const paths = [...(disk.mountPaths ?? []), disk.lastMountPath ?? ""];
+  for (const path of paths) {
+    const match = String(path).match(/^([A-Za-z]):/);
+    if (match) return match[1].toUpperCase();
+  }
+  return null;
+}
+
+function filesystemShort(filesystem: string): string {
+  const text = filesystem.trim();
+  const upper = text.toUpperCase();
+  if (upper.includes("NTFS")) return "NTFS";
+  if (upper.includes("APFS")) return "APFS";
+  if (upper.includes("EXFAT")) return "exFAT";
+  if (upper.includes("HFS")) return "HFS";
+  if (/\bFAT\b|MS-DOS|VFAT/.test(upper)) return "FAT";
+  return text || "—";
+}
+
+/** «1 ТБ · vault», plus free space, filesystem, and letter for the rest of the chip. */
+export function diskStrip(disk: {
+  label?: string | null;
+  volumeName?: string | null;
+  lastMountPath?: string | null;
+  mountPaths?: readonly string[];
+  totalBytes?: number | null;
+  freeBytes?: number | null;
+  filesystem?: string | null;
+}): DiskStrip {
+  const letter = diskLetter(disk);
+  const raw = (disk.volumeName || disk.label || "").trim();
+  const label = raw && raw !== "Без имени" && !/�/.test(raw) ? raw : letter || "Диск";
+  const total = disk.totalBytes ?? 0;
+  const capacity = total > 0 ? formatBytes(total) : "";
+  const title = capacity ? `${capacity} · ${label}` : label;
+  const freeBytes = disk.freeBytes;
+  const free = freeBytes == null || !Number.isFinite(freeBytes) ? "—" : formatBytes(freeBytes);
+  const filesystem = filesystemShort(disk.filesystem || "");
+  const letterText = letter ? `${letter}:` : "";
+  const detail = [title, `свободно ${free}`, filesystem, letterText].filter(Boolean).join(" · ");
+  return { title, capacity, label, free, filesystem, letter, detail };
 }
 
 /** "12 ТБ · S:" / "Флешка · 16 ГБ · NO NAME 1" — capacity from real totalBytes only. */

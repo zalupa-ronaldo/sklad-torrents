@@ -1,6 +1,6 @@
 import type { CollectedVolume } from "@/addons/drives/types";
 import { normalizeSerial, normalizeUuid } from "@/addons/drives/identity";
-import { letterKey } from "@/addons/drives/volume-guard";
+import { isIgnoredLetter, letterKey } from "@/addons/drives/volume-guard";
 
 interface WinDisk {
   Index?: number | string;
@@ -88,7 +88,7 @@ export function parseWindowsVolumes(
     const uuid = normalizeUuid(volume.UniqueId);
     if (!uuid) continue;
     const letter = letterOf(volume.DriveLetter);
-    if (letter && excludedLetters.has(letter)) continue;
+    if (isIgnoredLetter(letter) || (letter && excludedLetters.has(letter))) continue;
     if (uuid && excludedUuids.has(uuid)) continue;
     const diskNumber = letter ? diskByLetter.get(letter) : undefined;
     const serial = diskNumber === undefined ? "" : (serialByDisk.get(diskNumber) ?? "");

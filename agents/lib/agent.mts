@@ -15,9 +15,11 @@ import { buildCompactArgv, DEFAULT_COMPACT_EXE } from "../../src/addons/media-ga
 import { isCompactAlgorithm } from "../../src/addons/media-games/presets.ts";
 import { selectIndexStrategy } from "../../src/addons/drives/strategy.ts";
 import { normalizeSerial, normalizeUuid } from "../../src/addons/drives/identity.ts";
-import { loadVolumeGuard, matchesExcluded, type VolumeGuard } from "../../src/addons/drives/volume-guard.ts";
-import type { CollectedVolume, HostOs, IndexPayload } from "../../src/addons/drives/types.ts";
-import { readNtfsLetter, readUsn } from "./indexers.mts";
+import { isServiceVolume } from "../../src/addons/drives/inventory.ts";
+import { chunkGapMs, defaultIndexPolicy, emptyCheckpoint, mergeIndexFiles, normalizeIndexPolicy, type IndexLoadPolicy } from "../../src/addons/drives/index-session.ts";
+import { loadVolumeGuard, matchesExcluded, isIgnoredVolume, type VolumeGuard } from "../../src/addons/drives/volume-guard.ts";
+import type { CollectedVolume, HostOs, IndexPayload, IndexPauseReason, RawIndexedFile } from "../../src/addons/drives/types.ts";
+import { readNtfsLetter, readUsn, type DirStub } from "./indexers.mts";
 import { walkTree } from "./walk.mts";
 
 export interface AgentCollectResult {
@@ -31,6 +33,10 @@ interface TrackedVolume extends CollectedVolume {
   indexedAt: number;
   usnStart: string | null;
   freeAtIndex: number;
+  priority?: number;
+  signal?: { pause: boolean; cancel: boolean; reason: IndexPauseReason | null };
+  partialFiles?: RawIndexedFile[];
+  dirStubs?: DirStub[];
 }
 
 interface AgentEvent {
@@ -46,6 +52,10 @@ interface AgentEvent {
   strategy?: string;
 }
 
+
+function signaled(signal: { pause: boolean; cancel: boolean; reason?: IndexPauseReason | null } | undefined, key: "pause" | "cancel"): boolean {
+  return signal?.[key] === true;
+}
 
 function volumeKey(volume: { serial: string; volumeUuid: string }): string {
   return `${volume.serial}|${volume.volumeUuid}`;
@@ -173,6 +183,7 @@ export function startAgent(options: {
   const compactJobs = new Map<string, { id: string; state: "running" | "completed" | "failed"; error: string | null; message: string; path: string; algorithm: string }>();
   let ticking = false;
   let restoreFailed = false;
+  let policy: IndexLoadPolicy = defaultIndexPolicy();
   let guard: VolumeGuard = { manualOnly: new Set(), excludeLetters: new Set(), excludeUuids: new Set(), excludeSerials: new Set() };
   function isExcludedVolume(volume: { letter?: string | null; mountPaths?: string[]; volumeUuid?: string; serial?: string }): boolean {
     return matchesExcluded(guard, volume);
@@ -186,7 +197,7 @@ export function startAgent(options: {
   function persist() {
     persistChain = persistChain.then(async () => {
       await mkdir(path.dirname(snapshotPath), { recursive: true });
-      const data = await promisify(gzip)(JSON.stringify({ volumes }));
+      const data = await promisify(gzip)(JSON.stringify({ volumes, policy }));
       await writeFile(`${snapshotPath}.tmp`, data);
       await rename(`${snapshotPath}.tmp`, snapshotPath);
     }).catch((error) => { note = `Не удалось сохранить индекс: ${String(error)}`; });
@@ -198,9 +209,29 @@ export function startAgent(options: {
     } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") note = "Не удалось прочитать исключения дисков."; }
     try {
       const saved = JSON.parse((await promisify(gunzip)(await readFile(snapshotPath))).toString());
+      policy = normalizeIndexPolicy(saved.policy);
       volumes = (saved.volumes ?? [])
-        .filter((volume: TrackedVolume) => !isExcludedVolume(volume))
-        .map((volume: TrackedVolume) => ({ ...volume, indexedAt: volume.indexedAt || Date.now(), freeAtIndex: volume.freeBytes, usnStart: volume.usnStart ?? null }));
+        .filter((volume: TrackedVolume) => !isExcludedVolume(volume) && !isIgnoredVolume(volume))
+        .map((volume: TrackedVolume) => {
+          const next: TrackedVolume = {
+            ...volume,
+            indexedAt: volume.indexedAt || Date.now(),
+            freeAtIndex: volume.freeBytes,
+            usnStart: volume.usnStart ?? null,
+            partialFiles: volume.partialFiles ?? [],
+            dirStubs: volume.dirStubs ?? [],
+            signal: { pause: false, cancel: false, reason: null },
+          };
+          if (next.index?.state === "running") {
+            next.index = {
+              ...next.index,
+              state: "paused",
+              pauseReason: "restart",
+              message: "Пауза после перезапуска. Продолжение с места остановки.",
+            };
+          }
+          return next;
+        });
     } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") { restoreFailed = true; note = "Снимок повреждён: автоматическое сканирование отключено, нужен ручной запуск."; } }
   })();
 
@@ -210,22 +241,35 @@ export function startAgent(options: {
     if (events.length > 400) events.shift();
   }
 
-  async function indexVolume(volume: TrackedVolume, sizeRebuild = false, manual = false) {
+  async function indexVolume(volume: TrackedVolume, sizeRebuild = false, manual = false, fresh = manual || sizeRebuild) {
     const key = volumeKey(volume);
-    if (running.has(key) || isExcludedVolume(volume)) return;
+    if (running.has(key) || isExcludedVolume(volume) || isIgnoredVolume(volume)) return;
     if (!manual && isManualVolume(volume)) return;
     if (sizeRebuild) rebuiltEmptySizes.add(key);
+    if (fresh) {
+      volume.partialFiles = [];
+      volume.dirStubs = [];
+      volume.usnStart = null;
+    }
     running.add(key);
+    const signal = volume.signal ?? { pause: false, cancel: false, reason: null };
+    signal.pause = false;
+    signal.cancel = false;
+    signal.reason = null;
+    volume.signal = signal;
     const previousIndex = volume.index;
+    const cursor = fresh ? emptyCheckpoint() : (volume.index?.checkpoint ?? emptyCheckpoint());
     volume.index = {
       ...previousIndex,
       state: volume.busy ? "paused" : "running",
-      progress: volume.index?.progress ?? 0,
+      progress: fresh ? 0 : (volume.index?.progress ?? 0),
       strategy: selectIndexStrategy({
         filesystem: volume.filesystem,
         platform: options.os,
         elevated,
       }).strategy,
+      checkpoint: cursor,
+      pauseReason: null,
     };
     try {
       const result = await executeIndexPlan(
@@ -237,9 +281,15 @@ export function startAgent(options: {
           // fsutil text has leaf names, not reliable full paths. Do not publish it
           // as a complete delta; explicit manual refresh uses a complete tree.
           usnCheckpoint: false,
+          cursor: { ...cursor, nextUsn: volume.usnStart },
         },
         {
-          readMft: () => readNtfsLetter(volume.letter ?? ""),
+          readMft: () => readNtfsLetter(volume.letter ?? "", {
+            startRecord: cursor.recordsDone,
+            carry: volume.dirStubs ?? [],
+            shouldPause: () => signaled(volume.signal, "pause") || signaled(volume.signal, "cancel"),
+            gapMs: chunkGapMs(policy),
+          }),
           readUsn: async () => {
             const journal = await readUsn(volume.letter ?? "", volume.usnStart);
             if (journal.nextUsn) volume.usnStart = journal.nextUsn;
@@ -248,13 +298,50 @@ export function startAgent(options: {
           walk: () => walkTree(volume.mountPaths[0] ?? ""),
         },
       );
-      if (result.payload.state === "complete" && result.payload.files) {
+      const cancelled = signaled(volume.signal, "cancel");
+      const pausedByUser = signaled(volume.signal, "pause");
+      const reason: IndexPauseReason | null = cancelled
+        ? null
+        : pausedByUser
+          ? volume.signal?.reason ?? "user"
+          : result.payload.pauseReason ?? null;
+      const stopEarly = cancelled || (result.payload.state !== "complete" && (result.payload.state === "paused" || pausedByUser));
+      if (stopEarly) {
+        const merged = mergeIndexFiles(previousIndex?.files ?? [], volume.partialFiles ?? [], result.payload.files ?? [], false);
+        volume.partialFiles = merged.partial;
+        if (result.dirs) volume.dirStubs = result.dirs;
+        volume.index = {
+          ...previousIndex,
+          ...result.payload,
+          state: cancelled ? "error" : "paused",
+          pauseReason: cancelled ? null : reason ?? "user",
+          cancelled,
+          message: cancelled
+            ? "Отменено. Файлы пользователя не удалялись."
+            : result.payload.message || "Индексация на паузе. Продолжение с места остановки.",
+          files: previousIndex?.files?.length ? previousIndex.files : undefined,
+          checkpoint: result.payload.checkpoint ?? cursor,
+        };
+        persist();
+      } else if (result.payload.state === "complete") {
+        const merged = mergeIndexFiles(previousIndex?.files ?? [], volume.partialFiles ?? [], result.payload.files ?? [], true);
+        volume.partialFiles = [];
+        volume.dirStubs = [];
+        result.payload.files = merged.published;
         result.payload.revision = randomUUID();
-        result.payload.recordCount = result.payload.files.length;
+        result.payload.recordCount = merged.published.length;
+        result.payload.checkpoint = {
+          recordsDone: result.payload.checkpoint?.recordsDone ?? cursor.recordsDone,
+          recordsTotal: result.payload.checkpoint?.recordsTotal ?? null,
+          mftOffset: null,
+          nextUsn: volume.usnStart,
+        };
+        volume.index = { ...previousIndex, ...result.payload, pauseReason: null, cancelled: false };
+        persist();
+      } else {
+        volume.index = { ...previousIndex, ...result.payload, files: previousIndex?.files };
+        persist();
       }
-      // A pause/error is metadata, never a destructive replacement of the last tree.
-      volume.index = { ...previousIndex, ...result.payload };
-      if (result.payload.state === "complete") persist();
       volume.indexedAt = Date.now();
       volume.freeAtIndex = volume.freeBytes;
       pushEvent({
@@ -263,13 +350,17 @@ export function startAgent(options: {
         volumeUuid: volume.volumeUuid,
         filesystem: volume.filesystem,
         progress: result.payload.progress,
-        state: result.payload.state,
+        state: volume.index?.state ?? result.payload.state,
         strategy: result.payload.strategy,
       });
     } catch (error) {
-      volume.index = { ...previousIndex, state: "error", progress: previousIndex?.progress ?? 0, message: String(error) };
+      volume.index = { ...previousIndex, state: "error", progress: previousIndex?.progress ?? 0, message: String(error), files: previousIndex?.files };
     } finally {
       running.delete(key);
+      if (volume.signal) {
+        volume.signal.pause = false;
+        volume.signal.cancel = false;
+      }
     }
   }
 
@@ -316,15 +407,43 @@ export function startAgent(options: {
     }
     volumes = next;
     if (options.mockIndex) return;
+    const quiet = policy.quiet || policy.quietHours.some((window) => {
+      const hour = new Date().getHours();
+      return window.startHour < window.endHour ? hour >= window.startHour && hour < window.endHour : hour >= window.startHour || hour < window.endHour;
+    });
+    const candidates: Array<{ volume: TrackedVolume; rebuildSizes: boolean; fresh: boolean }> = [];
     for (const volume of volumes) {
       // Complete snapshots do not expire. Free-space changes are not proof of a
       // pathname change; never turn a UI refresh into another full MFT read.
       // A snapshot whose every file is 0 bytes is the old $FILE_NAME reader and is rebuilt once.
       const key = volumeKey(volume);
       const rebuildSizes = snapshotHasNoSizes(volume.index) && !rebuiltEmptySizes.has(key);
-      const needs = !restoreFailed && !isExcludedVolume(volume) && !isManualVolume(volume) && !volume.busy &&
-        (!volume.index || (volume.index.state === "paused" && !volume.index.files) || rebuildSizes);
-      if (needs) void indexVolume(volume, rebuildSizes);
+      const reason = volume.index?.pauseReason;
+      const held = reason === "user" || reason === "restart";
+      if (isExcludedVolume(volume) || isIgnoredVolume(volume) || held || signaled(volume.signal, "pause")) continue;
+      if (quiet || volume.busy) {
+        if (volume.index?.state === "running" && volume.signal) {
+          volume.signal.pause = true;
+          volume.signal.reason = quiet ? "quiet" : "busy";
+        }
+        if (volume.index && volume.index.state !== "complete") {
+          volume.index = { ...volume.index, state: "paused", pauseReason: quiet ? "quiet" : "busy" };
+        }
+        continue;
+      }
+      const continueHeld = reason === "quiet" || reason === "busy";
+      const needs = !restoreFailed && !isManualVolume(volume) && !isServiceVolume(volume) && !volume.busy &&
+        (rebuildSizes || !volume.index || (volume.index.state === "paused" && !volume.index.files) || continueHeld);
+      if (needs) candidates.push({ volume, rebuildSizes, fresh: rebuildSizes });
+    }
+    candidates.sort((left, right) => (right.volume.priority ?? 0) - (left.volume.priority ?? 0));
+    let slots = running.size;
+    const limit = Math.max(1, policy.parallelism);
+    for (const item of candidates) {
+      if (slots >= limit) break;
+      if (running.has(volumeKey(item.volume))) continue;
+      slots += 1;
+      void indexVolume(item.volume, item.rebuildSizes, false, item.fresh);
     }
   }
 
@@ -402,6 +521,89 @@ export function startAgent(options: {
       })();
       return;
     }
+    if (request.method === "GET" && url.pathname === "/v1/index/progress") {
+      const jobs = volumes.filter((volume) => !isExcludedVolume(volume) && !isIgnoredVolume(volume)).map((volume) => ({
+        id: volumeKey(volume),
+        serial: volume.serial,
+        volumeUuid: volume.volumeUuid,
+        label: volume.volumeName,
+        state: volume.index?.state ?? "idle",
+        pauseReason: volume.index?.pauseReason ?? null,
+        progress: volume.index?.progress ?? 0,
+        strategy: volume.index?.strategy ?? null,
+        currentFile: volume.index?.currentFile ?? null,
+        processedBytes: volume.index?.processedBytes ?? 0,
+        totalBytes: volume.index?.totalBytes ?? volume.totalBytes,
+        speed: volume.index?.speed ?? 0,
+        eta: volume.index?.eta ?? null,
+        priority: volume.priority ?? 0,
+        checkpoint: volume.index?.checkpoint ?? null,
+      }));
+      const processedBytes = jobs.reduce((sum, job) => sum + (job.processedBytes || 0), 0);
+      const totalBytes = jobs.reduce((sum, job) => sum + Math.max(job.totalBytes || 0, job.processedBytes || 0), 0);
+      send(response, 200, {
+        policy,
+        queue: { progress: totalBytes > 0 ? processedBytes / totalBytes : 0, processedBytes, totalBytes },
+        jobs,
+      });
+      return;
+    }
+    if (request.method === "POST" && url.pathname === "/v1/index/policy") {
+      void (async () => {
+        try {
+          policy = normalizeIndexPolicy({ ...policy, ...(await readJsonBody(request)) });
+          persist();
+          send(response, 200, policy);
+        } catch {
+          send(response, 400, { error: "Политика индексации не сохранилась." });
+        }
+      })();
+      return;
+    }
+    if (request.method === "POST" && url.pathname === "/v1/index/control") {
+      void (async () => {
+        try {
+          const body = await readJsonBody(request);
+          const action = String(body.action || "");
+          const all = action === "pause-all" || action === "resume-all" || action === "cancel-all";
+          const targets = all
+            ? volumes.filter((volume) => !isExcludedVolume(volume) && !isIgnoredVolume(volume))
+            : volumes.filter((volume) => volume.serial === String(body.serial || "") && volume.volumeUuid === String(body.uuid || "") && !isExcludedVolume(volume) && !isIgnoredVolume(volume));
+          if (!all && targets.length === 0) { send(response, 404, { error: "Том исключён или не найден. Индексация не менялась." }); return; }
+          for (const volume of targets) {
+            if (action === "pause" || action === "pause-all") {
+              volume.signal = volume.signal ?? { pause: false, cancel: false, reason: null };
+              volume.signal.pause = true;
+              volume.signal.reason = "user";
+              volume.index = {
+                ...(volume.index ?? { state: "paused", progress: 0 }),
+                state: "paused",
+                pauseReason: "user",
+                message: "Индексация на паузе. Продолжение с места остановки.",
+              };
+            } else if (action === "resume" || action === "resume-all") {
+              if (volume.index?.state === "paused") void indexVolume(volume, false, true, false);
+            } else if (action === "cancel" || action === "cancel-all") {
+              volume.signal = volume.signal ?? { pause: false, cancel: false, reason: null };
+              volume.signal.cancel = true;
+              volume.signal.pause = true;
+              volume.signal.reason = "user";
+              if (volume.index) {
+                volume.index = { ...volume.index, state: "error", cancelled: true, pauseReason: null, message: "Отменено. Файлы пользователя не удалялись.", files: volume.index.files };
+              }
+            } else {
+              send(response, 400, { error: "Неизвестное действие индексации." });
+              return;
+            }
+          }
+          persist();
+          send(response, 202, { accepted: true });
+        } catch {
+          send(response, 400, { error: "Команда индексации не принята." });
+        }
+      })();
+      return;
+    }
     if (request.method === "POST" && url.pathname === "/v1/rescan") {
       const volume = volumes.find((v) => v.serial === url.searchParams.get("serial") && v.volumeUuid === url.searchParams.get("uuid"));
       if (!volume || isExcludedVolume(volume)) { send(response, 404, { error: "Том исключён в конфиге агента." }); return; }
@@ -442,7 +644,16 @@ export function startAgent(options: {
             state: volume.index.state, progress: volume.index.progress,
             message: volume.index.message, strategy: volume.index.strategy,
             revision: volume.index.revision,
-            recordCount: volume.index.files?.length ?? volume.index.recordCount ?? 0,
+            recordCount: volume.index.files?.length ?? volume.index.recordCount ?? volume.index.checkpoint?.recordsDone ?? 0,
+            pauseReason: volume.index.pauseReason ?? null,
+            currentFile: volume.index.currentFile ?? null,
+            processedBytes: volume.index.processedBytes ?? 0,
+            totalBytes: volume.index.totalBytes ?? volume.totalBytes,
+            speed: volume.index.speed ?? 0,
+            eta: volume.index.eta ?? null,
+            priority: volume.priority ?? 0,
+            checkpoint: volume.index.checkpoint ?? null,
+            cancelled: volume.index.cancelled === true,
             ...(url.searchParams.get("files") === "1" ? { files: volume.index.files, delta: volume.index.delta } : {}),
           },
         })),

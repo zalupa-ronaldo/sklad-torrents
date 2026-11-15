@@ -13,7 +13,7 @@ function disk(partial: Partial<DiskRecord> & { files: IndexedFile[] }): DiskReco
     filesystem: "NTFS",
     label: partial.label || "Games",
     namedByUser: false,
-    volumeName: "Games",
+    volumeName: partial.volumeName || partial.label || "Games",
     totalBytes: 8_000_000_000_000,
     freeBytes: 1_000_000_000_000,
     lastSeenAt: "2026-11-05T00:00:00.000Z",
@@ -91,28 +91,45 @@ describe("browse aggregates", () => {
     expect(summed.entries[0]?.compression).toBe("wof");
   });
 
-  it("shows a connected empty disk, including Z:, and skips an offline empty placeholder", () => {
+  it("shows connected disks and offline catalogs, and never shows Z:", () => {
     const c = disk({
       id: "disk-c",
-      label: "System",
+      label: "Windows",
+      volumeName: "Windows",
       lastMountPath: "C:\\",
       files: [{ relativePath: "Users/a.txt", name: "a.txt", kind: "file", size: 1, mtimeMs: 1, sidecarCategory: null, categories: [] }],
     });
     const z = disk({
       id: "disk-z",
       label: "Data",
+      volumeName: "Data",
       lastMountPath: "Z:\\",
-      files: [],
+      files: [{ relativePath: "secret.txt", name: "secret.txt", kind: "file", size: 4, mtimeMs: 1, sidecarCategory: null, categories: [] }],
       connectedHosts: [{ id: "windows-pc", name: "Windows PC", os: "win32", elevated: true, mountPaths: ["Z:\\"] }],
     });
-    const offline = disk({ id: "disk-off", label: "Spare", lastMountPath: "E:\\", files: [] });
-    const roots = browseRoots([c, disk({ files }), z, offline]);
-    const names = roots.entries.map((e) => e.name);
-    expect(names).toContain("C:");
-    expect(names).toContain("S:");
-    expect(names).toContain("Z:");
-    expect(names).not.toContain("E:");
-    expect(browseDisk([z], "disk-z", "").entries).toEqual([]);
+    const offlineEmpty = disk({ id: "disk-off", label: "Spare", volumeName: "Spare", lastMountPath: "E:\\", files: [] });
+    const offline = disk({
+      id: "disk-kept",
+      label: "Archive",
+      volumeName: "Archive",
+      lastMountPath: "F:\\",
+      files: [{ relativePath: "keep.txt", name: "keep.txt", kind: "file", size: 9, mtimeMs: 1, sidecarCategory: null, categories: [] }],
+    });
+    const roots = browseRoots([c, disk({ files }), z, offlineEmpty, offline]);
+    const ids = roots.entries.map((entry) => entry.diskId);
+    expect(ids).toContain("disk-c");
+    expect(ids).toContain("disk-s");
+    expect(ids).toContain("disk-kept");
+    expect(ids).not.toContain("disk-z");
+    expect(ids).not.toContain("disk-off");
+    const games = roots.entries.find((entry) => entry.diskId === "disk-s");
+    expect(games?.strip?.title).toMatch(/ТБ · Games/);
+    expect(games?.fileCount).toBeGreaterThan(0);
+    expect(games?.size).not.toBe(games?.fileCount);
+    expect(() => browseDisk([z], "disk-z", "")).toThrow(/не найден/);
+    const kept = browseDisk([offline], "disk-kept", "");
+    expect(kept.entries.map((entry) => entry.name)).toContain("keep.txt");
+    expect(kept.online).toBe(false);
   });
 
   it("does not show a pending snapshot root as a finished zero", () => {

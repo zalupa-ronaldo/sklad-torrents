@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { dedupeShelfDisks, hiddenByDataTwin, isBrowsableDisk, isStripDisk, visibleShelfDisks } from "@/addons/drives/inventory";
+import { dedupeShelfDisks, diskStrip, hiddenByDataTwin, isBrowsableDisk, isStripDisk, visibleShelfDisks } from "@/addons/drives/inventory";
 import type { DiskView } from "@/addons/drives/types";
 
 function view(partial: Partial<DiskView> & Pick<DiskView, "id" | "label" | "lastMountPath">): DiskView {
@@ -26,6 +26,7 @@ function view(partial: Partial<DiskView> & Pick<DiskView, "id" | "label" | "last
     indexedBytes: 0,
     sizesReady: partial.sizesReady ?? true,
     categoryCounts: { torrent: 0, game: 0, media: 0, series: 0, installer: 0, music: 0, software: 0, documents: 0 },
+    strip: partial.strip ?? diskStrip({ ...partial, totalBytes: partial.totalBytes ?? 250_000_000_000, freeBytes: partial.freeBytes ?? 40_000_000_000, filesystem: partial.filesystem ?? "APFS" }),
     ...partial,
   };
 }
@@ -61,17 +62,58 @@ describe("disk visibility", () => {
   });
 
   it("shows Data and an empty online SSD, and hides the sealed twin plus junk volumes", () => {
-    const disks = [data, hd, preboot, recovery, vm, vault, z];
+    const reserved = view({
+      id: "reserved",
+      label: "System Reserved",
+      volumeName: "System Reserved",
+      lastMountPath: "\\\\?\\Volume{reserved}\\",
+      filesystem: "NTFS",
+      totalBytes: 500_000_000,
+      fileCount: 12,
+      lastHostId: "windows-pc",
+    });
+    const windows = view({
+      id: "windows",
+      label: "Windows",
+      volumeName: "Windows",
+      lastMountPath: "C:\\",
+      filesystem: "NTFS",
+      totalBytes: 500_000_000_000,
+      fileCount: 10,
+      lastHostId: "windows-pc",
+    });
+    const disks = [data, hd, preboot, recovery, vm, vault, z, reserved, windows];
     const shown = visibleShelfDisks(disks).map((disk) => disk.id);
-    expect(shown).toEqual(expect.arrayContaining(["data", "vault", "z"]));
+    expect(shown).toEqual(expect.arrayContaining(["data", "vault", "windows"]));
     expect(shown).not.toContain("hd");
     expect(shown).not.toContain("preboot");
     expect(shown).not.toContain("recovery");
     expect(shown).not.toContain("vm");
+    expect(shown).not.toContain("z");
+    expect(shown).not.toContain("reserved");
     expect(hiddenByDataTwin(hd, disks)).toBe(true);
     expect(isBrowsableDisk(preboot, disks)).toBe(false);
     expect(isStripDisk(vault, disks)).toBe(true);
-    expect(isStripDisk(z, disks)).toBe(true);
+    expect(isStripDisk(z, disks)).toBe(false);
+    expect(isBrowsableDisk(z, disks)).toBe(false);
+  });
+
+  it("names a disk by capacity and label, and keeps free space, type, and letter beside it", () => {
+    const strip = diskStrip({
+      label: "vault",
+      volumeName: "vault",
+      lastMountPath: "D:\\",
+      mountPaths: ["D:\\"],
+      totalBytes: 1_099_511_627_776,
+      freeBytes: 400_000_000_000,
+      filesystem: "NTFS",
+    });
+    expect(strip.title).toBe("1 ТБ · vault");
+    expect(strip.filesystem).toBe("NTFS");
+    expect(strip.letter).toBe("D");
+    expect(strip.detail).toMatch(/свободно/);
+    expect(strip.detail).toMatch(/NTFS/);
+    expect(strip.detail).toMatch(/D:/);
   });
 
   it("keeps Macintosh HD when there is no Data volume", () => {

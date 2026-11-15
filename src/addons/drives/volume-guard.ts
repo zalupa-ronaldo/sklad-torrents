@@ -2,6 +2,9 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 
 import { normalizeSerial, normalizeUuid } from "@/addons/drives/identity";
+import { IGNORED_WINDOWS_LETTER, isIgnoredLetter, isIgnoredVolume, letterKey } from "@/addons/drives/volume-letters";
+
+export { IGNORED_WINDOWS_LETTER, isIgnoredLetter, isIgnoredMount, isIgnoredVolume, letterKey } from "@/addons/drives/volume-letters";
 
 export interface VolumeGuard {
   /** Listed, no automatic index. Manual rescan is still allowed. */
@@ -12,18 +15,19 @@ export interface VolumeGuard {
   excludeSerials: Set<string>;
 }
 
-export function letterKey(value: string | null | undefined): string {
-  const text = String(value ?? "").trim().replace(":", "").toUpperCase();
-  return /^[A-Z]$/.test(text) ? text : "";
-}
-
 export function emptyVolumeGuard(): VolumeGuard {
-  return {
+  return sealVolumeGuard({
     manualOnly: new Set(),
     excludeLetters: new Set(),
     excludeUuids: new Set(),
     excludeSerials: new Set(),
-  };
+  });
+}
+
+function sealVolumeGuard(guard: VolumeGuard): VolumeGuard {
+  guard.excludeLetters.add(IGNORED_WINDOWS_LETTER);
+  guard.manualOnly.delete(IGNORED_WINDOWS_LETTER);
+  return guard;
 }
 
 function asArray(value: unknown): unknown[] {
@@ -65,19 +69,20 @@ export function parseVolumeGuard(input: unknown): VolumeGuard {
     addToken(String(row.serial ?? ""), guard);
   }
   for (const letter of guard.excludeLetters) guard.manualOnly.delete(letter);
-  return guard;
+  return sealVolumeGuard(guard);
 }
 
 export function excludedLettersFromEnv(env: NodeJS.ProcessEnv = process.env): Set<string> {
   const guard = emptyVolumeGuard();
   for (const item of String(env.SKLAD_EXCLUDE_LETTERS ?? "").split(",")) addToken(item, guard);
+  guard.excludeLetters.add(IGNORED_WINDOWS_LETTER);
   return guard.excludeLetters;
 }
 
 export function assertLetterAllowed(letter: string, excludeLetters: ReadonlySet<string> = excludedLettersFromEnv()): void {
   const key = letterKey(letter);
   if (!key) throw new Error("Некорректная буква тома.");
-  if (excludeLetters.has(key)) throw new Error("Том исключён до открытия устройства.");
+  if (isIgnoredLetter(key) || excludeLetters.has(key)) throw new Error("Том исключён до открытия устройства.");
 }
 
 /** Letters that may be passed to Get-Volume / Get-Partition / CIM. Excluded letters are removed first. */
@@ -87,7 +92,7 @@ export function lettersToProbe(present: readonly string[], excludeLetters: reado
   const seen = new Set<string>();
   for (const item of present) {
     const letter = letterKey(item);
-    if (!letter || exclude.has(letter) || seen.has(letter)) continue;
+    if (!letter || isIgnoredLetter(letter) || exclude.has(letter) || seen.has(letter)) continue;
     seen.add(letter);
     result.push(letter);
   }
@@ -98,6 +103,7 @@ export function matchesExcluded(
   guard: VolumeGuard,
   volume: { letter?: string | null; mountPaths?: readonly string[]; volumeUuid?: string | null; serial?: string | null },
 ): boolean {
+  if (isIgnoredVolume(volume)) return true;
   const letter = letterKey(volume.letter) || letterKey(volume.mountPaths?.[0]?.slice(0, 2));
   if (letter && guard.excludeLetters.has(letter)) return true;
   const uuid = normalizeUuid(volume.volumeUuid);

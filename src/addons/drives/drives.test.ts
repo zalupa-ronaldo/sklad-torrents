@@ -483,6 +483,18 @@ Volume Free Space:         1.2 TB (1200000000000 Bytes)
     });
     expect(read.complete).toBe(true);
     expect(read.files.some((entry) => entry.relativePath === "Cinema/movie.mkv")).toBe(true);
+    const readAt = async (offset: number, length: number) => {
+      const buffer = Buffer.alloc(length);
+      if (offset < disk.length) disk.copy(buffer, 0, offset, Math.min(disk.length, offset + length));
+      return buffer;
+    };
+    const paused = await readNtfsVolume(readAt, { pauseAfterRecords: 2, sleep: async () => undefined });
+    expect(paused.paused).toBe(true);
+    expect(paused.complete).toBe(false);
+    expect(paused.recordsRead).toBe(2);
+    const resumed = await readNtfsVolume(readAt, { startRecord: paused.recordsRead, carry: paused.dirs, sleep: async () => undefined });
+    expect(resumed.files.some((entry) => entry.relativePath === "Cinema/movie.mkv")).toBe(true);
+    expect(resumed.files.some((entry) => entry.name === "$MFT")).toBe(false);
     const sized = filesFromRecords(
       [
         makeRecord({ parent: 5, name: "movie.mkv", size: 0, data: { size: 5_000, allocated: 8_192 } }),

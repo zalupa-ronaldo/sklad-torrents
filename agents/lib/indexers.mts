@@ -4,13 +4,13 @@ import { promisify } from "node:util";
 
 import { assertSpawnAllowed } from "../../src/addons/drives/commands.ts";
 import { assertLetterAllowed } from "../../src/addons/drives/volume-guard.ts";
-import { readNtfsVolume } from "../../src/addons/drives/ntfs-mft.ts";
+import { readNtfsVolume, type DirStub, type NtfsReadOptions } from "../../src/addons/drives/ntfs-mft.ts";
 import { parseFsutilUsn } from "../../src/addons/drives/usn.ts";
 import type { IndexDelta } from "../../src/addons/drives/types.ts";
 
 const exec = promisify(execFile);
 
-export async function readNtfsLetter(letter: string): Promise<{ files: Awaited<ReturnType<typeof readNtfsVolume>>["files"]; complete: boolean }> {
+export async function readNtfsLetter(letter: string, options?: NtfsReadOptions): Promise<Awaited<ReturnType<typeof readNtfsVolume>>> {
   assertLetterAllowed(letter);
   const handle = await open(`\\\\.\\${letter}:`, "r");
   try {
@@ -19,11 +19,13 @@ export async function readNtfsLetter(letter: string): Promise<{ files: Awaited<R
       const { bytesRead } = await handle.read(buffer, 0, length, offset);
       if (bytesRead !== length) throw new Error("Короткое чтение тома.");
       return buffer;
-    });
+    }, options);
   } finally {
     await handle.close();
   }
 }
+
+export type { DirStub };
 
 export async function readUsn(letter: string, start: string | null): Promise<{ delta: IndexDelta | null; nextUsn: string | null }> {
   assertLetterAllowed(letter);

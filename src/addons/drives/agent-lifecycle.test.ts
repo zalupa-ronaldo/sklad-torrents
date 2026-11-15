@@ -99,7 +99,7 @@ it("rebuilds a saved NTFS snapshot once when every file size is zero", async () 
   }
 });
 
-it("lists a manual-only Z: without starting its index until rescan", async () => {
+it("does not list or index Z even when config calls it manual-only", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "sklad-agent-manual-"));
   const disabledPath = path.join(directory, "disabled.json");
   await writeFile(disabledPath, JSON.stringify({ letters: ["Z"], exclude: [] }));
@@ -119,12 +119,64 @@ it("lists a manual-only Z: without starting its index until rescan", async () =>
     await sleep(80);
     expect(executeIndexPlan).toHaveBeenCalledOnce();
     const body = await (await fetch(`${base}/v1/volumes?metadata=1`)).json();
-    const listed = body.volumes.find((item: { letter?: string }) => item.letter === "Z");
-    expect(listed).toMatchObject({ manualOnly: true, volumeUuid: zee.volumeUuid, totalBytes: zee.totalBytes });
-    expect(listed.index).toBeNull();
+    expect(body.volumes.map((item: { letter?: string }) => item.letter)).toEqual(["C"]);
     const rescan = await fetch(`${base}/v1/rescan?serial=${zee.serial}&uuid=${zee.volumeUuid}`, { method: "POST" });
-    expect(rescan.status).toBe(202);
-    await vi.waitFor(() => expect(executeIndexPlan).toHaveBeenCalledTimes(2));
+    expect(rescan.status).toBe(404);
+    expect(executeIndexPlan).toHaveBeenCalledOnce();
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await sleep(30);
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+it("pauses a running index on restart and resumes from the MFT cursor", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "sklad-agent-resume-"));
+  const snapshot = path.join(directory, "snapshot.gz");
+  process.env.SKLAD_AGENT_SNAPSHOT = snapshot;
+  const published = { relativePath: "keep/a.txt", name: "a.txt", kind: "file" as const, size: 8, mtimeMs: 0 };
+  await writeFile(snapshot, gzipSync(JSON.stringify({
+    volumes: [{
+      ...volume,
+      index: {
+        state: "running",
+        progress: 0.4,
+        strategy: "mft-usn",
+        files: [published],
+        checkpoint: { recordsDone: 3, recordsTotal: 10, mftOffset: 4096, nextUsn: "15" },
+      },
+      usnStart: "15",
+      partialFiles: [published],
+    }],
+  })));
+  vi.mocked(executeIndexPlan).mockResolvedValue({
+    called: ["readMft"],
+    payload: { state: "complete", progress: 1, strategy: "mft-usn", files: [{ relativePath: "keep/b.txt", name: "b.txt", kind: "file", size: 9, mtimeMs: 0 }] },
+  });
+  const collect = vi.fn(async () => ({ elevated: true, note: "", volumes: [{ ...volume }] }));
+  const server = startAgent({ port: 0, hostId: "test", hostName: "test", os: "win32", collect, intervalMs: 60_000 });
+  await once(server, "listening");
+  const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  try {
+    await vi.waitFor(() => expect(collect).toHaveBeenCalled());
+    await sleep(80);
+    expect(executeIndexPlan).not.toHaveBeenCalled();
+    const listed = await (await fetch(`${base}/v1/volumes?metadata=1`)).json();
+    expect(listed.volumes[0].index).toMatchObject({
+      state: "paused",
+      pauseReason: "restart",
+      checkpoint: { recordsDone: 3, nextUsn: "15" },
+    });
+    const resume = await fetch(`${base}/v1/index/control`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ action: "resume", serial: volume.serial, uuid: volume.volumeUuid }),
+    });
+    expect(resume.status).toBe(202);
+    await vi.waitFor(() => expect(executeIndexPlan).toHaveBeenCalledOnce());
+    const plan = vi.mocked(executeIndexPlan).mock.calls[0]?.[0];
+    expect(plan?.cursor?.recordsDone).toBe(3);
+    expect(plan?.cursor?.nextUsn).toBe("15");
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
     await sleep(30);
