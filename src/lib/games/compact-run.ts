@@ -3,6 +3,7 @@ import { spawn } from "node:child_process";
 import { buildCompactArgv, DEFAULT_COMPACT_EXE } from "@/addons/media-games/compact";
 import { systemCompactReason } from "@/addons/drives/compact-target";
 import type { CompactAlgorithm } from "@/addons/media-games/types";
+import { runAutoCompact, type CompactFile } from "@/lib/compact-db/auto";
 import { listOwnedFiles, measureWindowsRoot } from "@/lib/games/compact-measure";
 import { assertEncodePaths } from "@/lib/transcode/encode-plan";
 
@@ -28,6 +29,8 @@ export interface CompactRun {
   allocated: number | null;
   wof: number | null;
   exitCode: number | null;
+  /** Files whose bytes still matched after compact. Absent on the folder-wide path. */
+  filesDone?: string[];
 }
 
 export interface CompactSpawnResult {
@@ -50,6 +53,10 @@ export async function executeCompact(input: {
   measure?: () => Promise<CompactMetrics>;
   stop?: () => boolean;
   timeoutMs?: number;
+  /** When set, compact one file at a time and require the same SHA-256 afterwards. */
+  files?: readonly CompactFile[];
+  hashFile?: (file: string) => Promise<string>;
+  paused?: boolean;
 }): Promise<CompactRun> {
   const none = (reason: string, argv: string[] | null = null): CompactRun => ({
     executed: false,
@@ -73,6 +80,38 @@ export async function executeCompact(input: {
     return none("compact.exe только на NTFS Windows. Здесь он не запускался и сжатие не засчитано.");
   }
   if (input.role !== "game-pool" && input.role !== "cold-archive") return none("Этот том не пул и не холодный архив. Сжатие не запускается.");
+  if (input.files && input.files.length > 0) {
+    if (!input.hashFile) return none("Нет функции SHA-256. Пофайловое сжатие не запускается.");
+    const batch = await runAutoCompact({
+      root: input.root,
+      files: input.files,
+      paused: input.paused === true || input.stop?.() === true,
+      compress: async (file) => {
+        const argv = buildCompactArgv({
+          os: "win32",
+          binary: input.binary || DEFAULT_COMPACT_EXE,
+          folder: input.root,
+          algorithm: input.algorithm,
+        });
+        const outcome = await (input.spawnImpl ?? spawnCompact)(argv[0]!, ["/C", `/EXE:${input.algorithm}`, file], input.root);
+        return { code: outcome.code };
+      },
+      hash: input.hashFile,
+    });
+    return {
+      executed: batch.attempted,
+      compressed: false,
+      ntfsSmoke: false,
+      contractReady: false,
+      reason: batch.reason,
+      argv: [input.binary || DEFAULT_COMPACT_EXE, "/C", `/EXE:${input.algorithm}`],
+      logical: null,
+      allocated: null,
+      wof: null,
+      exitCode: batch.compressed ? 0 : null,
+      filesDone: batch.done,
+    };
+  }
   const native = process.platform === "win32" && input.os === "win32" && !input.measure && !input.spawnImpl;
   if (native) {
     const owned = await listOwnedFiles(input.root);
