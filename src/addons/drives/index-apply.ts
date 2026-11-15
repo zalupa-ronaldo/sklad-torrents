@@ -26,6 +26,23 @@ export interface ApplyIndexInput {
   elevated: boolean;
 }
 
+function carryProgress(base: ScanState, update: IndexPayload | null | undefined, previous: ScanState): ScanState {
+  const scan: ScanState = { ...base };
+  const pick = <K extends keyof ScanState>(key: K, fromUpdate: ScanState[K] | undefined, fromPrevious: ScanState[K] | undefined) => {
+    if (fromUpdate !== undefined) scan[key] = fromUpdate;
+    else if (fromPrevious !== undefined) scan[key] = fromPrevious;
+  };
+  pick("processedBytes", update?.processedBytes, previous.processedBytes);
+  pick("totalBytes", update?.totalBytes, previous.totalBytes);
+  pick("speed", update?.speed, previous.speed);
+  pick("eta", update?.eta, previous.eta);
+  pick("currentFile", update?.currentFile, previous.currentFile);
+  pick("priority", update?.priority, previous.priority);
+  pick("pauseReason", update?.pauseReason, previous.pauseReason);
+  pick("checkpoint", update?.checkpoint, previous.checkpoint);
+  return scan;
+}
+
 function clamp(value: number): number {
   if (!Number.isFinite(value)) return 0;
   return Math.min(1, Math.max(0, value));
@@ -56,17 +73,18 @@ export function applyIndexUpdate(input: ApplyIndexInput): { files: IndexedFile[]
     busy: input.busy,
     detail: input.update?.state === "error" ? input.update.message : undefined,
   });
-  const base: ScanState = {
+  const base = carryProgress({
     status: input.busy ? "paused" : (input.update?.state ?? input.previousScan.status),
     strategy: described.strategy,
     progress: input.previousScan.progress,
     message: described.message,
     elevated: input.elevated,
-  };
+  }, input.update, input.previousScan);
   if (!input.update || input.busy || input.update.state === "error" || input.update.state === "paused" || input.update.state === "running" || input.update.state === "idle") {
     if (input.update && (input.update.state === "running" || input.update.state === "paused" || input.busy)) {
       base.progress = clamp(input.update.progress || input.previousScan.progress);
     }
+    if (input.busy) base.pauseReason = input.update?.pauseReason ?? "busy";
     return { files: input.previous, scan: base, applied: "kept" };
   }
   if (input.update.files) {

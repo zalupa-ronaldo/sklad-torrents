@@ -4,6 +4,28 @@ export type MediaCategory = "torrent" | "game" | "media" | "series" | "installer
 export type IndexStrategy = "mft-usn" | "walk";
 export type ScanStatus = "idle" | "running" | "paused" | "complete" | "error";
 export type DriveMode = "mock" | "agents";
+/** User and restart pauses stay until resume. Quiet and busy clear themselves. */
+export type IndexPauseReason = "user" | "restart" | "quiet" | "busy";
+export type IndexProcessPriority = "idle" | "below" | "normal";
+
+/** Resume point for an NTFS index. Directory stubs stay on the agent, not in this object. */
+export interface IndexCheckpoint {
+  recordsDone: number;
+  recordsTotal: number | null;
+  mftOffset: number | null;
+  nextUsn: string | null;
+}
+
+/** Chip text is `title` («1 ТБ · vault»). The other fields are the rest of the name. */
+export interface DiskStrip {
+  title: string;
+  capacity: string;
+  label: string;
+  free: string;
+  filesystem: string;
+  letter: string | null;
+  detail: string;
+}
 
 export interface LibraryRule {
   prefix: string;
@@ -59,6 +81,15 @@ export interface IndexPayload {
   delta?: IndexDelta;
   /** Large snapshot is downloaded off the shelf request. Not sent by the agent. */
   deferred?: boolean;
+  processedBytes?: number;
+  totalBytes?: number;
+  speed?: number;
+  eta?: number;
+  currentFile?: string | null;
+  priority?: number;
+  pauseReason?: IndexPauseReason | null;
+  checkpoint?: IndexCheckpoint;
+  cancelled?: boolean;
 }
 
 export interface ScanState {
@@ -67,6 +98,15 @@ export interface ScanState {
   progress: number;
   message: string;
   elevated: boolean;
+  processedBytes?: number;
+  totalBytes?: number;
+  speed?: number;
+  eta?: number;
+  currentFile?: string | null;
+  priority?: number;
+  pauseReason?: IndexPauseReason | null;
+  checkpoint?: IndexCheckpoint;
+  updatedAt?: number;
 }
 
 export interface ConnectedHost {
@@ -210,6 +250,8 @@ export interface DiskView {
   categoryCounts: Record<MediaCategory, number>;
   /** Present while a snapshot download is queued, running, or has failed. */
   ingest?: IngestProgress;
+  /** Compact strip name: capacity, label, free space, filesystem, letter. */
+  strip: DiskStrip;
 }
 
 export interface ShelfResponse {

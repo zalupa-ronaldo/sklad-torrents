@@ -1,6 +1,7 @@
 import { uniqueDisks } from "@/addons/drives/disk-table";
 import { applyIndexUpdate, emptyScan } from "@/addons/drives/index-apply";
 import { anonymousDiskId, formatUuid, identityKey, normalizeSerial, normalizeUuid, stableDiskId } from "@/addons/drives/identity";
+import { isIgnoredVolume } from "@/addons/drives/volume-letters";
 import type {
   ConnectedHost,
   DiskRecord,
@@ -198,6 +199,7 @@ export function reconcileCatalog(
     const seenIds = new Set<string>();
     for (const volume of volumes) {
       const mountPaths = uniquePaths(volume.mountPaths);
+      if (isIgnoredVolume({ mountPaths })) continue;
       let disk = findDisk(disks, volume, observation.hostId, seenIds);
       if (!disk) {
         const created = createDisk(volume, observation, at, mountPaths);
@@ -249,7 +251,7 @@ export function reconcileCatalog(
   }
   const merged = uniqueDisks(mergeVolumeRecords(uniqueDisks(disks)));
   refreshClones(merged);
-  return merged;
+  return merged.filter((disk) => !isIgnoredVolume(disk));
 }
 
 export function diskRichness(disk: DiskRecord): number {

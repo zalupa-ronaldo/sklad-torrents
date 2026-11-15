@@ -2,6 +2,7 @@ import { lstat, readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 
 import type { MediaCategory, RawIndexedFile } from "../../src/addons/drives/types.ts";
+import { isIgnoredMount } from "../../src/addons/drives/volume-letters.ts";
 
 function asCategory(value: unknown): MediaCategory | null {
   if (value === "torrent" || value === "game" || value === "media") return value;
@@ -14,7 +15,7 @@ function asCategory(value: unknown): MediaCategory | null {
  * The scan fails only when the volume root itself cannot be listed, so the previous tree stays.
  */
 export async function walkTree(root: string): Promise<{ files: RawIndexedFile[]; complete: boolean }> {
-  if (!root) return { files: [], complete: false };
+  if (!root || isIgnoredMount(root)) return { files: [], complete: false };
   const files: RawIndexedFile[] = [];
   const stack = [""];
   try {

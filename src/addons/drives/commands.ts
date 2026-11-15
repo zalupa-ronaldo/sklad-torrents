@@ -1,4 +1,4 @@
-import type { HostOs, IndexStrategy } from "@/addons/drives/types";
+import type { HostOs, IndexCheckpoint, IndexStrategy } from "@/addons/drives/types";
 import { isNtfs, selectIndexStrategy } from "@/addons/drives/strategy";
 import { WINDOWS_VOLUME_SCRIPT } from "@/addons/drives/win-script";
 
@@ -25,6 +25,7 @@ export interface PlanInput {
   elevated: boolean;
   busy: boolean;
   usnCheckpoint: boolean;
+  cursor?: IndexCheckpoint;
 }
 
 const ALLOWED = new Set<string>(READ_ONLY_OPS);

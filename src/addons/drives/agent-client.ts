@@ -142,6 +142,15 @@ function sanitizeIndex(index: IndexPayload | null | undefined): IndexPayload | n
   const state = index.state;
   if (state !== "idle" && state !== "running" && state !== "paused" && state !== "complete" && state !== "error") return null;
   const files = Array.isArray(index.files) ? index.files.filter(isRawFile) : undefined;
+  const checkpoint = index.checkpoint;
+  const safeCheckpoint = checkpoint && typeof checkpoint === "object"
+    ? {
+        recordsDone: Number(checkpoint.recordsDone) || 0,
+        recordsTotal: checkpoint.recordsTotal == null ? null : Number(checkpoint.recordsTotal) || 0,
+        mftOffset: checkpoint.mftOffset == null ? null : Number(checkpoint.mftOffset) || 0,
+        nextUsn: typeof checkpoint.nextUsn === "string" ? checkpoint.nextUsn : null,
+      }
+    : undefined;
   return {
     state,
     revision: index.revision,
@@ -151,6 +160,15 @@ function sanitizeIndex(index: IndexPayload | null | undefined): IndexPayload | n
     strategy: index.strategy === "mft-usn" ? "mft-usn" : "walk",
     files,
     delta: index.delta && index.delta.complete === true ? index.delta : undefined,
+    processedBytes: Number.isFinite(Number(index.processedBytes)) ? Number(index.processedBytes) : undefined,
+    totalBytes: Number.isFinite(Number(index.totalBytes)) ? Number(index.totalBytes) : undefined,
+    speed: Number.isFinite(Number(index.speed)) ? Number(index.speed) : undefined,
+    eta: Number.isFinite(Number(index.eta)) ? Number(index.eta) : undefined,
+    currentFile: typeof index.currentFile === "string" ? index.currentFile.slice(0, 240) : index.currentFile ?? undefined,
+    priority: Number.isFinite(Number(index.priority)) ? Number(index.priority) : undefined,
+    pauseReason: index.pauseReason === "user" || index.pauseReason === "restart" || index.pauseReason === "quiet" || index.pauseReason === "busy" ? index.pauseReason : undefined,
+    checkpoint: safeCheckpoint,
+    cancelled: index.cancelled === true,
   };
 }
 

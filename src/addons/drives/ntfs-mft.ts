@@ -404,7 +404,7 @@ function resolveLink(entry: ParsedName, link: FileLink, byIndex: ReadonlyMap<num
 }
 
 /** One catalog row per hardlink path. Logical bytes are counted once per MFT record. */
-export function catalogFromParsed(entries: readonly ParsedName[]): MftCatalog {
+export function catalogFromParsed(entries: readonly ParsedName[], options?: { emitIndexAtLeast?: number }): MftCatalog {
   const bases = new Map<number, ParsedName>();
   const extras: ParsedName[] = [];
   for (const entry of entries) {
@@ -434,6 +434,7 @@ export function catalogFromParsed(entries: readonly ParsedName[]): MftCatalog {
     wof: 0,
   };
   for (const entry of bases.values()) {
+    if (options?.emitIndexAtLeast != null && entry.index < options.emitIndexAtLeast) continue;
     const links = entry.links.length > 0 ? entry.links : entry.hasName ? [{
       parent: entry.parent,
       parentSequence: 0,
@@ -518,9 +519,11 @@ function consume(
   entries: ParsedName[],
   maxRecords: number,
   stopOnZero: boolean,
+  maxNew: number | null = null,
 ): { read: number; complete: boolean; stopped: boolean } {
   let read = 0;
   for (let offset = 0; offset + geometry.recordSize <= chunk.length; offset += geometry.recordSize) {
+    if (maxNew != null && read >= maxNew) return { read, complete: false, stopped: true };
     const index = startIndex + read;
     if (index >= maxRecords) return { read, complete: false, stopped: true };
     const record = chunk.subarray(offset, offset + geometry.recordSize);
@@ -535,57 +538,191 @@ function consume(
   return { read, complete: true, stopped: false };
 }
 
+export interface DirStub {
+  index: number;
+  parent: number;
+  name: string;
+  sequence: number;
+}
+
+export interface NtfsReadOptions {
+  maxRecords?: number;
+  /** Skip this many records. Paths still resolve through `carry`. */
+  startRecord?: number;
+  carry?: readonly DirStub[];
+  /** Stop after this many newly parsed records and report paused. */
+  pauseAfterRecords?: number;
+  shouldPause?: () => boolean;
+  gapMs?: number;
+  sleep?: (ms: number) => Promise<void>;
+}
+
+export interface NtfsReadResult {
+  files: RawIndexedFile[];
+  complete: boolean;
+  paused: boolean;
+  recordsRead: number;
+  recordsTotal: number | null;
+  mftOffset: number | null;
+  currentFile: string | null;
+  processedBytes: number;
+  dirs: DirStub[];
+}
+
+function stubEntry(stub: DirStub): ParsedName {
+  return {
+    parent: stub.parent,
+    name: stub.name,
+    namespace: 1,
+    size: 0,
+    mtimeMs: 0,
+    directory: true,
+    index: stub.index,
+    base: stub.index,
+    hasName: true,
+    sequence: stub.sequence,
+    links: [{ parent: stub.parent, parentSequence: stub.sequence, name: stub.name, namespace: 1, size: 0, mtimeMs: 0 }],
+    dataSize: null,
+    dataAllocated: null,
+    wofBytes: null,
+    wofTag: false,
+    ntfsCompressed: false,
+  };
+}
+
+function asDirStub(entry: ParsedName): DirStub | null {
+  if (!entry.directory || !entry.name) return null;
+  return { index: entry.index, parent: entry.parent, name: entry.name, sequence: entry.sequence };
+}
+
 export async function readNtfsVolume(
   readAt: (offset: number, length: number) => Promise<Buffer>,
-  options?: { maxRecords?: number },
-): Promise<{ files: RawIndexedFile[]; complete: boolean }> {
+  options?: NtfsReadOptions,
+): Promise<NtfsReadResult> {
   const maxRecords = options?.maxRecords ?? 5_000_000;
+  const startRecord = Math.max(0, Math.floor(options?.startRecord ?? 0));
+  const pauseAfter = options?.pauseAfterRecords;
+  const sleep = options?.sleep ?? ((ms: number) => new Promise((resolve) => setTimeout(resolve, ms)));
+  const gap = Math.max(0, options?.gapMs ?? 0);
   const boot = await readBlock(readAt, 0, 512);
   const geometry = parseBootSector(boot);
-  if (!geometry) return { files: [], complete: false };
+  const carry = [...(options?.carry ?? [])];
+  const blank = (partial: Partial<NtfsReadResult> = {}): NtfsReadResult => ({
+    files: [],
+    complete: false,
+    paused: false,
+    recordsRead: startRecord,
+    recordsTotal: null,
+    mftOffset: null,
+    currentFile: null,
+    processedBytes: 0,
+    dirs: carry,
+    ...partial,
+  });
+  if (!geometry) return blank();
   const entries: ParsedName[] = [];
+  let recordsRead = startRecord;
+  let paused = false;
   let complete = true;
+  let mftOffset: number | null = null;
+  let recordsTotal: number | null = null;
+  let newly = 0;
+  const wantsPause = () => options?.shouldPause?.() === true || (pauseAfter != null && newly >= pauseAfter);
   const firstOffset = geometry.mftLcn * geometry.bytesPerCluster;
   const first = await readBlock(readAt, firstOffset, geometry.recordSize);
   const runs = takeMftRuns(Buffer.from(first), geometry.bytesPerSector);
   if (runs && runs.length > 0) {
+    const decoded = decodeRunlist(runs);
+    recordsTotal = decoded.reduce((sum, run) => sum + Math.floor((run.length * geometry.bytesPerCluster) / geometry.recordSize), 0);
     let index = 0;
-    for (const run of decodeRunlist(runs)) {
+    for (const run of decoded) {
+      const runRecords = Math.floor((run.length * geometry.bytesPerCluster) / geometry.recordSize);
+      const runBytes = run.length * geometry.bytesPerCluster;
       if (run.lcn < 0) {
-        index += Math.floor((run.length * geometry.bytesPerCluster) / geometry.recordSize);
+        index += runRecords;
         continue;
       }
-      const length = run.length * geometry.bytesPerCluster;
-      const data = await readBlock(readAt, run.lcn * geometry.bytesPerCluster, length);
-      const consumed = consume(data, index, geometry, entries, maxRecords, false);
-      index += consumed.read;
-      if (!consumed.complete) {
+      const runOffset = run.lcn * geometry.bytesPerCluster;
+      if (index + runRecords <= startRecord) {
+        index += runRecords;
+        mftOffset = runOffset + runBytes;
+        recordsRead = index;
+        continue;
+      }
+      if (wantsPause() && newly > 0) {
+        paused = true;
         complete = false;
+        break;
+      }
+      if (gap > 0 && newly > 0) await sleep(gap);
+      const skipInRun = Math.max(0, startRecord - index);
+      const byteSkip = skipInRun * geometry.recordSize;
+      const data = await readBlock(readAt, runOffset + byteSkip, runBytes - byteSkip);
+      const room = pauseAfter == null ? null : Math.max(0, pauseAfter - newly);
+      const consumed = consume(data, index + skipInRun, geometry, entries, maxRecords, false, room);
+      newly += consumed.read;
+      index += skipInRun + consumed.read;
+      mftOffset = runOffset + (skipInRun + consumed.read) * geometry.recordSize;
+      recordsRead = index;
+      if (!consumed.complete || wantsPause()) {
+        if (wantsPause() || !consumed.complete) {
+          paused = wantsPause();
+          complete = false;
+        }
         break;
       }
     }
   } else {
-    let offset = firstOffset;
-    let index = 0;
+    let offset = firstOffset + startRecord * geometry.recordSize;
+    let index = startRecord;
+    mftOffset = offset;
     for (;;) {
       if (index >= maxRecords) {
         complete = false;
         break;
       }
-      const chunk = await readBlock(readAt, offset, geometry.recordSize * 32);
-      const consumed = consume(chunk, index, geometry, entries, maxRecords, true);
+      if (wantsPause() && newly > 0) {
+        paused = true;
+        complete = false;
+        break;
+      }
+      if (gap > 0 && newly > 0) await sleep(gap);
+      const room = pauseAfter == null ? 32 : Math.max(1, Math.min(32, pauseAfter - newly));
+      const chunk = await readBlock(readAt, offset, geometry.recordSize * room);
+      const consumed = consume(chunk, index, geometry, entries, maxRecords, true, room);
+      newly += consumed.read;
       index += consumed.read;
+      offset += consumed.read * geometry.recordSize;
+      mftOffset = offset;
+      recordsRead = index;
       if (!consumed.complete) {
+        paused = wantsPause();
         complete = false;
         break;
       }
       if (consumed.stopped) break;
-      offset += chunk.length;
     }
   }
-  return { files: filesFromRecordsFromEntries(entries), complete };
-}
-
-function filesFromRecordsFromEntries(entries: ParsedName[]): RawIndexedFile[] {
-  return filesFromParsed(entries);
+  const catalog = catalogFromParsed(
+    [...carry.map(stubEntry), ...entries],
+    startRecord > 0 ? { emitIndexAtLeast: startRecord } : undefined,
+  );
+  const dirs = [...carry];
+  for (const entry of entries) {
+    const stub = asDirStub(entry);
+    if (stub && !dirs.some((item) => item.index === stub.index)) dirs.push(stub);
+  }
+  const currentFile = catalog.files.at(-1)?.relativePath ?? null;
+  const processedBytes = catalog.files.reduce((sum, file) => sum + (file.kind === "file" ? file.size ?? 0 : 0), 0);
+  return {
+    files: catalog.files,
+    complete: complete && !paused,
+    paused,
+    recordsRead,
+    recordsTotal,
+    mftOffset,
+    currentFile,
+    processedBytes,
+    dirs,
+  };
 }

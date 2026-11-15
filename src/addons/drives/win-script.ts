@@ -22,6 +22,7 @@ export const WINDOWS_VOLUME_SCRIPT = `
 $ErrorActionPreference = 'Continue'
 $ProgressPreference = 'SilentlyContinue'
 $exclude = New-Object 'System.Collections.Generic.HashSet[string]'
+[void]$exclude.Add('Z')
 foreach ($item in ([string]$env:SKLAD_EXCLUDE_LETTERS).ToUpper().Split(',')) {
   $token = $item.Trim().TrimEnd(':')
   if ($token -match '^[A-Z]$') { [void]$exclude.Add($token) }

@@ -2,10 +2,11 @@ import { rollupOnDisk, type CompressionKind, type FolderCompression } from "@/ad
 import { recordStage } from "@/addons/drives/stage";
 import type { IndexedFile } from "@/addons/drives/types";
 import { joinDisplay, normalizeRelative, parentRelative } from "@/addons/drives/paths";
-import { displayDiskName, isBrowsableRecord } from "@/addons/drives/inventory";
+import { diskStrip, displayDiskName, isBrowsableRecord, isServiceVolume } from "@/addons/drives/inventory";
 import { mountPathsOf, online } from "@/addons/drives/reconcile";
-import type { DiskRecord, MediaCategory, PathStyle } from "@/addons/drives/types";
+import type { DiskRecord, DiskStrip, MediaCategory, PathStyle } from "@/addons/drives/types";
 import { DriveError } from "@/addons/drives/types";
+import { isIgnoredVolume } from "@/addons/drives/volume-letters";
 
 export interface BrowseEntry {
   diskId: string;
@@ -29,6 +30,8 @@ export interface BrowseEntry {
   dirCount: number;
   /** False while indexedBytes is not a finished total. */
   sizesReady?: boolean;
+  /** Present on disk roots. `size` stays bytes; the panel formats MB/GB. `fileCount` is a count. */
+  strip?: DiskStrip;
 }
 
 export interface BrowseResponse {
@@ -328,7 +331,16 @@ export function browseRoots(disks: readonly DiskRecord[], limit = 200, cursor = 
     );
     const summarized = !waiting && Boolean(disk.summary) && disk.files.length === 0 && (disk.summary?.fileCount ?? 0) > 0;
     const tree = summarized || waiting ? null : buildDiskTree(disk);
-    const name = displayDiskName({
+    const strip = diskStrip({
+      label: disk.label,
+      volumeName: disk.volumeName,
+      lastMountPath: disk.lastMountPath,
+      mountPaths: mountPathsOf(disk),
+      totalBytes: disk.totalBytes,
+      freeBytes: disk.freeBytes,
+      filesystem: disk.filesystem,
+    });
+    const name = strip.title || displayDiskName({
       label: disk.label,
       volumeName: disk.volumeName,
       lastMountPath: disk.lastMountPath,
@@ -352,6 +364,7 @@ export function browseRoots(disks: readonly DiskRecord[], limit = 200, cursor = 
       fileCount: tree ? tree.root.fileCount : (disk.summary?.fileCount ?? disk.reportedRecords ?? 0),
       dirCount: tree ? tree.root.dirCount : 0,
       sizesReady: waiting ? false : Boolean(tree) || Boolean(disk.summary && (disk.summary.fileCount > 0 || disk.files.length > 0)),
+      strip,
     });
   }
   entries.sort((a, b) => compareSizeDesc(a.size, b.size) || b.fileCount - a.fileCount || a.name.localeCompare(b.name, "ru"));
@@ -381,7 +394,7 @@ export function browseDisk(
   cursor = 0,
 ): BrowseResponse {
   const disk = disks.find((item) => item.id === diskId);
-  if (!disk) throw new DriveError(404, "Диск в каталоге не найден.");
+  if (!disk || isIgnoredVolume(disk) || isServiceVolume(disk)) throw new DriveError(404, "Диск в каталоге не найден.");
   const mount = mountOf(disk);
   const parent = slash(relativePath);
   const tree = buildDiskTree(disk);
