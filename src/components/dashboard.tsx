@@ -1,25 +1,49 @@
 "use client";
 
 import { ChevronLeft, ChevronRight, Folder, File as FileIcon, Plus, Search } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 
 import { AddTorrentDialog } from "@/components/add-torrent-dialog";
 import { HostDialog } from "@/components/host-dialog";
+import { QueueDock } from "@/components/queue-dock";
+import { TorrentDock } from "@/components/torrent-dock";
+import {
+  copyGroup,
+  folderFileCountLabel,
+  isHiddenPanelVolume,
+  isQueueJob,
+  isZPath,
+  jobsToPause,
+  loadPolicyFromSnapshot,
+  panelDiskCaption,
+  panelDiskStrip,
+  readLoadPolicy,
+  subscribeLoadPolicy,
+  writeLoadPolicy,
+  type CopyGroup,
+} from "@/components/panel-model";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { compactExplanation, COMPACT_ALGORITHMS } from "@/addons/drives/compact-target";
 import { canGoBack, canGoForward, createFolderHistory, currentPlace, goBack, goForward, pushPlace, retargetDisk } from "@/addons/drives/folder-history";
 import { createMouseNavSession } from "@/addons/drives/mouse-nav";
 import { savingsOf } from "@/addons/drives/ondisk";
-import { dedupeShelfDisks, displayDiskName, displayDiskPickerLabel, displayDiskTitle } from "@/addons/drives/inventory";
+import { dedupeShelfDisks } from "@/addons/drives/inventory";
 import type { TransferDestination, TransferJob } from "@/addons/drives/transfer/jobs";
 import type { BrowseEntry, BrowseResponse } from "@/addons/drives/browse";
 import type { DiskView, MediaCategory, SearchHit, SearchResponse, ShelfResponse } from "@/addons/drives/types";
 import { api } from "@/lib/api-client";
 import { formatBytes, formatPercent } from "@/lib/format";
+import { toJobCard } from "@/lib/progress/view";
 import { cn } from "@/lib/utils";
 import type { DashboardPayload, HostView } from "@/lib/qbittorrent/types";
 import type { ProgressPayload } from "@/lib/progress/jobs";
+
+const COPY_GROUPS: { id: CopyGroup; label: string }[] = [
+  { id: "mac", label: "Mac" },
+  { id: "flash", label: "Флешка" },
+  { id: "disk", label: "Диск" },
+];
 
 type SortKey = "size" | "ondisk" | "name" | "mtime" | "type";
 
@@ -41,13 +65,8 @@ function formatMtime(ms: number): string {
   return new Intl.DateTimeFormat("ru-RU", { dateStyle: "short", timeStyle: "short" }).format(date);
 }
 
-/** Logical size plus share of the open folder. Share is bytes / folder bytes, never a file count. */
-function formatSizeShare(size: number | null, scopeBytes: number): string {
-  if (size == null) return "—";
-  const bytes = formatBytes(size);
-  if (!(scopeBytes > 0)) return bytes;
-  const share = size <= 0 ? 0 : Math.min(1, size / scopeBytes);
-  return `${bytes} · ${formatPercent(share)}`;
+function formatFolderSize(size: number | null): string {
+  return size == null ? "—" : formatBytes(size);
 }
 
 function needsManualScan(disk: { online: boolean; fileCount: number; scan: { status: string } }): boolean {
@@ -155,7 +174,11 @@ export function Dashboard() {
   const [aliasDraft, setAliasDraft] = useState("");
   const [aliasError, setAliasError] = useState<string | null>(null);
   const [aliasBusy, setAliasBusy] = useState(false);
+  const [queuePending, setQueuePending] = useState(false);
+  const storedPolicy = useSyncExternalStore(subscribeLoadPolicy, readLoadPolicy, () => "");
+  const loadPolicy = useMemo(() => loadPolicyFromSnapshot(storedPolicy), [storedPolicy]);
   const panelRef = useRef<HTMLDivElement>(null);
+  const pausingRef = useRef(new Set<string>());
   const historyRef = useRef(createFolderHistory());
   const [nav, setNav] = useState(historyRef.current);
 
@@ -349,8 +372,45 @@ export function Dashboard() {
     return () => window.clearTimeout(timer);
   }, [query]);
 
+  useEffect(() => {
+    const targets = jobsToPause(
+      (progress?.jobs ?? []).filter((job) => isQueueJob(job)).map((job) => ({
+        id: job.id,
+        status: job.status,
+        progress: job.progress,
+        canPause: job.status === "running" && job.capabilities.pause,
+      })),
+      loadPolicy,
+      new Date(),
+    ).filter((id) => !pausingRef.current.has(id));
+    if (targets.length === 0) return;
+    for (const id of targets) pausingRef.current.add(id);
+    let cancelled = false;
+    void (async () => {
+      for (const id of targets) {
+        if (cancelled) return;
+        try {
+          await api(`/api/progress/${encodeURIComponent(id)}`, {
+            method: "POST",
+            body: JSON.stringify({ action: "pause" }),
+          });
+        } catch {
+          // The next refresh tries again. A refused pause stays visible on the task.
+        }
+      }
+      if (!cancelled) void refreshMeta();
+    })().finally(() => {
+      for (const id of targets) pausingRef.current.delete(id);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [progress, loadPolicy, refreshMeta]);
+
   const stripDisks = useMemo(() => {
-    return dedupeShelfDisks(shelf?.disks ?? []).sort((a, b) => b.fileCount - a.fileCount || b.totalBytes - a.totalBytes || a.label.localeCompare(b.label, "ru"));
+    return dedupeShelfDisks(shelf?.disks ?? [])
+      .filter((disk) => !isHiddenPanelVolume(disk))
+      .sort((a, b) => b.fileCount - a.fileCount || b.totalBytes - a.totalBytes || a.label.localeCompare(b.label, "ru"));
   }, [shelf]);
 
   const treeDisks = useMemo(() => {
@@ -358,9 +418,9 @@ export function Dashboard() {
     return stripDisks
       .map((disk) => ({
         diskId: disk.id,
-        diskLabel: displayDiskTitle(disk),
+        diskLabel: panelDiskCaption(disk),
         online: disk.online,
-        name: displayDiskTitle(disk),
+        name: panelDiskCaption(disk),
         relativePath: "",
         displayPath: disk.mountPaths[0] || disk.lastMountPath,
         kind: "dir" as const,
@@ -379,8 +439,16 @@ export function Dashboard() {
 
   useEffect(() => {
     if (!diskId || !shelf) return;
-    if (stripDisks.some((disk) => disk.id === diskId)) return;
     const current = shelf.disks.find((disk) => disk.id === diskId);
+    if (current && isHiddenPanelVolume(current)) {
+      historyRef.current = createFolderHistory();
+      setNav(historyRef.current);
+      setDiskId(null);
+      setPath("");
+      void loadBrowse(null, "");
+      return;
+    }
+    if (stripDisks.some((disk) => disk.id === diskId)) return;
     if (!current?.volumeUuid) return;
     const uuid = current.volumeUuid.replace(/-/g, "").toLowerCase();
     const keeper = stripDisks.find((disk) => disk.volumeUuid.replace(/-/g, "").toLowerCase() === uuid);
@@ -388,11 +456,16 @@ export function Dashboard() {
     historyRef.current = retargetDisk(historyRef.current, diskId, keeper.id);
     setNav(historyRef.current);
     setDiskId(keeper.id);
-  }, [diskId, shelf, stripDisks]);
+  }, [diskId, shelf, stripDisks, loadBrowse]);
 
   const rows = useMemo(() => {
     if (query.trim() && hits) {
       return hits
+        .filter((hit) => {
+          const disk = shelf?.disks.find((item) => item.id === hit.diskId);
+          if (disk && isHiddenPanelVolume(disk)) return false;
+          return !isZPath(hit.label) && !isZPath(hit.path);
+        })
         .filter((hit) => libFilter === "all" || hit.categories.includes(libFilter))
         .map((hit) => ({
           key: `${hit.diskId}:${hit.path}`,
@@ -403,7 +476,7 @@ export function Dashboard() {
           allocated: null as number | null,
           onDisk: null as number | null,
           compression: null,
-          fileCount: 0,
+          fileCount: null as number | null,
           mtimeMs: 0,
           diskLabel: hit.label,
           path: hit.path,
@@ -412,6 +485,7 @@ export function Dashboard() {
         }));
     }
     const entries = (browse?.entries ?? []).filter((entry) => {
+      if (isZPath(entry.name) || isZPath(entry.displayPath) || isZPath(entry.diskLabel)) return false;
       if (libFilter === "all") return true;
       return entry.categories.includes(libFilter);
     });
@@ -439,7 +513,7 @@ export function Dashboard() {
       online: entry.online,
       raw: entry,
     }));
-  }, [browse, hits, query, libFilter, sortKey]);
+  }, [browse, hits, query, libFilter, sortKey, shelf]);
 
   function openCompact(entry: BrowseEntry) {
     setCompactTarget(entry);
@@ -529,10 +603,6 @@ export function Dashboard() {
     return parts;
   }, [diskId, path, browse?.diskLabel]);
 
-  const activity = (progress?.jobs ?? [])
-    .filter((job) => job.status === "running" || job.status === "paused" || job.status === "error")
-    .slice(0, 8);
-
   const scanJobs = stripDisks
     .filter((disk) => disk.scan.status === "running" || disk.scan.status === "paused")
     .slice(0, 4);
@@ -543,9 +613,6 @@ export function Dashboard() {
       ? (selected as BrowseEntry)
       : null;
   const selectedOnline = selectedFile?.online === true;
-  const selectedOnMac =
-    selectedFile &&
-    stripDisks.some((disk) => disk.id === selectedFile.diskId && (disk.lastHostId === "mac-mini" || disk.mountPaths.some((path) => path.startsWith("/"))));
 
   async function openCopyPicker() {
     if (!selectedFile) return;
@@ -562,13 +629,52 @@ export function Dashboard() {
     }
   }
 
-  async function startCopy(destinationId: string) {
-    if (!selectedFile) return;
+  async function runJobAction(id: string, action: "pause" | "resume" | "cancel") {
+    const result = await api<{ notice?: string }>(`/api/progress/${encodeURIComponent(id)}`, {
+      method: "POST",
+      body: JSON.stringify({ action }),
+    });
+    if (result.notice) setCopyNotice(result.notice);
+    await refreshMeta();
+  }
+
+  async function runQueueAction(action: "pause" | "resume" | "cancel") {
+    const cards = (progress?.jobs ?? []).filter((job) => isQueueJob(job)).map((job) => toJobCard(job));
+    const targets = cards.filter((card) => (action === "pause" ? card.canPause : action === "resume" ? card.canResume : card.canCancel));
+    if (targets.length === 0) {
+      setCopyNotice(action === "pause" ? "Сейчас нечего ставить на паузу." : action === "resume" ? "Сейчас нечего продолжать." : "Сейчас нечего отменять.");
+      return;
+    }
+    if (action === "cancel" && !window.confirm("Остановить очередь? Файлы и оригиналы не удаляются.")) return;
+    setQueuePending(true);
+    const notes: string[] = [];
+    try {
+      for (const card of targets) {
+        try {
+          const result = await api<{ notice?: string }>(`/api/progress/${encodeURIComponent(card.id)}`, {
+            method: "POST",
+            body: JSON.stringify({ action }),
+          });
+          if (result.notice) notes.push(result.notice);
+        } catch (error) {
+          notes.push(error instanceof Error ? error.message : "Действие не выполнилось");
+        }
+      }
+      if (notes.length > 0) setCopyNotice(notes[0] ?? null);
+      await refreshMeta();
+    } finally {
+      setQueuePending(false);
+    }
+  }
+
+  async function startCopy(destinationId: string, file: BrowseEntry | null = selectedFile) {
+    if (!file) return;
+    setSelected(file);
     setCopyBusy(true);
     setCopyNotice(null);
     try {
       if (destinationId === "browser") {
-        const url = `/api/files/download?diskId=${encodeURIComponent(selectedFile.diskId)}&path=${encodeURIComponent(selectedFile.relativePath)}`;
+        const url = `/api/files/download?diskId=${encodeURIComponent(file.diskId)}&path=${encodeURIComponent(file.relativePath)}`;
         window.location.href = url;
         setCopyOpen(false);
         setCopyNotice("Скачивание через браузер запущено");
@@ -577,14 +683,14 @@ export function Dashboard() {
       const result = await api<{ job: TransferJob }>("/api/files/copy", {
         method: "POST",
         body: JSON.stringify({
-          diskId: selectedFile.diskId,
-          path: selectedFile.relativePath,
+          diskId: file.diskId,
+          path: file.relativePath,
           destinationId,
         }),
       });
       setCopyJob(result.job);
       setCopyOpen(false);
-      setCopyNotice(`Копирование · ${result.job.title}`);
+      setCopyNotice(`Копирование · ${result.job.title}. Оригинал остаётся, сверяем SHA-256.`);
       void refreshMeta();
     } catch (error) {
       setCopyNotice(error instanceof Error ? error.message : "Копирование не запустилось");
@@ -679,7 +785,7 @@ export function Dashboard() {
           <span className="grid size-8 place-items-center rounded-md bg-primary text-xs font-bold text-primary-foreground">С</span>
           <div>
             <div className="text-sm font-semibold leading-tight">Склад</div>
-            <div className="text-[11px] text-muted-foreground">файлы на дисках</div>
+            <div className="text-[11px] text-muted-foreground">диски, поиск и раздачи</div>
           </div>
           <span className="ml-1 inline-flex items-center gap-1 rounded-full border border-seed/40 bg-seed/10 px-2 py-0.5 text-[11px] font-semibold text-seed">
             <span className="size-1.5 rounded-full bg-seed" />
@@ -692,7 +798,7 @@ export function Dashboard() {
             id="sklad-search"
             value={query}
             onChange={(event) => setQuery(event.target.value)}
-            placeholder="Поиск по всем дискам, включая отключённые"
+            placeholder="Поиск по дискам и раздачам, включая отключённые"
             className="h-8 pl-7 text-sm"
           />
         </div>
@@ -756,12 +862,14 @@ export function Dashboard() {
               </form>
             );
           }
+          const chip = panelDiskStrip(disk);
           return (
             <span key={disk.id} className={cn("inline-flex shrink-0 items-center gap-1 rounded-md border px-1.5 py-1", diskId === disk.id && "border-primary bg-primary/10")}>
-              <button type="button" onClick={() => openDisk(disk)} className="inline-flex items-center gap-1.5" title={system}>
+              <button type="button" onClick={() => openDisk(disk)} className="inline-flex items-center gap-1.5" title={[chip.detail, disk.scan.strategy === "mft-usn" ? "Индекс NTFS через MFT и USN" : "", system].filter(Boolean).join(" · ")}>
                 <span className={cn("size-1.5 rounded-full", disk.online ? "bg-seed" : "bg-muted-foreground")} />
-                <span className="font-medium">{displayDiskTitle(disk)}</span>
-                <span className="text-muted-foreground">{formatBytes(disk.freeBytes)} / {formatBytes(disk.totalBytes)}</span>
+                <span className="font-medium" data-testid="disk-strip-title">{chip.title}</span>
+                {chip.rest ? <span className="text-muted-foreground">{chip.rest}</span> : null}
+                {disk.online ? null : <span className="text-muted-foreground">офлайн</span>}
               </button>
               <button type="button" className="rounded px-1 text-muted-foreground hover:bg-muted" title={system} onClick={() => { setAliasId(disk.id); setAliasDraft(disk.namedByUser ? disk.label : disk.volumeName || disk.label); setAliasError(null); }}>
                 Имя
@@ -775,17 +883,20 @@ export function Dashboard() {
         <aside data-testid="file-tree" className="flex w-[220px] shrink-0 flex-col border-r bg-card/20">
           <div className="border-b px-2 py-1.5 text-[11px] font-semibold tracking-wide text-muted-foreground uppercase">Диски</div>
           <div className="min-h-0 flex-1 overflow-auto p-1">
-            {(browse?.roots ? browse.entries : treeDisks).map((entry) => {
+            {(browse?.roots ? browse.entries : treeDisks).filter((entry) => !isZPath(entry.name) && !isZPath(entry.displayPath)).map((entry) => {
               const diskActive = diskId === entry.diskId;
               const open = treeOpen[entry.diskId] ?? diskActive;
               const childDirs =
                 diskActive && browse && !browse.roots && !path
                   ? browse.entries.filter((item) => item.kind === "dir").slice(0, 40)
                   : [];
+              const diskFace = stripDisks.find((disk) => disk.id === entry.diskId);
+              const diskTitle = diskFace ? panelDiskStrip(diskFace).title : entry.name;
               return (
                 <div key={entry.diskId}>
                   <button
                     type="button"
+                    title={diskTitle}
                     onClick={() => {
                       setTreeOpen((current) => ({ ...current, [entry.diskId]: true }));
                       visit(entry.diskId, "");
@@ -797,9 +908,10 @@ export function Dashboard() {
                   >
                     <span className="text-muted-foreground">{open && diskActive ? "▾" : "▸"}</span>
                     <span className={cn("size-1.5 rounded-full", entry.online ? "bg-seed" : "bg-muted-foreground")} />
-                    <span className="min-w-0 flex-1 truncate font-medium">{entry.name}</span>
-                    <span className="shrink-0 text-[10px] tabular-nums text-muted-foreground" title={entry.sizesReady === false ? "Считаем объём индекса" : entry.fileCount === 0 ? "Индекс ещё не построен" : entry.size == null ? "Размер в снимке неизвестен" : folderHint(entry.size, entry.fileCount, entry.onDisk)}>
-                      {entry.sizesReady === false ? "считаем" : entry.fileCount === 0 ? "нет индекса" : entry.size == null ? "—" : formatBytes(entry.size)}
+                    <span className="min-w-0 flex-1 truncate font-medium">{diskTitle}</span>
+                    <span className="shrink-0 text-right text-[10px] leading-tight tabular-nums text-muted-foreground" title={entry.sizesReady === false ? "Считаем объём индекса" : entry.fileCount === 0 ? "Индекс ещё не построен" : entry.size == null ? "Размер в снимке неизвестен" : folderHint(entry.size, entry.fileCount, entry.onDisk)}>
+                      <span className="block">{entry.sizesReady === false ? "считаем" : entry.fileCount === 0 ? "нет индекса" : formatFolderSize(entry.size)}</span>
+                      <span className="block">{entry.fileCount > 0 ? `${entry.fileCount.toLocaleString("ru-RU")} ф.` : ""}</span>
                     </span>
                   </button>
                   {open && diskActive
@@ -815,8 +927,9 @@ export function Dashboard() {
                         >
                           <Folder className="size-3 shrink-0 text-amber-400" />
                           <span className="min-w-0 flex-1 truncate">{child.name}</span>
-                          <span className="shrink-0 text-[10px] tabular-nums text-muted-foreground" title={folderHint(child.size, child.fileCount, child.onDisk)}>
-                            {child.size == null ? "—" : formatBytes(child.size)}
+                          <span className="shrink-0 text-right text-[10px] leading-tight tabular-nums text-muted-foreground" title={folderHint(child.size, child.fileCount, child.onDisk)}>
+                            <span className="block">{formatFolderSize(child.size)}</span>
+                            <span className="block">{child.fileCount > 0 ? `${child.fileCount.toLocaleString("ru-RU")} ф.` : ""}</span>
                           </span>
                         </button>
                       ))
@@ -877,12 +990,13 @@ export function Dashboard() {
 
           <div className="min-h-0 flex-1 overflow-auto">
             {browseError ? <p className="px-3 py-6 text-sm text-destructive">{browseError}</p> : null}
-            <table className="w-full min-w-[720px] border-collapse text-left text-xs">
+            <table className="w-full min-w-[820px] border-collapse text-left text-xs">
               <thead className="sticky top-0 z-10 bg-background/95 text-[11px] text-muted-foreground backdrop-blur">
                 <tr className="border-b">
                   <th className="px-2 py-1.5 font-medium">Имя</th>
                   <th className="w-16 px-2 py-1.5 font-medium">Тип</th>
-                  <th className="w-36 px-2 py-1.5 text-right font-medium">Размер</th>
+                  <th className="w-28 px-2 py-1.5 text-right font-medium">Размер</th>
+                  <th className="w-20 px-2 py-1.5 text-right font-medium">Файлы</th>
                   <th className="w-40 px-2 py-1.5 text-right font-medium">На диске</th>
                   <th className="w-32 px-2 py-1.5 font-medium">Изменён</th>
                   <th className="px-2 py-1.5 font-medium">Путь</th>
@@ -891,13 +1005,13 @@ export function Dashboard() {
               <tbody>
                 {browseLoading && !browse ? (
                   <tr>
-                    <td colSpan={6} className="px-3 py-8 text-muted-foreground">
+                    <td colSpan={7} className="px-3 py-8 text-muted-foreground">
                       Загрузка каталога…
                     </td>
                   </tr>
                 ) : rows.length === 0 ? (
                   <tr>
-                    <td colSpan={6} className="px-3 py-8 text-muted-foreground">
+                    <td colSpan={7} className="px-3 py-8 text-muted-foreground">
                       {query.trim() ? "Ничего не найдено." : currentDisk?.scan.status === "error" ? currentDisk.scan.message : currentDisk && currentDisk.fileCount === 0 ? "Индекса ещё нет. Сканирование само не запускается." : "Папка пуста в снимке каталога."}
                     </td>
                   </tr>
@@ -917,25 +1031,42 @@ export function Dashboard() {
                         }}
                       >
                         <td className="px-2 py-1">
-                          <button
-                            type="button"
-                            className="flex max-w-[360px] items-center gap-1.5 truncate text-left"
-                            onClick={(event) => {
-                              event.stopPropagation();
-                              if (row.kind === "dir" && "diskId" in row.raw) openEntry(row.raw as BrowseEntry);
-                              else setSelected(row.raw as BrowseEntry);
-                            }}
-                          >
-                            {row.kind === "dir" ? <Folder className="size-3.5 shrink-0 text-amber-400" /> : <FileIcon className="size-3.5 shrink-0 text-muted-foreground" />}
-                            <span className="truncate font-medium">{row.name}</span>
-                          </button>
+                          <div className="flex max-w-[420px] items-center gap-1.5">
+                            <button
+                              type="button"
+                              className="flex min-w-0 items-center gap-1.5 truncate text-left"
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                if (row.kind === "dir" && "diskId" in row.raw) openEntry(row.raw as BrowseEntry);
+                                else setSelected(row.raw as BrowseEntry);
+                              }}
+                            >
+                              {row.kind === "dir" ? <Folder className="size-3.5 shrink-0 text-amber-400" /> : <FileIcon className="size-3.5 shrink-0 text-muted-foreground" />}
+                              <span className="truncate font-medium">{row.name}</span>
+                            </button>
+                            {row.kind === "file" && "relativePath" in row.raw ? (
+                              <button
+                                type="button"
+                                className="shrink-0 rounded border border-border px-1 py-0.5 text-[10px] font-medium hover:bg-muted"
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  void startCopy("mac-downloads", row.raw as BrowseEntry);
+                                }}
+                              >
+                                Скачать на Mac
+                              </button>
+                            ) : null}
+                          </div>
                         </td>
                         <td className="px-2 py-1 text-muted-foreground">{row.kind === "dir" ? "папка" : row.extension || "файл"}</td>
                         <td
                           className="px-2 py-1 text-right whitespace-nowrap tabular-nums"
-                          title={row.kind === "dir" && row.size != null ? folderHint(row.size, row.fileCount, row.onDisk) : undefined}
+                          title={row.kind === "dir" && row.size != null && row.fileCount != null ? folderHint(row.size, row.fileCount, row.onDisk) : undefined}
                         >
-                          {row.size == null ? "—" : formatSizeShare(row.size, query.trim() ? 0 : browse?.scopeBytes ?? 0)}
+                          {formatFolderSize(row.size)}
+                        </td>
+                        <td className="px-2 py-1 text-right tabular-nums" data-testid="file-count">
+                          {folderFileCountLabel(row.kind, row.kind === "dir" ? row.fileCount : null)}
                         </td>
                         <td className="px-2 py-1 text-right">
                           <OnDiskCell
@@ -972,27 +1103,20 @@ export function Dashboard() {
           </div>
         </main>
 
-        <aside className="hidden w-[240px] shrink-0 flex-col border-l bg-card/20 lg:flex">
-          <div className="border-b px-2 py-1.5 text-[11px] font-semibold tracking-wide text-muted-foreground uppercase">Сейчас</div>
-          <div className="min-h-0 flex-1 space-y-1.5 overflow-auto p-2">
-            {scanJobs.map((disk) => (
-              <div key={disk.id} className="rounded-md border px-2 py-1.5 text-[11px]">
-                <div className="font-medium">Индекс · {displayDiskName(disk)}</div>
-                <div className="text-muted-foreground">{disk.scan.message}</div>
-              </div>
-            ))}
-            {activity.map((job) => (
-              <div key={job.id} className="rounded-md border px-2 py-1.5 text-[11px]">
-                <div className="font-medium">{job.title}</div>
-                <div className="text-muted-foreground">{[job.diskLabel, job.host].filter(Boolean).join(" · ") || job.status}</div>
-              </div>
-            ))}
-            {scanJobs.length === 0 && activity.length === 0 ? (
-              <p className="px-1 py-3 text-[11px] text-muted-foreground">Нет активных задач.</p>
-            ) : null}
-          </div>
+        <aside className="flex w-[240px] shrink-0 flex-col border-l bg-card/20">
+          <div className="border-b px-2 py-1.5 text-[11px] font-semibold tracking-wide text-muted-foreground uppercase">Файл</div>
+          {scanJobs.length > 0 ? (
+            <div className="space-y-1 border-b p-2">
+              {scanJobs.map((disk) => (
+                <div key={disk.id} className="rounded-md border px-2 py-1.5 text-[11px]">
+                  <div className="font-medium">Индекс · {panelDiskCaption(disk)}</div>
+                  <div className="text-muted-foreground">{disk.scan.message}</div>
+                </div>
+              ))}
+            </div>
+          ) : null}
           {selected && "displayPath" in selected ? (
-            <div className="border-t p-2 text-[11px]">
+            <div className="border-t p-2 text-[11px]" data-testid="file-card">
               <div className="font-medium">{selected.name}</div>
               <div className="mt-1 break-all font-mono text-[10px] text-muted-foreground">{selected.displayPath}</div>
               {"size" in selected ? (
@@ -1006,28 +1130,14 @@ export function Dashboard() {
                 </div>
               ) : null}
               {selectedFile ? (
-                <div className="mt-2 space-y-1.5">
-                  <Button
-                    type="button"
-                    size="sm"
-                    className="h-8 w-full text-xs font-semibold"
-                    disabled={!selectedOnline || copyBusy}
-                    title={selectedOnline ? "Скопировать файл на другой диск или в Загрузки" : "Нужен подключённый диск"}
-                    onClick={() => void openCopyPicker()}
-                  >
-                    {selectedOnline ? "Копировать" : "Нужен подключённый диск"}
-                  </Button>
-                  {copyNotice ? <p className="text-[10px] text-muted-foreground">{copyNotice}</p> : null}
-                  {copyJob ? (
-                    <p className="text-[10px] text-muted-foreground">
-                      {copyJob.status === "completed" && copyJob.verified
-                        ? `Готово · SHA совпал · ${copyJob.destPath || ""}`
-                        : copyJob.status === "error"
-                          ? copyJob.error
-                          : `${copyJob.status} · ${formatBytes(copyJob.bytesDone)}${copyJob.bytesTotal ? ` / ${formatBytes(copyJob.bytesTotal)}` : ""}`}
-                    </p>
-                  ) : null}
-                </div>
+                <FileActions
+                  online={selectedOnline}
+                  busy={copyBusy}
+                  notice={copyNotice}
+                  job={copyJob}
+                  onCopy={() => void openCopyPicker()}
+                  onDownloadMac={() => void startCopy("mac-downloads")}
+                />
               ) : null}
             </div>
           ) : null}
@@ -1086,17 +1196,14 @@ export function Dashboard() {
               <div className="text-sm font-semibold">Куда копировать</div>
               <div className="truncate text-[11px] text-muted-foreground">{selectedFile?.name}</div>
             </div>
+            <p className="px-3 pt-2 text-[11px] text-muted-foreground">Оригинал остаётся на месте. После копии сверяется SHA-256.</p>
             <div className="max-h-[60vh] space-y-3 overflow-auto p-3">
-              {["Этот браузер", "Mac mini", "Windows PC"].map((group) => {
-                const items = destinations.filter((item) => {
-                  if (group === "Этот браузер") return item.hostName === "Этот браузер";
-                  if (group === "Mac mini") return item.hostName === "Mac mini" || item.hostId === "mac-mini";
-                  return item.hostName.toLowerCase().includes("windows") || item.hostId === "windows-pc";
-                });
+              {COPY_GROUPS.map((group) => {
+                const items = destinations.filter((item) => copyGroup(item) === group.id);
                 if (!items.length) return null;
                 return (
-                  <div key={group}>
-                    <div className="mb-1 text-[10px] font-semibold tracking-wide text-muted-foreground uppercase">{group}</div>
+                  <div key={group.id}>
+                    <div className="mb-1 text-[10px] font-semibold tracking-wide text-muted-foreground uppercase">{group.label}</div>
                     <div className="space-y-1">
                       {items.map((item) => (
                         <button
@@ -1124,6 +1231,23 @@ export function Dashboard() {
         </div>
       ) : null}
 
+      <div className="grid max-h-[38%] min-h-[168px] shrink-0 grid-rows-[minmax(0,1fr)] border-t lg:grid-cols-2">
+        <TorrentDock torrents={(data?.torrents ?? []).filter((torrent) => !isZPath(torrent.savePath) && !isZPath(torrent.contentPath))} hosts={data?.hosts ?? []} query={query} onChanged={() => void refreshMeta()} />
+        <QueueDock
+          jobs={(progress?.jobs ?? []).filter((job) => isQueueJob(job))}
+          pending={queuePending}
+          policy={loadPolicy}
+          onPolicy={writeLoadPolicy}
+          onAction={(id, action) => {
+            setQueuePending(true);
+            void runJobAction(id, action)
+              .catch((error) => setCopyNotice(error instanceof Error ? error.message : "Действие не выполнилось"))
+              .finally(() => setQueuePending(false));
+          }}
+          onQueueAction={(action) => void runQueueAction(action)}
+        />
+      </div>
+
       <AddTorrentDialog
         open={addOpen}
         hosts={data?.hosts ?? []}
@@ -1137,6 +1261,64 @@ export function Dashboard() {
         onClose={() => setHostEditor(null)}
         onSaved={() => void refreshMeta()}
       />
+    </div>
+  );
+}
+
+function FileActions({
+  online,
+  busy,
+  notice,
+  job,
+  onCopy,
+  onDownloadMac,
+}: {
+  online: boolean;
+  busy: boolean;
+  notice: string | null;
+  job: TransferJob | null;
+  onCopy: () => void;
+  onDownloadMac: () => void;
+}) {
+  return (
+    <div className="mt-2 space-y-1.5">
+      <p className="text-xs font-semibold" data-testid="download-mac">Скачать на Mac</p>
+      <Button
+        type="button"
+        size="sm"
+        className="h-8 w-full text-xs font-semibold"
+        disabled={!online || busy}
+        title="Копия в Загрузки на Mac. Оригинал остаётся, сверяется SHA-256."
+        onClick={onDownloadMac}
+      >
+        Скачать на Mac
+      </Button>
+      <Button
+        type="button"
+        size="sm"
+        variant="outline"
+        className="h-8 w-full text-xs font-semibold"
+        disabled={!online || busy}
+        title={online ? "Скопировать на Mac, флешку или другой диск. Оригинал остаётся." : "Нужен подключённый диск"}
+        onClick={onCopy}
+      >
+        {online ? "Копировать" : "Нужен подключённый диск"}
+      </Button>
+      <p className="text-[10px] text-muted-foreground">Оригинал остаётся на месте.</p>
+      {notice ? <p className="text-[10px] text-muted-foreground">{notice}</p> : null}
+      {job ? (
+        <div className="space-y-0.5 text-[10px] text-muted-foreground">
+          <p>
+            {job.status === "completed" && job.verified
+              ? `Готово · SHA-256 совпал · ${job.destPath || ""}`
+              : job.status === "error"
+                ? job.error
+                : `${job.status} · ${formatBytes(job.bytesDone)}${job.bytesTotal ? ` / ${formatBytes(job.bytesTotal)}` : ""} · SHA-256`}
+          </p>
+          {job.sourceSha256 ? <p className="break-all font-mono">Источник {job.sourceSha256}</p> : null}
+          {job.destSha256 ? <p className="break-all font-mono">Копия {job.destSha256}</p> : null}
+        </div>
+      ) : null}
     </div>
   );
 }
