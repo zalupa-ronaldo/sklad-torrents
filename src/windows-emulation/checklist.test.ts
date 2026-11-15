@@ -72,7 +72,9 @@ describe("acceptance checklist on the Windows emulation", () => {
     const after = (await pc.listTorrents()).find((torrent) => torrent.hash === DEMO_HASH.blender);
     expect(after).toMatchObject({ hash: DEMO_HASH.blender, state: "seeding", savePath: "S:\\Software" });
     expect(after?.rawState).toBe(before?.rawState);
-    expect(() => assertPathForOs("win32", "/mnt/d/Downloads")).toThrow(/D:\\Downloads/);
+    expect(assertPathForOs("win32", "/mnt/d/Downloads")).toBe("D:\\Downloads");
+    expect(() => assertPathForOs("win32", "Z:\\Archive")).toThrow(/Z/);
+    expect(() => assertPathForOs("win32", "/mnt/z/Archive")).toThrow(/Z/);
 
     const macSeed = (await mac.listTorrents()).find((torrent) => torrent.hash === DEMO_HASH.interstellar);
     expect(normalizeState(macSeed?.rawState || "")).toBe("seeding");
