@@ -166,9 +166,10 @@ export function sanitizeLoad(value: unknown, fallback: LoadPolicy = defaultContr
   const slots = { ...(raw.handbrakeSlots ?? { "mac-local": fallback.handbrakeSlots["mac-local"], "pc-agent": fallback.handbrakeSlots["pc-agent"] }) };
   if (nested.mac?.handbrakeSlots !== undefined) slots["mac-local"] = numberOr(nested.mac.handbrakeSlots, slots["mac-local"]);
   if (nested.pc?.handbrakeSlots !== undefined) slots["pc-agent"] = numberOr(nested.pc.handbrakeSlots, slots["pc-agent"]);
-  const active = raw.userActive ?? { "mac-local": false, "pc-agent": false };
+  const active = raw.userActive ?? fallback.userActive;
   const schedule = raw.schedule ?? fallback.schedule;
-  const quiet = raw.quiet === true || raw.yieldWhileActive === true || raw.disturb === true;
+  const quietFlags = [raw.quiet, raw.yieldWhileActive, raw.disturb].filter((value) => value !== undefined);
+  const quiet = quietFlags.length > 0 ? quietFlags.some((value) => value === true) : fallback.quiet;
   return {
     maxParallel: {
       "mac-local": clampInt(parallel["mac-local"], 1, 8, fallback.maxParallel["mac-local"]),
@@ -181,7 +182,7 @@ export function sanitizeLoad(value: unknown, fallback: LoadPolicy = defaultContr
     },
     processPriority: normalizePriority(raw.processPriority, fallback.processPriority),
     quiet,
-    quietHours: sanitizeQuietHours(raw.quietHours),
+    quietHours: raw.quietHours === undefined ? fallback.quietHours : sanitizeQuietHours(raw.quietHours),
     yieldWhileActive: quiet,
     userActive: {
       "mac-local": active["mac-local"] === true,

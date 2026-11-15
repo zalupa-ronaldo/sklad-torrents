@@ -352,6 +352,30 @@ describe("shared task queue", () => {
     expect(await readFile(source, "utf8")).toBe("source-bytes");
   });
 
+  it("keeps quiet mode when only the process priority is saved", async () => {
+    await saveLoad({
+      quiet: true,
+      quietHours: [{ startHour: 23, endHour: 7 }],
+      userActive: { "mac-local": true, "pc-agent": false },
+      processPriority: "below-normal",
+    });
+    const saved = await saveLoad({ processPriority: "idle" });
+    expect(saved.quiet).toBe(true);
+    expect(saved.processPriority).toBe("idle");
+    expect(saved.quietHours).toEqual([{ startHour: 23, endHour: 7 }]);
+    expect(saved.userActive).toEqual({ "mac-local": true, "pc-agent": false });
+    const store = getJobStore();
+    await store.enqueue(copy);
+    await store.enqueue({
+      kind: "copy",
+      host: "pc-agent",
+      source: "D:\\Movies\\free.mkv",
+      destination: "E:\\Movies\\free.mkv",
+    });
+    expect(await store.claimNext("mac-local")).toBeNull();
+    expect((await store.claimNext("pc-agent"))?.host).toBe("pc-agent");
+  });
+
   it("summarizes percent, speed, and the current file for the open queue", () => {
     const summary = summarize([
       snapshot({ status: "running", progress: 0.5, processedBytes: 500, totalBytes: 1000, speed: 100, currentFile: "a.mkv" }),
