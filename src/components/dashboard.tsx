@@ -38,6 +38,7 @@ import { toJobCard } from "@/lib/progress/view";
 import { cn } from "@/lib/utils";
 import type { DashboardPayload, HostView } from "@/lib/qbittorrent/types";
 import type { ProgressPayload } from "@/lib/progress/jobs";
+import { overlayHostError, type ChannelLinkView } from "@/lib/service/channel-view";
 
 const COPY_GROUPS: { id: CopyGroup; label: string }[] = [
   { id: "mac", label: "Mac" },
@@ -184,11 +185,13 @@ export function Dashboard() {
 
   const refreshMeta = useCallback(async () => {
     try {
-      const [nextTorrents, nextShelf, nextProgress] = await Promise.all([
+      const [nextTorrents, nextShelf, nextProgress, link] = await Promise.all([
         api<DashboardPayload>("/api/torrents"),
         api<ShelfResponse>("/api/drives"),
         api<ProgressPayload>("/api/progress"),
+        api<ChannelLinkView>("/api/hosts/link").catch(() => null),
       ]);
+      if (link) nextTorrents.hosts = nextTorrents.hosts.map((host) => overlayHostError(host, link));
       setData(nextTorrents);
       setShelf(nextShelf);
       setProgress(nextProgress);
