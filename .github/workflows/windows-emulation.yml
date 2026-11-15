@@ -1,0 +1,20 @@
+name: Windows emulation
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  emulation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - run: sudo apt-get update && sudo apt-get install -y handbrake-cli ffmpeg
+      - run: npm ci
+      - run: npm test
+      - run: npm run build
+      - run: npx tsc --noEmit --pretty false
