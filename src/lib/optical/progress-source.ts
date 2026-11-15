@@ -1,5 +1,6 @@
 import { readJobs } from "@/lib/jobs/store";
 import type { BackgroundJob } from "@/lib/jobs/types";
+import { bytesPerSecond, etaSeconds, fraction } from "@/lib/optical/progress-math";
 import { registerJobSource } from "@/lib/progress/sources";
 import type { JobSnapshot, JobStatus } from "@/lib/progress/types";
 
@@ -7,36 +8,47 @@ registerJobSource({
   id: "optical-dvd",
   async list() {
     const jobs = await readJobs();
-    return jobs.filter((job) => job.kind.startsWith("optical.")).map(toSnapshot);
+    return jobs.filter((job) => job.kind.startsWith("optical.")).map((job) => toSnapshot(job));
   },
 });
 
-function toSnapshot(job: BackgroundJob): JobSnapshot {
+function toSnapshot(job: BackgroundJob, now = Date.now()): JobSnapshot {
   const status = mapStatus(job.status);
   const phase = job.phase && job.phase !== "ожидание" ? job.phase : "";
   const file = job.currentFile || "";
   const currentFile = [phase, file].filter(Boolean).join(" · ") || null;
+  const open = status === "running" || status === "paused" || status === "queued";
+  const elapsed = elapsedMs(job, now);
+  const speed = status === "running" ? bytesPerSecond(job.bytesDone ?? 0, elapsed) : 0;
   return {
     id: `optical__${job.id}`,
     kind: "optical",
     title: job.mock ? `Демо · ${job.title}` : job.title,
     status,
-    progress: Math.min(1, Math.max(0, job.percent / 100)),
+    progress: fraction(job.bytesDone ?? 0, job.bytesTotal ?? 0, job.percent),
     processedBytes: job.bytesDone ?? 0,
     totalBytes: job.bytesTotal ?? 0,
-    speed: 0,
-    eta: 8_640_000,
+    speed,
+    eta: status === "running" ? etaSeconds(job.bytesDone ?? 0, job.bytesTotal ?? 0, speed) : 8_640_000,
     currentFile,
-    host: job.mock ? "демо" : null,
+    host: job.host || (job.mock ? "демо" : "pc-agent"),
     diskLabel: job.mock ? "демо, не настоящий диск" : null,
     outputPath: typeof job.payload.isoPath === "string" ? job.payload.isoPath : null,
-    error: job.error,
-    capabilities: { pause: false, resume: false, cancel: false },
-    pauseUnsupportedReason: job.mock
-      ? "Это демо. Команды записаны, привод ничего не писал."
-      : "Пауза этой записи не поддерживается.",
-    updatedAt: Date.parse(job.updatedAt) || Date.now(),
+    error: status === "paused" ? null : job.error,
+    sourceSha256: typeof job.payload.sourceSha256 === "string" ? job.payload.sourceSha256 : null,
+    deleteAllowed: false,
+    capabilities: { pause: open, resume: open, cancel: open },
+    pauseUnsupportedReason: null,
+    updatedAt: Date.parse(job.updatedAt) || now,
   };
+}
+
+function elapsedMs(job: BackgroundJob, now: number): number {
+  const stored = job.payload.elapsedMs;
+  const base = typeof stored === "number" && stored > 0 ? stored : 0;
+  const started = Date.parse(job.createdAt);
+  if (!Number.isFinite(started)) return base;
+  return Math.max(base, now - started);
 }
 
 function mapStatus(status: BackgroundJob["status"]): JobStatus {

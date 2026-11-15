@@ -1,4 +1,4 @@
-export type MediaProfile = "cd" | "dvd-sl" | "dvd-dl";
+export type MediaProfile = "cd" | "dvd-sl" | "dvd-dl" | "bd-sl" | "bd-dl";
 
 export type MediaKind =
   | "empty"
@@ -10,6 +10,10 @@ export type MediaKind =
   | "dvd+rw"
   | "dvd-r-dl"
   | "dvd+r-dl"
+  | "bd-r"
+  | "bd-re"
+  | "bd-r-dl"
+  | "bd-re-dl"
   | "unknown";
 
 export type DiscSource = "mock" | "tool";
@@ -77,6 +81,10 @@ export interface OpticalPayload {
   source: DiscSource | null;
   steps: OpticalStep[];
   totalBytes: number;
+  stepIndex?: number;
+  sourceSha256?: string | null;
+  pausedBy?: "user" | "queue" | "disturb" | "schedule" | null;
+  processPriority?: "idle" | "below-normal" | "normal";
 }
 
 export interface BurnedDisc {

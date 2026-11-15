@@ -1,12 +1,14 @@
 import { describe, expect, it } from "vitest";
 
-import { CD_BYTES, DVD_DL_BYTES, DVD_SL_BYTES, checkCapacity, treeBytes } from "@/lib/optical/capacity";
+import { BD_DL_BYTES, BD_SL_BYTES, CD_BYTES, DVD_DL_BYTES, DVD_SL_BYTES, checkCapacity, treeBytes } from "@/lib/optical/capacity";
 
 describe("optical capacity", () => {
   const profiles = [
     ["cd", CD_BYTES],
     ["dvd-sl", DVD_SL_BYTES],
     ["dvd-dl", DVD_DL_BYTES],
+    ["bd-sl", BD_SL_BYTES],
+    ["bd-dl", BD_DL_BYTES],
   ] as const;
 
   it.each(profiles)("accepts just under and the exact %s limit, rejects just over", (profile, limit) => {

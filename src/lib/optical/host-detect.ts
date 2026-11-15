@@ -19,6 +19,9 @@ const IMAPI_MEDIA: Record<number, MediaKind> = {
   10: "dvd-rw",
   11: "dvd-r-dl",
   13: "dvd+rw",
+  17: "bd-r",
+  18: "bd-r",
+  19: "bd-re",
 };
 
 export function mapMediaLabel(raw: string): MediaKind {
@@ -33,6 +36,8 @@ export function mapMediaLabel(raw: string): MediaKind {
   if (/dvd-rw|dvdrw|-rw/.test(text)) return "dvd-rw";
   if (/dvd\+r|\+r|plus r/.test(text)) return "dvd+r";
   if (text.includes("dvd")) return "dvd-r";
+  if (/bd-re|bdre/.test(text)) return dual ? "bd-re-dl" : "bd-re";
+  if (/bd-r|bdr|blu-ray|bluray|\bbd\b/.test(text)) return dual ? "bd-r-dl" : "bd-r";
   return "unknown";
 }
 
@@ -49,6 +54,12 @@ export function profileForMedia(media: MediaKind): MediaProfile | null {
     case "dvd-r-dl":
     case "dvd+r-dl":
       return "dvd-dl";
+    case "bd-r":
+    case "bd-re":
+      return "bd-sl";
+    case "bd-r-dl":
+    case "bd-re-dl":
+      return "bd-dl";
     default:
       return null;
   }

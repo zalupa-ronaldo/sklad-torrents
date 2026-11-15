@@ -107,6 +107,13 @@ export async function performJobAction(
     if (!cancelTransferJob(id)) throw new QbittorrentError("validation", "Задачу нельзя отменить.");
     return { notice: "Копирование остановлено. Исходный файл не удалялся." };
   }
+  if (id.startsWith("optical__")) {
+    const { controlOpticalFromPanel } = await import("@/lib/optical/control");
+    await controlOpticalFromPanel(id, action);
+    if (action === "pause") return { notice: "Запись на паузе. Исходные файлы не удалялись." };
+    if (action === "cancel") return { notice: "Запись остановлена. Исходные файлы не удалялись." };
+    return { notice: "Запись продолжается с сохранённого шага. Исходные файлы не удалялись." };
+  }
   if (id.startsWith("torrent-transfer__")) {
     const { controlTorrentTransfer } = await import("@/lib/torrents/transfer");
     await controlTorrentTransfer(id, action);

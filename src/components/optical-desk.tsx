@@ -23,7 +23,7 @@ interface Snapshot {
   discs: BurnedDisc[];
 }
 
-const PROFILES: MediaProfile[] = ["cd", "dvd-sl", "dvd-dl"];
+const PROFILES: MediaProfile[] = ["cd", "dvd-sl", "dvd-dl", "bd-sl", "bd-dl"];
 
 export function OpticalDesk() {
   const [data, setData] = useState<Snapshot | null>(null);
@@ -106,6 +106,16 @@ export function OpticalDesk() {
     }
   }
 
+  async function controlQueue(action: "pause-queue" | "resume-queue") {
+    try {
+      await api("/api/optical/control", { method: "POST", body: JSON.stringify({ action }) });
+      setNotice(action === "pause-queue" ? "Очередь записи на паузе." : "Очередь записи продолжается.");
+      setError(null);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Не удалось изменить очередь");
+    }
+  }
+
   async function toggleDemo() {
     if (!data) return;
     await api("/api/optical/dvd", { method: "POST", body: JSON.stringify({ demo: !data.demo }) });
@@ -122,7 +132,7 @@ export function OpticalDesk() {
             <Disc className="size-4" />
           </span>
           <div>
-            <h2 className="text-lg font-semibold">Диски DVD</h2>
+            <h2 className="text-lg font-semibold">Диски CD, DVD и Blu-ray</h2>
             <p className="text-sm text-muted-foreground">
               Рекордер подключён к Windows-ПК. Mac ставит задание в очередь и показывает имя привода, которое сообщил агент.
             </p>
@@ -131,6 +141,12 @@ export function OpticalDesk() {
         <div className="flex gap-2">
           <Button variant="outline" onClick={() => void toggleDemo()}>
             {data?.demo ? "Демо включено" : "Включить демо"}
+          </Button>
+          <Button variant="outline" data-testid="pause-queue" onClick={() => void controlQueue("pause-queue")}>
+            Пауза очереди
+          </Button>
+          <Button variant="outline" data-testid="resume-queue" onClick={() => void controlQueue("resume-queue")}>
+            Продолжить очередь
           </Button>
           <Link href="/progress" className="inline-flex h-8 items-center rounded-lg border px-2.5 text-sm">
             Прогресс
