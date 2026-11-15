@@ -34,5 +34,12 @@ export async function dispatchOnce(directory = dataDir()): Promise<{ processed: 
   } catch {
     processed.push("torrent-error");
   }
+  try {
+    const { tickChannel } = await import("@/lib/service/channel");
+    const link = await tickChannel(directory);
+    if (link.state === "up") processed.push("channel");
+  } catch {
+    processed.push("channel-error");
+  }
   return { processed };
 }
