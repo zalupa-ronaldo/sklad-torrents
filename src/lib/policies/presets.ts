@@ -32,6 +32,13 @@ const SERIES_HANDBRAKE: HandbrakeSettings = {
   container: "mkv",
 };
 
+const CARTOON_HANDBRAKE: HandbrakeSettings = {
+  presetName: "Склад · мультфильм 1080p",
+  qualityMode: "rf",
+  quality: 20,
+  container: "mkv",
+};
+
 export interface NamedPreset {
   id: Exclude<PresetId, "custom">;
   name: string;
@@ -74,6 +81,7 @@ const shelfRules: PolicyRules = {
   game: rule(DISK_KEY.games, "Games", "ntfs-mft", "compact"),
   movie: rule(DISK_KEY.media, "Cinema", "walk", "handbrake", CINEMA_HANDBRAKE),
   series: rule(DISK_KEY.media, "Series", "walk", "handbrake", SERIES_HANDBRAKE),
+  cartoon: rule(DISK_KEY.media, "Cartoons", "walk", "handbrake", CARTOON_HANDBRAKE),
   music: rule(DISK_KEY.vault, "Music", "walk", "none"),
   software: rule(DISK_KEY.games, "Software", "walk", "none"),
   document: rule(DISK_KEY.media, "Documents", "walk", "none"),
@@ -95,6 +103,7 @@ export const PRESETS: Record<Exclude<PresetId, "custom">, NamedPreset> = {
       game: "ntfs-mft",
       movie: "walk",
       series: "walk",
+      cartoon: "walk",
       music: "walk",
       software: "ntfs-mft",
       document: "walk",
@@ -105,10 +114,11 @@ export const PRESETS: Record<Exclude<PresetId, "custom">, NamedPreset> = {
     id: "handbrake-cinema",
     name: "Кино через HandBrake",
     description: "Фильмы и сериалы перекодируются по сохранённому профилю. Игры только индексируются, без сжатия. Остальное — индекс.",
-    rules: withPost(shelfRules, { movie: "handbrake", series: "handbrake" }, {
+    rules: withPost(shelfRules, { movie: "handbrake", series: "handbrake", cartoon: "handbrake" }, {
       game: "ntfs-mft",
       movie: "walk",
       series: "walk",
+      cartoon: "walk",
       music: "walk",
       software: "walk",
       document: "walk",

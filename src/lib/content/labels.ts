@@ -4,6 +4,7 @@ export const KIND_LABEL: Record<ContentKind, string> = {
   game: "Игра",
   movie: "Фильм",
   series: "Сериал",
+  cartoon: "Мультфильм",
   music: "Музыка",
   software: "Софт",
   document: "Документы",
