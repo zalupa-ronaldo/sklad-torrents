@@ -32,12 +32,15 @@ function toSnapshot(job: IntegrityJob): JobSnapshot {
     outputPath: job.destinationLabel || job.sourceLabel || null,
     error: job.mismatchPaths.length > 0 ? `Отличается: ${job.mismatchPaths.join(", ")}` : job.error,
     capabilities: {
-      pause: false,
-      resume: false,
-      cancel: status === "running" || status === "queued",
+      pause: status === "running" || status === "queued",
+      resume: status === "paused",
+      cancel: status === "running" || status === "queued" || status === "paused",
     },
-    pauseUnsupportedReason: "Пауза подсчёта — это отмена. Уже посчитанные хэши остаются, файлы не удаляются.",
+    pauseUnsupportedReason: null,
     updatedAt: Date.parse(job.updatedAt) || Date.now(),
+    verified: status === "completed" && job.mismatchPaths.length === 0 && job.files.some((file) => file.sha256.length === 64),
+    sha256Match: status === "completed" ? job.mismatchPaths.length === 0 && job.files.every((file) => file.status === "match" || file.status === "recorded") : null,
+    deleteAllowed: false,
   };
 }
 

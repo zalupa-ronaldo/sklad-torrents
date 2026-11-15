@@ -71,10 +71,15 @@ export async function performJobAction(
   now = Date.now(),
 ): Promise<{ notice?: string }> {
   if (id.startsWith("hash-")) {
-    if (action !== "cancel") {
-      throw new QbittorrentError("validation", "Пауза подсчёта — это отмена. Уже посчитанные хэши остаются, файлы не удаляются.");
+    const { cancelIntegrity, pauseIntegrity, resumeIntegrity } = await import("@/lib/integrity/engine");
+    if (action === "pause") {
+      await pauseIntegrity(id);
+      return { notice: "Подсчёт на паузе. Продолжение с сохранённого места, файлы не удалялись." };
     }
-    const { cancelIntegrity } = await import("@/lib/integrity/engine");
+    if (action === "resume") {
+      await resumeIntegrity(id);
+      return { notice: "Подсчёт продолжается с сохранённого места. Файлы не удалялись." };
+    }
     await cancelIntegrity(id);
     return { notice: "Подсчёт SHA-256 остановлен. Файлы не удалялись." };
   }
@@ -84,8 +89,15 @@ export async function performJobAction(
     return action === "cancel" ? { notice: "Остановка LocalSend запрошена. Файл не удаляется." } : {};
   }
   if (id.startsWith("transfer__")) {
-    if (action !== "cancel") throw new QbittorrentError("validation", "Копирование можно только отменить.");
-    const { cancelTransferJob } = await import("@/addons/drives/transfer/jobs");
+    const { cancelTransferJob, pauseTransferJob, resumeTransferJob } = await import("@/addons/drives/transfer/jobs");
+    if (action === "pause") {
+      if (!pauseTransferJob(id)) throw new QbittorrentError("validation", "Копирование нельзя поставить на паузу.");
+      return { notice: "Копирование на паузе. Исходный файл не удалялся." };
+    }
+    if (action === "resume") {
+      if (!resumeTransferJob(id)) throw new QbittorrentError("validation", "Продолжить можно только копию на паузе.");
+      return { notice: "Копирование продолжается с сохранённого места. Исходный файл не удалялся." };
+    }
     if (!cancelTransferJob(id)) throw new QbittorrentError("validation", "Задачу нельзя отменить.");
     return { notice: "Копирование остановлено. Исходный файл не удалялся." };
   }

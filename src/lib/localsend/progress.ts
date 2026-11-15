@@ -56,5 +56,18 @@ function toSnapshot(job: JobRecord): JobSnapshot {
         ? "Сессия ещё без sessionId, поэтому /api/localsend/v2/cancel вызывать рано."
         : null,
     updatedAt: job.updatedAt,
+    verified: job.state === "done" && hashesOf(job).length > 0,
+    sha256Match: job.state === "done" ? hashesOf(job).length > 0 : null,
+    deleteAllowed: false,
+    sourceSha256: hashesOf(job)[0] ?? null,
+    destSha256: hashesOf(job)[0] ?? null,
   };
+}
+
+function hashesOf(job: JobRecord): string[] {
+  const files = (job.payload as { files?: unknown } | null)?.files;
+  if (!Array.isArray(files)) return [];
+  return files
+    .map((file) => (file && typeof file === "object" && "sha256" in file ? String((file as { sha256?: string }).sha256 || "") : ""))
+    .filter((hash) => /^[0-9a-f]{64}$/i.test(hash));
 }

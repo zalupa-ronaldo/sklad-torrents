@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { manifestDocument, manifestFilename, manifestLine } from "@/lib/integrity/manifest";
 import { directoryReader, sha256Hex, treeReader } from "@/lib/integrity/hash";
+import { createSha256 } from "@/lib/integrity/sha256-state";
 import {
   cancelIntegrity,
   clearIntegrityRuntimeForTests,
@@ -14,6 +15,8 @@ import {
   enqueueIntegrity,
   getIntegrityJob,
   markTransferDone,
+  pauseIntegrity,
+  resumeIntegrity,
   setIntegrityGateForTests,
 } from "@/lib/integrity/engine";
 import { mutateIntegrity, readIntegrity, resetIntegrityForTests } from "@/lib/integrity/store";
@@ -244,6 +247,91 @@ describe("SHA-256 integrity", () => {
     expect(stored?.id).toBe(cancelled.id);
     expect(stored?.state).toBe("cancelled");
     expect(stored?.deleteAllowed).toBe(false);
+  });
+
+  it("pauses without deleting the source and resumes only the remaining bytes", async () => {
+    const root = path.join(dataDir, "pause-source");
+    await mkdir(root);
+    const file = path.join(root, "note.txt");
+    await writeFile(file, "abc");
+    let release: (() => void) | undefined;
+    const hold = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    setIntegrityGateForTests(hold);
+    const queued = await enqueueIntegrity({
+      kind: "copy",
+      title: "pause",
+      source: directoryReader(root),
+      destination: directoryReader(root),
+    });
+    const paused = await pauseIntegrity(queued.id);
+    release?.();
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    expect(await readFile(file, "utf8")).toBe("abc");
+    expect(paused.deleteAllowed).toBe(false);
+    const stored = await getIntegrityJob(queued.id);
+    expect(stored?.state).toBe("paused");
+    clearIntegrityRuntimeForTests();
+    const blocked = await resumeIntegrity(queued.id);
+    expect(blocked.state).toBe("paused");
+    expect(blocked.deleteReason).toMatch(/не удалялись/);
+
+    const hasher = createSha256();
+    hasher.update(bytes("abc"));
+    const now = new Date().toISOString();
+    const id = "hash-byte-resume";
+    const job: IntegrityJob = {
+      id,
+      kind: "copy",
+      state: "paused",
+      title: "byte",
+      comparable: false,
+      files: [{ relativePath: "a.txt", size: 6, sha256: "", status: "hashing", bytesHashed: 3, updatedAt: now, side: "source" }],
+      checkpoint: { relativePath: "a.txt", byteOffset: 3, sha256: hasher.exportState() },
+      currentFile: "a.txt",
+      filesDone: 0,
+      filesTotal: 1,
+      bytesHashed: 3,
+      bytesTotal: 6,
+      percent: 50,
+      speed: 0,
+      etaSeconds: null,
+      transferDone: true,
+      userConfirmed: false,
+      deleteAllowed: false,
+      deleteReason: "",
+      mismatchPaths: [],
+      error: null,
+      discVerified: false,
+      sourceLabel: "",
+      destinationLabel: "",
+      torrentHostId: "",
+      torrentHash: "",
+      torrentName: "",
+      rewritable: false,
+      createdAt: now,
+      updatedAt: now,
+    };
+    await mutateIntegrity((storedFile) => {
+      storedFile.jobs.push(job);
+    });
+    const reads: number[] = [];
+    const base = treeReader({ "a.txt": bytes("abcdef") });
+    await continueIntegrity(id, {
+      source: {
+        list: () => base.list(),
+        read: async (relativePath, offset, length) => {
+          reads.push(offset);
+          return base.read(relativePath, offset, length);
+        },
+      },
+    });
+    expect(reads[0]).toBe(3);
+    expect(reads).not.toContain(0);
+    const done = await getIntegrityJob(id);
+    expect(done?.files[0]?.sha256).toBe(sha256Hex("abcdef"));
+    expect(done?.deleteAllowed).toBe(false);
   });
 });
 
