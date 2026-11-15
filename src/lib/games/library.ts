@@ -4,6 +4,10 @@ import { lstat, mkdir, readFile, readdir, rename, rm, stat, writeFile } from "no
 import { pipeline } from "node:stream/promises";
 import path from "node:path";
 
+import { generatedCover } from "@/lib/games/cover-art";
+import { emptyLaunchTools, planLaunch, type LaunchButton, type LaunchTools } from "@/lib/games/launch";
+import { joinStyled } from "@/lib/games/owner-path";
+import { classifyShelfPlatform, PLATFORM_LABEL, SHELF_PLATFORMS, type ShelfPlatform } from "@/lib/games/platforms";
 import { assertEncodePaths, pathInside } from "@/lib/transcode/encode-plan";
 import { dataDir } from "@/lib/qbittorrent/store";
 
@@ -54,13 +58,86 @@ export interface GameRecord {
   manifest: GameFile[];
   saveFingerprints: GameFile[];
   reason: string;
+  developer?: string | null;
+  year?: number | null;
+  summary?: string | null;
+  coverPath?: string | null;
 }
 
-export function publicGame(game: GameRecord) {
+export interface PublicGame {
+  id: string;
+  name: string;
+  steamAppId: number | null;
+  platform: ShelfPlatform | null;
+  platformLabel: string | null;
+  developer: string | null;
+  year: number | null;
+  summary: string | null;
+  coverPath: string | null;
+  coverDataUrl: string | null;
+  launch: LaunchButton | null;
+  state: GameRecord["state"];
+  online: boolean;
+  location: string;
+  lastSeenAt: string | null;
+  ready: boolean;
+  copyVerified: boolean;
+  compact: GameRecord["compact"];
+  compressed: boolean;
+  ntfsSmoke: boolean;
+  logicalBytes: number | null;
+  allocatedBytes: number | null;
+  wofBytes: number | null;
+  needsReview: boolean;
+  unmanaged: boolean;
+  pcIntegration: GameRecord["pcIntegration"];
+  reason: string;
+  pinned: GameRecord["pinned"];
+  provenance: GameRecord["provenance"];
+  confidence: GameRecord["confidence"];
+  jobId: string | null;
+}
+
+export function libraryPlatform(game: Pick<GameRecord, "name" | "root" | "location" | "exe" | "steamAppId" | "provenance">): ShelfPlatform | null {
+  const hinted = classifyShelfPlatform({
+    name: game.name,
+    path: [game.root, game.location, game.exe].filter(Boolean).join("/"),
+  });
+  if (hinted) return hinted;
+  if (game.steamAppId || game.provenance === "steam-manifest" || game.provenance === "gog-manifest" || game.provenance === "epic-manifest") {
+    return "windows";
+  }
+  return null;
+}
+
+export function publicGame(game: GameRecord): PublicGame {
+  return presentGame(game, emptyLaunchTools());
+}
+
+function presentGame(game: GameRecord, tools: LaunchTools): PublicGame {
+  const platform = libraryPlatform(game);
+  const year = typeof game.year === "number" ? game.year : null;
   return {
     id: game.id,
     name: game.name,
     steamAppId: game.steamAppId,
+    platform,
+    platformLabel: platform ? PLATFORM_LABEL[platform] : null,
+    developer: game.developer?.trim() || null,
+    year,
+    summary: game.summary?.trim() || null,
+    coverPath: game.coverPath ?? null,
+    coverDataUrl: platform ? generatedCover({ name: game.name, platform, year }) : null,
+    launch: platform
+      ? planLaunch({
+          name: game.name,
+          platform,
+          contentPath: contentPath(game),
+          tools,
+          firmwarePath: null,
+          keysPath: null,
+        })
+      : null,
     state: game.state,
     online: game.online,
     location: game.location,
@@ -82,6 +159,23 @@ export function publicGame(game: GameRecord) {
     confidence: game.confidence,
     jobId: game.jobId,
   };
+}
+
+/** Six platform tabs. A game without its own platform is left out of Windows. */
+export function libraryTabs(games: readonly GameRecord[], tools: LaunchTools = emptyLaunchTools()): { id: ShelfPlatform; label: string; games: PublicGame[] }[] {
+  const cards = games.map((game) => presentGame(game, tools));
+  return SHELF_PLATFORMS.map((id) => ({
+    id,
+    label: PLATFORM_LABEL[id],
+    games: cards.filter((game) => game.platform === id),
+  }));
+}
+
+function contentPath(game: GameRecord): string {
+  const root = game.location || game.root;
+  if (!game.exe) return root;
+  if (/^[A-Za-z]:[\\/]/.test(game.exe) || game.exe.startsWith("/") || game.exe.includes("\\") || game.exe.includes("/")) return game.exe;
+  return joinStyled(root, game.exe);
 }
 
 export function assertGamePaths(paths: readonly string[]): void {
