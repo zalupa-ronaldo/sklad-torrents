@@ -7,7 +7,7 @@
  */
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import http from "node:http";
 import { register } from "node:module";
 import path from "node:path";
@@ -20,6 +20,7 @@ import {
   confirmJob,
   httpError,
 } from "./commands.mjs";
+import { readLogTail, redactLine } from "./log-redact.mjs";
 import {
   admitHeavy,
   DEFAULT_LOAD,
@@ -50,8 +51,12 @@ const COMPACT = process.env.COMPACT_EXE || "C:\\Windows\\System32\\compact.exe";
 
 const jobs = new Map();
 const STATE = process.env.SKLAD_PC_AGENT_STATE || "";
+const LOG = process.env.SKLAD_PC_AGENT_LOG || (process.env.SKLAD_PC_AGENT_LOG_DIR ? path.join(process.env.SKLAD_PC_AGENT_LOG_DIR, "agent.log") : "");
+const STARTED = Date.now();
+const VERSION = readVersion();
 let queueUserPaused = false;
 loadState();
+note(`queue restored paused=${[...jobs.values()].filter((job) => job.state === "paused").length} queued=${[...jobs.values()].filter((job) => job.state === "queued").length}`);
 
 const server = http.createServer((req, res) => {
   void handle(req, res).catch((error) => {
@@ -71,6 +76,11 @@ async function handle(req, res) {
   const parts = url.pathname.split("/").filter(Boolean);
   if (req.method === "GET" && parts.length === 2 && parts[0] === "v1" && parts[1] === "health") {
     send(res, 200, health());
+    return;
+  }
+  if (req.method === "GET" && parts.length === 2 && parts[0] === "v1" && parts[1] === "logs") {
+    const tail = Number(url.searchParams.get("tail") || 200);
+    send(res, 200, { lines: readLogTail(LOG, tail) });
     return;
   }
   if (req.method === "GET" && parts.length === 2 && parts[0] === "v1" && parts[1] === "jobs") {
@@ -185,6 +195,8 @@ function health() {
     os: process.platform,
     mock: MOCK,
     role: "windows-pc",
+    version: VERSION,
+    uptimeSec: Math.floor((Date.now() - STARTED) / 1000),
     handbrakePath: HANDBRAKE,
     handbrakeFound: existsSync(HANDBRAKE),
     compactPath: COMPACT,
@@ -373,6 +385,21 @@ function readBody(req) {
     });
     req.on("error", () => reject(httpError(400, "Не удалось прочитать запрос.")));
   });
+}
+
+function readVersion() {
+  try {
+    const file = new URL("../../package.json", import.meta.url);
+    return JSON.parse(readFileSync(file, "utf8")).version || "0.0.0";
+  } catch {
+    return "0.0.0";
+  }
+}
+
+function note(line) {
+  if (!LOG) return;
+  mkdirSync(path.dirname(LOG), { recursive: true });
+  appendFileSync(LOG, `${redactLine(line)}\n`, { mode: 0o600 });
 }
 
 function loadState() {

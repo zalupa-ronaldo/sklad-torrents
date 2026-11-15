@@ -89,3 +89,19 @@ npm run pc-agent
 - `PUT /v1/file/content?serial=&uuid=&path=` — атомарная запись `.sklad-part` + SHA-256
 
 Ограничения: том должен быть сейчас подключён у агента; `Z:` запрещён; `..` и абсолютные пути отклоняются. Панель считает SHA при приёме и сверяет с хэшем записанной копии.
+
+## Служба и автозапуск
+
+На Windows, из каталога репозитория, в PowerShell:
+
+```powershell
+powershell -File agents\pc-agent\windows\install-service.ps1
+```
+
+Задание Планировщика `SkladPcAgent` стартует вместе с машиной и запускает `windows\supervisor.mjs`. Супервизор поднимает `server.mjs` и пишет журнал в `%ProgramData%\Sklad\agent\logs`. Очередь лежит в `%ProgramData%\Sklad\agent\jobs.json`. После перезапуска задача на паузе остаётся на паузе с теми же байтами и именем файла. Снятие задания не удаляет эту очередь и не трогает файлы пользователя:
+
+```powershell
+powershell -File agents\pc-agent\windows\uninstall-service.ps1
+```
+
+Журнал: `GET /v1/logs?tail=200`. Строки с паролем, токеном и томом `Z:` в ответ не попадают. Обновление сборки переименовывает каталог `releases\<version>` в `current` и оставляет предыдущую копию в `previous`. Каталог `data` при этом не удаляется. Если процесс ещё запущен из `current`, переключение отказывается и просит сначала остановить службу.
