@@ -113,7 +113,7 @@ describe("acceptance checklist on the Windows emulation", () => {
     expect(classifyContent({ name: "pack", savePath: "D:\\игры\\Hades" }).kind).toBe("game");
     expect(classifyContent({ name: "pack", savePath: "D:\\фильмы\\Interstellar" }).kind).toBe("movie");
     expect(classifyContent({ name: "pack", savePath: "D:\\сериалы\\Show" }).kind).toBe("series");
-    expect(classifyContent({ name: "pack", savePath: "D:\\мультфильмы\\Cartoon" }).kind).toBe("series");
+    expect(classifyContent({ name: "pack", savePath: "D:\\мультфильмы\\Cartoon" }).kind).toBe("cartoon");
     expect(classifyContent({ name: "pack", savePath: "D:\\музыка\\Ost" }).kind).toBe("music");
     expect(classifyContent({ name: "pack", savePath: "D:\\софт\\Setup" }).kind).toBe("software");
     expect(classifyContent({ name: "pack", savePath: "D:\\документы\\Notes" }).kind).toBe("document");
