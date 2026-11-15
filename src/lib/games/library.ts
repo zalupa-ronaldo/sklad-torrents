@@ -110,7 +110,11 @@ export function libraryPlatform(game: Pick<GameRecord, "name" | "root" | "locati
   return null;
 }
 
-export function publicGame(game: GameRecord, tools: LaunchTools = emptyLaunchTools()): PublicGame {
+export function publicGame(game: GameRecord): PublicGame {
+  return presentGame(game, emptyLaunchTools());
+}
+
+function presentGame(game: GameRecord, tools: LaunchTools): PublicGame {
   const platform = libraryPlatform(game);
   const year = typeof game.year === "number" ? game.year : null;
   return {
@@ -159,7 +163,7 @@ export function publicGame(game: GameRecord, tools: LaunchTools = emptyLaunchToo
 
 /** Six platform tabs. A game without its own platform is left out of Windows. */
 export function libraryTabs(games: readonly GameRecord[], tools: LaunchTools = emptyLaunchTools()): { id: ShelfPlatform; label: string; games: PublicGame[] }[] {
-  const cards = games.map((game) => publicGame(game, tools));
+  const cards = games.map((game) => presentGame(game, tools));
   return SHELF_PLATFORMS.map((id) => ({
     id,
     label: PLATFORM_LABEL[id],
