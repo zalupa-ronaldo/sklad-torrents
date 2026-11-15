@@ -73,7 +73,7 @@ export function CompressForm() {
     <div className="grid max-w-2xl gap-5">
       <div>
         <h2 className="text-lg font-medium">Сжать CompactGUI</h2>
-        <p className="mt-1 text-sm text-muted-foreground">{COMPACT_GUI_NOTE}</p>
+        <p className="mt-1 text-sm text-muted-foreground">{COMPACT_GUI_NOTE} Пауза останавливает очередь перед следующим файлом. У каждой машины свой лимит, низкий приоритет и ожидание, пока на ней играют или работают.</p>
       </div>
       {macBlocked || pathBlocked ? (
         <div className="rounded-xl border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive" role="status">

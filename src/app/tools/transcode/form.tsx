@@ -25,6 +25,7 @@ export function TranscodeForm() {
   const [inputPath, setInputPath] = useState(query.path);
   const [outputPath, setOutputPath] = useState(() => suggestTranscodeOutput(query.os, query.path));
   const [busy, setBusy] = useState(false);
+  const [replaceOriginal, setReplaceOriginal] = useState(false);
 
   if (loading && !data) return <p className="text-sm text-muted-foreground">Загрузка формы…</p>;
   if (error && !data) {
@@ -57,7 +58,7 @@ export function TranscodeForm() {
     try {
       await api("/api/tools/jobs", {
         method: "POST",
-        body: JSON.stringify({ kind: "transcode", hostId, inputPath, outputPath, presetId }),
+        body: JSON.stringify({ kind: "transcode", hostId, inputPath, outputPath, presetId, replaceOriginal }),
       });
       toast.success("Перекодирование в очереди");
       router.push("/tools");
@@ -73,7 +74,7 @@ export function TranscodeForm() {
       <div>
         <h2 className="text-lg font-medium">В HandBrake</h2>
         <p className="mt-1 text-sm text-muted-foreground">
-          Задание вызывает уже установленный HandBrakeCLI. Склад его не включает.{" "}
+          Mac берёт VideoToolbox, ПК берёт VCE там, где он живой. AV1 через AMD VCE при коде 3221225477 уходит на программный SVT, исходник не трогается. Пауза и лимит у каждой машины свои.{" "}
           {probe?.handbrakeFound ? "Бинарник по настроенному пути найден." : "Бинарник не найден — в демо очередь всё равно пойдёт, команда запишется."}
         </p>
       </div>
@@ -129,6 +130,10 @@ export function TranscodeForm() {
           ))}
         </div>
       ) : null}
+      <label className="flex items-start gap-2 text-sm">
+        <input type="checkbox" checked={replaceOriginal} onChange={(event) => setReplaceOriginal(event.target.checked)} />
+        <span>Заменить оригинал после проверки длительности, дорожек и воспроизведения. Пока галка снята, исходник остаётся, пишутся SHA-256 исходника и результата.</span>
+      </label>
       <Field label="Куда сохранить">
         <Input value={outputPath} onChange={(event) => setOutputPath(event.target.value)} spellCheck={false} className={pathInputClass} />
       </Field>

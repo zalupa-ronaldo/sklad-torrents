@@ -1,13 +1,16 @@
 import { createHash } from "node:crypto";
 import { createReadStream, createWriteStream } from "node:fs";
-import { mkdir, stat, statfs, writeFile } from "node:fs/promises";
+import { mkdir, rm, stat, statfs, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { spawn } from "node:child_process";
+import { setPriority } from "node:os";
 import { pipeline } from "node:stream/promises";
 
 import { dataDir } from "@/lib/qbittorrent/store";
 import { encodeArgv, type MediaFacts, type OutputContainer } from "@/lib/transcode/encode-plan";
 import { probeEncoder } from "@/lib/transcode/encode-worker";
+import { afterHardwareCrash, isNativeEncodeCrash } from "@/lib/transcode/vce-fallback";
+import { priorityLevel } from "@/lib/transcode/workload";
 
 const CHUNK = 64 * 1024;
 
@@ -29,7 +32,7 @@ export async function runEncodeWorker(input: { hub: string; token: string; id: s
   while (!stop) {
     await post(hub, "/v1/workers/heartbeat", headers, { id: input.id, freeBytes: await freeBytes(directory) }).catch(() => undefined);
     const claimed = await post(hub, "/v1/jobs/claim", headers, { id: input.id });
-    const job = claimed.job as { jobId: string; lease: string; revision: number; codec: "av1" | "hevc" | "h264"; container?: OutputContainer; bytes: number; sourceSha256: string } | null;
+    const job = claimed.job as { jobId: string; lease: string; revision: number; codec: "av1" | "hevc" | "h264"; container?: OutputContainer; bytes: number; sourceSha256: string; ship?: boolean; sourcePath?: string } | null;
     if (!job) {
       await delay(200);
       continue;
@@ -42,7 +45,13 @@ export async function runEncodeWorker(input: { hub: string; token: string; id: s
     const output = path.join(staging, `out.${container ?? "bin"}`);
     try {
       if (!container) throw new Error("Координатор не назвал контейнер .mp4 или .mkv.");
-      await download(hub, headers, job, source);
+      if (job.ship === false) {
+        if (!job.sourcePath) throw new Error("Локальный файл не назван. Копия по сети не начинается.");
+        await pipeline(createReadStream(job.sourcePath), createWriteStream(source));
+        job.sourceSha256 = await shaFile(job.sourcePath);
+      } else {
+        await download(hub, headers, job, source);
+      }
       const hold = Number(process.env.SKLAD_ENCODE_HOLD_MS || 0);
       if (hold > 0) await delay(hold);
       if (!binary) throw new Error("Нет HandBrakeCLI для настоящего кодирования.");
@@ -51,17 +60,25 @@ export async function runEncodeWorker(input: { hub: string; token: string; id: s
       const beat = setInterval(() => {
         void post(hub, `/v1/jobs/${job.jobId}/heartbeat`, { ...headers, "x-lease": job.lease }, {}).catch(() => undefined);
       }, 400);
-      const code = await run(args);
+      let code = await run(args);
+      const attempted = args[args.indexOf("-e") + 1] || "";
+      const retry = afterHardwareCrash({ code, encoder: attempted, retried: false, encoders: advertised, hdr: facts.hdr, codec: job.codec });
+      if (retry.retry && retry.encoder) {
+        await rm(output, { force: true });
+        const again = encodeArgv({ binary, source, output, codec: job.codec, container, sourceFacts: facts, encoders: advertised.filter((name) => !name.startsWith("vce_av1")), prefer: "software" });
+        code = await run(again);
+      }
       clearInterval(beat);
-      if (code === 3221225477 || code === 139) {
+      if (isNativeEncodeCrash(code)) {
+        await rm(output, { force: true });
         await post(hub, `/v1/jobs/${job.jobId}/fail`, { ...headers, "x-lease": job.lease }, { crash: true });
-        await appendLog(directory, { pid: process.pid, id: input.id, role: input.role, platform, jobId: job.jobId, startedAt, finishedAt: Date.now(), verified: false, codec: job.codec, crash: true });
+        await appendLog(directory, { pid: process.pid, id: input.id, role: input.role, platform, jobId: job.jobId, startedAt, finishedAt: Date.now(), verified: false, codec: job.codec, crash: true, sourceDeleted: false });
         continue;
       }
       if (code !== 0) throw new Error(`HandBrake завершился с кодом ${code ?? "нет"}.`);
       const outputSha256 = await shaFile(output);
       await upload(hub, headers, job, output);
-      const finished = await post(hub, `/v1/jobs/${job.jobId}/finish`, { ...headers, "x-lease": job.lease }, { revision: job.revision, outputSha256 });
+      const finished = await post(hub, `/v1/jobs/${job.jobId}/finish`, { ...headers, "x-lease": job.lease }, { revision: job.revision, outputSha256, sourceSha256: job.sourceSha256 });
       await appendLog(directory, { pid: process.pid, id: input.id, role: input.role, jobId: job.jobId, startedAt, finishedAt: Date.now(), verified: finished.verified === true, codec: job.codec });
     } catch {
       await post(hub, `/v1/jobs/${job.jobId}/fail`, { ...headers, "x-lease": job.lease }, {}).catch(() => undefined);
@@ -108,6 +125,9 @@ async function upload(hub: string, headers: Record<string, string>, job: { jobId
 async function run(args: string[]): Promise<number | null> {
   return new Promise((resolve) => {
     const child = spawn(args[0]!, args.slice(1), { shell: false, stdio: "ignore" });
+    if (typeof child.pid === "number") {
+      try { setPriority(child.pid, priorityLevel("below-normal")); } catch { /* priority is best-effort */ }
+    }
     child.on("error", () => resolve(null));
     child.on("close", (code) => resolve(code));
   });

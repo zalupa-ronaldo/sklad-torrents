@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { constants, readFileSync } from "node:fs";
+import { setPriority } from "node:os";
 import { access, lstat, mkdir, open, readFile, realpath, rename, rm, stat, statfs, unlink, writeFile } from "node:fs/promises";
 import { createReadStream, createWriteStream } from "node:fs";
 import path from "node:path";
@@ -11,7 +12,11 @@ import { hostFacts, localEncodeOs, localJobHost } from "@/lib/jobs/local-host";
 import type { Job, JobHost } from "@/lib/jobs/model";
 import { decideSourceRetirement, type FileIdentity } from "@/lib/policies/source-retirement";
 import { dataDir } from "@/lib/qbittorrent/store";
-import { assignEncodeJobs, type EncodeCodec } from "@/lib/transcode/assign";
+import { assignEncodeJobs, type CodecProbe, type EncodeCodec } from "@/lib/transcode/assign";
+import { mayReplaceOriginal, pauseAtFile, replaceOriginalFile, sampleSpeed } from "@/lib/transcode/file-gate";
+import { readEncodePolicy } from "@/lib/transcode/policy";
+import { admitMachine, priorityLevel } from "@/lib/transcode/workload";
+import { afterHardwareCrash, isNativeEncodeCrash, routeAv1 } from "@/lib/transcode/vce-fallback";
 import { missingToolError, resolveTool } from "@/lib/transcode/binaries";
 import {
   advertisedHardwareBlock,
@@ -128,21 +133,23 @@ export async function enqueueEncode(input: {
   const container = containerFromPath(input.destination);
   if (!container) return { ok: false, state: "blocked", started: false, error: "Назначение должно заканчиваться на .mp4 или .mkv. Другой контейнер молча не выбирается." };
   const capability = await readCapability(probe.binary);
-  const hardware = !input.allowSoftware && input.codec === "av1" ? advertisedHardwareBlock(capability.encoders) : null;
+  const route = routeAv1({ allowSoftware: input.allowSoftware, encoders: capability.encoders });
+  const hardware = route.block ? advertisedHardwareBlock(capability.encoders) : null;
   if (hardware) return { ok: false, state: "blocked", started: false, codec: input.codec, error: hardware, hardwareBlocked: true, pcVerified: false, macVerified: false };
   const host = localJobHost();
   const os = localEncodeOs();
   if (!host || !os) return { ok: false, state: "blocked", started: false, error: "Платформа процесса не Mac, Windows и не Linux. Метка linux не подставляется." };
+  const allowSoftware = route.allowSoftware;
   const facts = await probeMedia(input.source);
   const blocked = requirementBlock(facts, capability, input.codec);
   if (blocked) return { ok: false, state: "blocked", started: false, error: blocked, codec: input.codec };
   const assignment = assignEncodeJobs(
-    [{ id: "next", codec: input.codec, allowSoftware: input.allowSoftware }],
+    [{ id: "next", codec: input.codec, allowSoftware }],
     [{
       id: host,
       os,
       slots: 1,
-      probe: { hardwareAv1: capability.hardwareAv1, videoToolbox: null, amf: null, encoders: capability.encoders },
+      probe: probeFromEncoders(os, capability.encoders),
     }],
   );
   if (assignment[0]?.state !== "leased") {
@@ -154,7 +161,7 @@ export async function enqueueEncode(input: {
     host,
     source: input.source,
     destination: input.destination,
-    handbrakeProfile: `c:${input.codec}:${input.allowSoftware ? "sw" : "hw"}`,
+    handbrakeProfile: `c:${input.codec}:${allowSoftware ? "sw" : "hw"}`,
     ...(input.torrentHash ? { torrentHash: input.torrentHash } : {}),
   });
   return {
@@ -181,6 +188,12 @@ export async function runEncodeOnce(directory = dataDir()): Promise<Record<strin
   if (!host) return { processed: false, state: "idle", error: "Платформа процесса не Mac, Windows и не Linux." };
   const store = createJobStore(directory);
   await store.requeueStale(host, (job) => job.kind === "transcode" && staleLease(directory, job));
+  const policy = await readEncodePolicy(directory);
+  const limit = { ...policy.machines[host], userBusy: policy.machines[host].userBusy || process.env.SKLAD_USER_BUSY === "1" };
+  const listed = await store.list({ limit: 200 });
+  const running = listed.jobs.filter((item) => item.host === host && item.state === "running" && (item.kind === "transcode" || item.kind === "compact")).length;
+  const gate = admitMachine(limit, running);
+  if (!gate.admit) return { processed: false, state: "idle", reason: gate.reason, host };
   const job = await store.claimNext(host, (item) => item.kind === "transcode");
   if (!job?.workerToken) return { processed: false, state: "idle" };
   const jobDir = path.join(directory, "encode-work", job.id);
@@ -204,15 +217,22 @@ async function executeClaimed(store: JobStore, directory: string, jobDir: string
   const profile = /^c:(av1|hevc|h264):(sw|hw)$/.exec(job.payload.handbrakeProfile);
   if (!profile) throw new Error("Профиль кодирования не из настроенного пресета.");
   const codec = profile[1] as EncodeCodec;
-  const allowSoftware = profile[2] === "sw";
+  let allowSoftware = profile[2] === "sw";
   if (await cancelled(store, job.id)) return finishCancel(directory, jobDir, job.id);
+  if ((await controlOf(store, job.id)) === "pause") {
+    await cleanupOwned(jobDir);
+    await writeJournal(directory, job.id, { verified: false, paused: true, sourceDeleted: false });
+    return { processed: true, state: "paused", jobId: job.id, verified: false, sourceDeleted: false };
+  }
   assertEncodePaths([job.payload.source, job.payload.destination, jobDir]);
   const binary = await findBinary(process.env.SKLAD_HANDBRAKE || "HandBrakeCLI");
   if (!binary) throw new Error("HandBrakeCLI не найден во время выполнения.");
   const capability = await readCapability(binary);
   const os = localEncodeOs();
   if (!os) throw new Error("Платформа процесса не Mac, Windows и не Linux.");
-  const hardware = !allowSoftware && codec === "av1" ? advertisedHardwareBlock(capability.encoders) : null;
+  const route = routeAv1({ allowSoftware, encoders: capability.encoders });
+  allowSoftware = route.allowSoftware;
+  const hardware = route.block ? advertisedHardwareBlock(capability.encoders) : null;
   if (hardware) {
     await store.cancel(job.id, hardware);
     await writeJournal(directory, job.id, { verified: false, error: hardware, hardwareBlocked: true, sourceDeleted: false });
@@ -220,7 +240,7 @@ async function executeClaimed(store: JobStore, directory: string, jobDir: string
   }
   const assignment = assignEncodeJobs(
     [{ id: job.id, codec, allowSoftware }],
-    [{ id: job.host, os, slots: 1, probe: { hardwareAv1: capability.hardwareAv1, videoToolbox: null, amf: null, encoders: capability.encoders } }],
+    [{ id: job.host, os, slots: 1, probe: probeFromEncoders(os, capability.encoders) }],
   );
   if (assignment[0]?.state !== "leased" || assignment[0].encoder == null) {
     const reason = assignment[0]?.reason || "Запрошенный кодек недоступен. Подмена не делается.";
@@ -248,41 +268,88 @@ async function executeClaimed(store: JobStore, directory: string, jobDir: string
   const staging = path.join(jobDir, "staging" + path.extname(job.payload.source));
   const partial = path.join(jobDir, `output.part.${container}`);
   await pipeline(createReadStream(job.payload.source), createWriteStream(staging));
-  const args = encodeArgv({ binary, source: staging, output: partial, codec, container, sourceFacts: facts, encoders: capability.encoders });
-  if (args.some((arg) => arg !== binary && /x26[45]|vce_/i.test(arg)) && codec === "av1") throw new Error("AV1 не подменяется на HEVC и VCE сам не запускается.");
+  const prefer = assignment[0]?.encoder === "hardware" ? "hardware" : "software";
+  const args = encodeArgv({ binary, source: staging, output: partial, codec, container, sourceFacts: facts, encoders: capability.encoders, prefer });
+  if (args.some((arg) => arg !== binary && /x26[45]|vce_av1/i.test(arg)) && codec === "av1") throw new Error("AV1 не подменяется на HEVC и VCE AV1 сам не запускается.");
   const timeoutMs = Number(process.env.SKLAD_ENCODE_TIMEOUT_MS || ENCODE_LIMITS.timeoutMs);
-  const child = await runHandBrake(args, timeoutMs, async (percent) => {
+  const policy = await readEncodePolicy(directory);
+  const level = priorityLevel(policy.machines[job.host]?.priority ?? "below-normal");
+  let lastBytes = 0;
+  let lastAt = Date.now();
+  const child = await runHandBrake(args, timeoutMs, level, async (progress) => {
+    const info = await stat(partial).catch(() => null);
+    const now = Date.now();
+    const speed = info ? sampleSpeed(lastBytes, info.size, now - lastAt) : 0;
+    if (info) {
+      lastBytes = info.size;
+      lastAt = now;
+    }
     await writeLease(directory, job.id, token);
     await store.updateProgress(job.id, token, {
-      percent,
-      processedBytes: 0,
+      percent: progress.percent,
+      processedBytes: info?.size ?? 0,
       totalBytes: sourceInfo.size,
-      speed: 0,
-      etaSeconds: null,
+      speed,
+      etaSeconds: progress.etaSeconds,
       currentFile: path.basename(job.payload.source),
-    });
-  }, async () => cancelled(store, job.id));
+    }).catch(() => undefined);
+  }, async () => controlOf(store, job.id));
+  const held = pauseAtFile(child.stopReason === "pause");
+  if (!held.publish) {
+    await cleanupOwned(jobDir);
+    await writeJournal(directory, job.id, { verified: false, paused: true, sourceDeleted: false, sourceSha256: recorded.sha256 });
+    return { processed: true, state: "paused", jobId: job.id, verified: false, sourceDeleted: false };
+  }
   if (child.stopped) return finishCancel(directory, jobDir, job.id);
   if (child.timedOut) throw new Error("Кодирование превысило предел времени. Готовый файл не публикуется.");
-  if (isNativeCrash(child.code)) {
-    const where = child.stderr.includes("encavcodecInit") ? " на encavcodecInit" : "";
-    const reason = `HandBrake завершился кодом ${child.code}${where}. Это аварийный код, автоповтор выключен, другой кодек не подставляется.`;
+  let exitCode = child.code;
+  let stderr = child.stderr;
+  const attempted = args[args.indexOf("-e") + 1] || "";
+  const retry = afterHardwareCrash({ code: exitCode, encoder: attempted, retried: false, encoders: capability.encoders, hdr: facts.hdr, codec });
+  if (retry.retry && retry.encoder) {
+    await rm(partial, { force: true });
+    const again = encodeArgv({ binary, source: staging, output: partial, codec, container, sourceFacts: facts, encoders: capability.encoders.filter((name) => !name.startsWith("vce_av1")), prefer: "software" });
+    const second = await runHandBrake(again, timeoutMs, level, async () => undefined, async () => controlOf(store, job.id));
+    exitCode = second.code;
+    stderr = second.stderr;
+    if (second.stopReason === "pause") {
+      await cleanupOwned(jobDir);
+      return { processed: true, state: "paused", jobId: job.id, verified: false, sourceDeleted: false };
+    }
+  }
+  if (isNativeEncodeCrash(exitCode)) {
+    const where = stderr.includes("encavcodecInit") ? " на encavcodecInit" : "";
+    const reason = `HandBrake завершился кодом ${exitCode}${where}. Неполный файл снят, исходник не изменён, повторный VCE AV1 не запускается.`;
     await cleanupOwned(jobDir);
     await store.cancel(job.id, reason);
-    await writeJournal(directory, job.id, { verified: false, error: reason, hardwareBlocked: true, sourceDeleted: false, platform: process.platform, host: job.host });
+    await writeJournal(directory, job.id, { verified: false, error: reason, hardwareBlocked: true, sourceDeleted: false, sourceSha256: recorded.sha256, platform: process.platform, host: job.host });
     return { processed: true, state: "error", jobId: job.id, verified: false, hardwareBlocked: true, error: reason };
   }
-  if (child.code !== 0) throw new Error(`HandBrake завершился с кодом ${child.code ?? "нет"}. Результат не принят.`);
+  if (exitCode !== 0) throw new Error(`HandBrake завершился с кодом ${exitCode ?? "нет"}. Результат не принят.`);
   if (await cancelled(store, job.id)) return finishCancel(directory, jobDir, job.id);
   const outputFacts = await probeMedia(partial);
   const decodeOk = await decodeSample(partial);
-  const check = verifyMedia({ codec, container, source: facts, output: outputFacts, decodeOk, exitCode: child.code });
+  const check = verifyMedia({ codec, container, source: facts, output: outputFacts, decodeOk, exitCode: exitCode });
   if (!check.verified) {
     throw new Error(`Проверка контейнера, декодирования, длительности или дорожек не прошла. Запрошен ${container}, ffprobe сообщил «${outputFacts.format || "пусто"}». Код выхода 0 этого не заменяет.`);
   }
   await commitOutput(partial, job.payload.destination);
   const outputInfo = await stat(job.payload.destination);
+  const outputSha256 = (await fileIdentity(job.payload.destination)).sha256;
   const sizeBenefit = outputInfo.size < recorded.size;
+  const replacement = mayReplaceOriginal({
+    replaceOriginal: policy.replaceOriginal,
+    verified: true,
+    durationOk: check.durationOk,
+    tracksOk: check.tracksOk,
+    decodeOk: check.decodeOk,
+    sourceSha256: recorded.sha256,
+    outputSha256,
+  });
+  const ownedRoot = path.join(directory, "encode-owned");
+  const replaced = replacement.replace && !pathInside(ownedRoot, job.payload.source)
+    ? await replaceOriginalFile({ source: job.payload.source, output: job.payload.destination, sourceSha256: recorded.sha256, outputSha256, allow: true })
+    : { replaced: false, reason: replacement.reason };
   const retirement = await retireOwnedSource({
     directory,
     source: job.payload.source,
@@ -301,6 +368,10 @@ async function executeClaimed(store: JobStore, directory: string, jobDir: string
     verified: true,
     codec,
     encoder: assignment[0]?.encoder,
+    fallback: route.fallback,
+    sourceSha256: recorded.sha256,
+    outputSha256,
+    replaced: replaced.replaced,
     sizeBenefit,
     sourceBytes: recorded.size,
     outputBytes: outputInfo.size,
@@ -326,6 +397,9 @@ async function executeClaimed(store: JobStore, directory: string, jobDir: string
     codec,
     sizeBenefit,
     sourceDeleted: retirement.applied,
+    replaced: replaced.replaced,
+    sourceSha256: recorded.sha256,
+    outputSha256,
     container,
     format: outputFacts.format,
     host: job.host,
@@ -416,23 +490,34 @@ async function commitOutput(partial: string, destination: string): Promise<void>
 async function runHandBrake(
   args: string[],
   timeoutMs: number,
-  onProgress: (percent: number) => Promise<void>,
-  stop: () => Promise<boolean>,
-): Promise<{ code: number | null; timedOut: boolean; stopped: boolean; stderr: string }> {
+  nice: number,
+  onProgress: (progress: { percent: number; etaSeconds: number | null }) => Promise<void>,
+  stop: () => Promise<"pause" | "cancel" | null>,
+): Promise<{ code: number | null; timedOut: boolean; stopped: boolean; stopReason: "pause" | "cancel" | null; stderr: string }> {
   const bin = args[0];
   if (!bin) throw new Error("Нет пути к HandBrakeCLI.");
   const child = spawn(bin, args.slice(1), { shell: false, stdio: ["ignore", "pipe", "pipe"] });
+  if (typeof child.pid === "number") {
+    try { setPriority(child.pid, nice); } catch { /* the host can refuse a lower priority */ }
+  }
   let timedOut = false;
   let stopped = false;
+  let stopReason: "pause" | "cancel" | null = null;
   let buffer = "";
   let stderr = "";
   const started = Date.now();
   const consume = (chunk: Buffer) => {
     buffer += chunk.toString("utf8");
     buffer = acceptJson(buffer, (value) => {
-      const working = value as { Progress?: { Working?: { Progress?: number } } };
+      const working = value as { Progress?: { Working?: { Progress?: number; ETASeconds?: number } } };
       const ratio = working.Progress?.Working?.Progress;
-      if (typeof ratio === "number" && Number.isFinite(ratio)) void onProgress(Math.max(0, Math.min(100, Math.round(ratio * 100))));
+      const eta = working.Progress?.Working?.ETASeconds;
+      if (typeof ratio === "number" && Number.isFinite(ratio)) {
+        void onProgress({
+          percent: Math.max(0, Math.min(100, Math.round(ratio * 100))),
+          etaSeconds: typeof eta === "number" && Number.isFinite(eta) ? Math.max(0, Math.round(eta)) : null,
+        });
+      }
     });
     if (buffer.length > 64_000) buffer = buffer.slice(-32_000);
   };
@@ -446,9 +531,13 @@ async function runHandBrake(
       if (Date.now() - started > timeoutMs) {
         timedOut = true;
         child.kill("SIGKILL");
-      } else if (await stop()) {
-        stopped = true;
-        child.kill("SIGKILL");
+      } else {
+        const reason = await stop();
+        if (reason) {
+          stopped = true;
+          stopReason = reason;
+          child.kill("SIGKILL");
+        }
       }
     })();
   }, 200);
@@ -457,11 +546,25 @@ async function runHandBrake(
     child.on("close", (exit) => resolve(exit));
   });
   clearInterval(killer);
-  return { code, timedOut, stopped, stderr };
+  return { code, timedOut, stopped, stopReason, stderr };
 }
 
-function isNativeCrash(code: number | null): boolean {
-  return code === 3221225477 || code === 139;
+function probeFromEncoders(os: "win32" | "darwin" | "linux", encoders: readonly string[]): CodecProbe {
+  const has = (name: string) => encoders.includes(name);
+  return {
+    hardwareAv1: false,
+    videoToolbox: os === "darwin" ? { h264: has("vt_h264"), hevc: has("vt_h265") || has("vt_h265_10bit"), av1: false } : null,
+    amf: os === "win32" ? { h264: has("vce_h264"), hevc: has("vce_h265") || has("vce_h265_10bit"), av1: false } : null,
+    encoders,
+  };
+}
+
+async function controlOf(store: JobStore, id: string): Promise<"pause" | "cancel" | null> {
+  const list = await store.list({ limit: 200 });
+  const job = list.jobs.find((item) => item.id === id);
+  if (!job || job.cancelled || job.state === "error") return "cancel";
+  if (job.state === "paused") return "pause";
+  return null;
 }
 
 function acceptJson(buffer: string, onObject: (value: unknown) => void): string {

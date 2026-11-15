@@ -179,10 +179,38 @@ export function formatMatchesContainer(formatName: string, container: OutputCont
   return parts.some((part) => part === "mp4" || part === "mov" || part === "m4v");
 }
 
-export function videoEncoder(codec: EncodeCodec, hdr: boolean, encoders: readonly string[]): string | null {
+/** Hardware names that are allowed to run. vce_av1 is not among them. */
+export function hardwareEncoder(codec: EncodeCodec, hdr: boolean, encoders: readonly string[]): string | null {
+  if (codec === "av1") return null;
+  if (codec === "hevc") {
+    if (hdr) {
+      if (encoders.includes("vt_h265_10bit")) return "vt_h265_10bit";
+      if (encoders.includes("vce_h265_10bit")) return "vce_h265_10bit";
+      return null;
+    }
+    if (encoders.includes("vt_h265")) return "vt_h265";
+    if (encoders.includes("vce_h265")) return "vce_h265";
+    return null;
+  }
+  if (hdr) return null;
+  if (encoders.includes("vt_h264")) return "vt_h264";
+  if (encoders.includes("vce_h264")) return "vce_h264";
+  return null;
+}
+
+export function videoEncoder(
+  codec: EncodeCodec,
+  hdr: boolean,
+  encoders: readonly string[],
+  prefer: "hardware" | "software" = "software",
+): string | null {
   if (codec === "av1") {
     if (hdr) return encoders.includes("svt_av1_10bit") ? "svt_av1_10bit" : null;
     return encoders.includes("svt_av1") ? "svt_av1" : null;
+  }
+  if (prefer === "hardware") {
+    const hardware = hardwareEncoder(codec, hdr, encoders);
+    if (hardware) return hardware;
   }
   if (codec === "hevc") {
     if (hdr) return encoders.includes("x265_10bit") ? "x265_10bit" : null;
@@ -200,13 +228,15 @@ export function encodeArgv(input: {
   container: OutputContainer;
   sourceFacts: MediaFacts;
   encoders: readonly string[];
+  /** Hardware is used for H.264 and HEVC only when this machine listed that encoder. AV1 stays on SVT. */
+  prefer?: "hardware" | "software";
 }): string[] {
-  const encoder = videoEncoder(input.codec, input.sourceFacts.hdr, input.encoders);
+  const encoder = videoEncoder(input.codec, input.sourceFacts.hdr, input.encoders, input.prefer ?? "software");
   if (!encoder) throw new Error("Нет кодировщика запрошенного кодека. Другой кодек не подставляется.");
   if (input.codec === "av1" && !encoder.startsWith("svt_av1")) {
     throw new Error("AV1 не подменяется другим кодеком.");
   }
-  if (/^vce_/.test(encoder)) throw new Error(advertisedHardwareBlock([encoder]) || "Аппаратный кодировщик VCE автоматически не запускается.");
+  if (/^vce_av1/.test(encoder)) throw new Error(advertisedHardwareBlock([encoder]) || "Аппаратный AV1 VCE не запускается.");
   const quality = String(CONSERVATIVE_PRESET.quality[input.codec]);
   const args = [
     input.binary,
