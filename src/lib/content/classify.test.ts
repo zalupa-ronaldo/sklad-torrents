@@ -41,6 +41,43 @@ describe("classify downloads", () => {
     expect(result.kind).not.toBe("game");
   });
 
+  it("reads a cartoons folder as cartoons and keeps a series folder", () => {
+    expect(classify({ name: "Episode", savePath: "E:\\Мультики\\Nu Pogodi", files: [{ name: "nu.mkv", size: 700_000_000 }] })).toMatchObject({
+      kind: "cartoon",
+      reason: "folder",
+    });
+    expect(classify({ name: "Slow Horses", savePath: "E:\\Сериалы\\Slow Horses" })).toMatchObject({
+      kind: "series",
+      reason: "folder",
+    });
+    expect(classify({ name: "Ну, погоди! мультфильм" }).kind).toBe("cartoon");
+  });
+
+  it("keeps мультфильмы, сериалы and фильмы as three folder types", () => {
+    const cartoon = classify({
+      name: "Nu Pogodi S01E02",
+      savePath: "D:\\мультфильмы\\Ну, погоди",
+      files: [{ name: "Nu.Pogodi.S01E02.mkv", size: 700_000_000 }],
+    });
+    const series = classify({
+      name: "Slow Horses",
+      savePath: "D:\\сериалы\\Slow Horses",
+      files: [{ name: "Slow.Horses.S01E02.mkv", size: 1_400_000_000 }],
+    });
+    const movie = classify({
+      name: "Интерстеллар",
+      savePath: "D:\\фильмы\\Interstellar",
+      files: [{ name: "Interstellar.mkv", size: 4_000_000_000 }],
+    });
+    expect(cartoon).toMatchObject({ kind: "cartoon", reason: "folder" });
+    expect(cartoon.kind).not.toBe("series");
+    expect(cartoon.kind).not.toBe("movie");
+    expect(series).toMatchObject({ kind: "series", reason: "folder" });
+    expect(movie).toMatchObject({ kind: "movie", reason: "folder" });
+    expect(classify({ name: "Show", savePath: "D:\\мультфильмы\\сериалы\\Show" }).kind).toBe("series");
+    expect(classify({ name: "Short", savePath: "D:\\фильмы\\мультфильмы\\Short" }).kind).toBe("cartoon");
+  });
+
   it("reads S01E02 as a series", () => {
     const result = classify({
       name: "Slow Horses S01E02",

@@ -1,4 +1,4 @@
-export const CONTENT_KINDS = ["game", "movie", "series", "music", "software", "document", "other"] as const;
+export const CONTENT_KINDS = ["game", "movie", "series", "cartoon", "music", "software", "document", "other"] as const;
 export type ContentKind = (typeof CONTENT_KINDS)[number];
 
 export const GAME_SUBTYPES = ["pc", "console", "psp", "other"] as const;

@@ -45,7 +45,8 @@ const IMPLIED_GAME: Record<string, GameSubtype> = {
 
 const SERIES_RE =
   /(^|[^a-z0-9])s\d{1,2}e\d{1,2}([^a-z0-9]|$)|сериал|(^|[^a-z0-9])series([^a-z0-9]|$)|сезон\s*\d|(^|[^a-z0-9])season\s*\d/i;
-const MOVIE_RE = /фильм|кино|мультфильм|(^|[^a-z0-9])movie([^a-z0-9]|$)|(^|[^a-z0-9])film([^a-z0-9]|$)|bdrip|bluray|web-?dl|webrip/i;
+const CARTOON_RE = /мультфильм|мультик|(^|[^a-z0-9])cartoons?([^a-z0-9]|$)|(^|[^a-z0-9])animation([^a-z0-9]|$)/i;
+const MOVIE_RE = /фильм|кино|(^|[^a-z0-9])movie([^a-z0-9]|$)|(^|[^a-z0-9])film([^a-z0-9]|$)|bdrip|bluray|web-?dl|webrip/i;
 const MUSIC_RE = /саундтрек|soundtrack|(^|[^a-z0-9])ost([^a-z0-9]|$)|дискографи/i;
 const DOC_NAME_RE = /(^|[^a-z0-9])(pdf|epub|djvu|fb2)([^a-z0-9]|$)|книга/i;
 const SOFTWARE_RE =
@@ -181,6 +182,36 @@ function classifyByExtensions(input: ClassifyInput): Classification | null {
 }
 
 
+/** The whole folder name, so «мультфильмы» stays its own type. */
+const CARTOON_SEGMENT = /^(?:cartoons?|animation|мультики|мульты|мультфильмы|анимация)$/i;
+const SERIES_SEGMENT = /^(?:series|сериалы|сирики|tv[ -]?shows?)$/i;
+const MOVIE_SEGMENT = /^(?:cinema|movies?|видеки|видео|videos?|фильмы|перекодированные)$/i;
+
+function folderSegments(savePath: string): string[] {
+  return savePath
+    .replace(/\\/g, "/")
+    .split("/")
+    .map((part) => part.trim())
+    .filter(Boolean);
+}
+
+/** Deepest library folder wins, so a cartoons folder is not a series or a movie. */
+function videoFolder(parts: string[]): Classification | null {
+  for (let index = parts.length - 1; index >= 0; index -= 1) {
+    const part = parts[index] ?? "";
+    if (CARTOON_SEGMENT.test(part)) {
+      return { kind: "cartoon", gameSubtype: null, reason: "folder", detail: "Папка мультиков в пути сохранения" };
+    }
+    if (SERIES_SEGMENT.test(part)) {
+      return { kind: "series", gameSubtype: null, reason: "folder", detail: "Папка сериалов в пути сохранения" };
+    }
+    if (MOVIE_SEGMENT.test(part)) {
+      return { kind: "movie", gameSubtype: null, reason: "folder", detail: "Папка фильмов в пути сохранения" };
+    }
+  }
+  return null;
+}
+
 function classifyByFolder(savePath: string): Classification | null {
   const text = savePath.replace(/\\/g, "/");
   if (!text) return null;
@@ -190,12 +221,8 @@ function classifyByFolder(savePath: string): Classification | null {
   if (/(^|[/])(games?|игры|steam|steamapps)([/]|$)/i.test(text)) {
     return game("pc", "Папка игр в пути сохранения", "folder");
   }
-  if (/(^|[/])(series|сериалы|сирики|мульты|мультфильмы|tv[ -]?shows?)([/]|$)/i.test(text)) {
-    return { kind: "series", gameSubtype: null, reason: "folder", detail: "Папка сериалов в пути сохранения" };
-  }
-  if (/(^|[/])(cinema|movies?|видеки|видео|videos?|фильмы|перекодированные)([/]|$)/i.test(text)) {
-    return { kind: "movie", gameSubtype: null, reason: "folder", detail: "Папка фильмов в пути сохранения" };
-  }
+  const byVideoFolder = videoFolder(folderSegments(text));
+  if (byVideoFolder) return byVideoFolder;
   if (/(^|[/])(music|музыка)([/]|$)/i.test(text)) {
     return { kind: "music", gameSubtype: null, reason: "folder", detail: "Папка музыки в пути сохранения" };
   }
@@ -216,6 +243,9 @@ function classifyByName(name: string): Classification | null {
   if (!text) return null;
   if (SERIES_RE.test(text)) {
     return { kind: "series", gameSubtype: null, reason: "name", detail: "В имени номер серии или слово «сериал»" };
+  }
+  if (CARTOON_RE.test(text)) {
+    return { kind: "cartoon", gameSubtype: null, reason: "name", detail: "В имени мультик или cartoon" };
   }
   if (MOVIE_RE.test(text)) {
     return { kind: "movie", gameSubtype: null, reason: "name", detail: "В имени слово вроде «фильм» или movie" };

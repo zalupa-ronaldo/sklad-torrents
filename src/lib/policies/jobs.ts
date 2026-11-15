@@ -4,6 +4,7 @@ import { dataFile, readJsonFile, writeJsonFile } from "@/lib/json-file";
 import { QbittorrentError } from "@/lib/qbittorrent/errors";
 import { registerJobSource } from "@/lib/progress/sources";
 import type { JobSnapshot } from "@/lib/progress/types";
+import { pipelineJobSnapshots } from "@/lib/scheduler/auto-queue";
 
 export type PolicyJobKind = "handbrake" | "compact" | "index";
 
@@ -110,6 +111,13 @@ registerJobSource({
   id: "content-policy",
   async list() {
     return policyJobsAsSnapshots(await loadPolicyJobs());
+  },
+});
+
+registerJobSource({
+  id: "auto-pipeline",
+  list() {
+    return pipelineJobSnapshots();
   },
 });
 

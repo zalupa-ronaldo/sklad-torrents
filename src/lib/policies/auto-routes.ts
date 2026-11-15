@@ -9,7 +9,8 @@ import { online, mountPathsOf } from "@/addons/drives/reconcile";
 const FOLDER_SIGNATURES: { kind: ContentKind; folders: string[]; post?: TypeRule["postAction"]; index?: TypeRule["indexProfile"] }[] = [
   { kind: "game", folders: ["games", "игры", "steam", "steamapps", "psp"], post: "compact", index: "ntfs-mft" },
   { kind: "movie", folders: ["cinema", "movies", "видеки", "видео", "videos", "фильмы", "перекодированные"], post: "handbrake", index: "walk" },
-  { kind: "series", folders: ["series", "сериалы", "сирики", "мульты", "мультфильмы", "tv shows", "tv-shows"], post: "handbrake", index: "walk" },
+  { kind: "cartoon", folders: ["cartoons", "cartoon", "animation", "мультики", "мульты", "мультфильмы", "анимация"], post: "handbrake", index: "walk" },
+  { kind: "series", folders: ["series", "сериалы", "сирики", "tv shows", "tv-shows"], post: "handbrake", index: "walk" },
   { kind: "music", folders: ["music", "музыка"], post: "none", index: "walk" },
   { kind: "software", folders: ["software", "софт", "programs"], post: "none", index: "walk" },
   { kind: "document", folders: ["documents", "документы", "comics", "комиксы"], post: "none", index: "walk" },
