@@ -1,10 +1,12 @@
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 
+import { readCatalog } from "@/addons/drives/store";
 import { appDataDir } from "@/lib/app-data";
 import { AppError } from "@/lib/app-error";
 import { getDisk } from "@/lib/drive/catalog";
 import { joinCatalogPath, resolveFilesystem, sanitizeRelative, type OsKind } from "@/lib/drive/filesystem";
+import { isProtectedVolume } from "@/lib/localsend/paths";
 import type { ReceiveDestination } from "@/lib/localsend/server";
 
 export interface LocalSendSettings {
@@ -54,11 +56,13 @@ export async function saveSettings(input: Partial<LocalSendSettings>): Promise<L
 export async function resolveReceiveDestination(settings = null as LocalSendSettings | null): Promise<ReceiveDestination> {
   const current = settings ?? (await loadSettings());
   if (current.destination.mode === "disk") {
-    const disk = getDisk(current.destination.diskId);
+    const disk = await lookupDisk(current.destination.diskId);
     if (!disk) throw new AppError(400, "Диск назначения не найден в каталоге.");
     const folder = current.destination.folder.trim();
+    assertNotProtected(disk.mount);
     const catalogRoot = folder ? joinCatalogPath(disk.os, disk.mount, folder) : disk.mount;
     const writeRoot = disk.localRoot ? localJoin(disk.localRoot, folder) : catalogRoot;
+    assertNotProtected(writeRoot);
     return {
       writeRoot,
       catalogRoot,
@@ -69,6 +73,7 @@ export async function resolveReceiveDestination(settings = null as LocalSendSett
     };
   }
   const destinationPath = current.destination.path.trim();
+  assertNotProtected(destinationPath);
   return {
     writeRoot: destinationPath,
     catalogRoot: destinationPath,
@@ -77,6 +82,39 @@ export async function resolveReceiveDestination(settings = null as LocalSendSett
     diskId: null,
     hostId: "local",
   };
+}
+
+async function lookupDisk(id: string): Promise<{ id: string; os: OsKind; filesystem: string | null; mount: string; localRoot: string | null; hostId: string } | null> {
+  const demo = getDisk(id);
+  if (demo) {
+    return {
+      id: demo.id,
+      os: demo.os,
+      filesystem: demo.filesystem,
+      mount: demo.mount,
+      localRoot: demo.localRoot,
+      hostId: demo.hostId,
+    };
+  }
+  const catalog = await readCatalog();
+  const shelf = catalog?.disks.find((disk) => disk.id === id);
+  if (!shelf) return null;
+  const mount = shelf.lastMountPath || shelf.connectedHosts[0]?.mountPaths[0] || "";
+  const os: OsKind = shelf.pathStyle === "win32" ? "win32" : "darwin";
+  return {
+    id: shelf.id,
+    os,
+    filesystem: shelf.filesystem,
+    mount,
+    localRoot: null,
+    hostId: shelf.lastHostId,
+  };
+}
+
+function assertNotProtected(target: string): void {
+  if (isProtectedVolume(target)) {
+    throw new AppError(400, "Диск Z: не используется. Выберите другой каталог приёма.");
+  }
 }
 
 function normalizeSettings(input: Partial<LocalSendSettings>): LocalSendSettings {
@@ -92,10 +130,12 @@ function normalizeSettings(input: Partial<LocalSendSettings>): LocalSendSettings
     throw new AppError(400, "Укажите, куда складывать входящие.");
   }
   if (destination.mode === "disk") {
-    if (!getDisk(String(destination.diskId || ""))) throw new AppError(400, "Выберите диск из каталога.");
+    const diskId = String(destination.diskId || "").trim();
+    if (!diskId) throw new AppError(400, "Выберите диск из каталога.");
     const folder = String(destination.folder || "").trim();
     if (folder) sanitizeRelative(folder);
-    return { alias, receivePin, destination: { mode: "disk", diskId: destination.diskId, folder } };
+    if (isProtectedVolume(folder)) throw new AppError(400, "Диск Z: не используется. Выберите другой каталог приёма.");
+    return { alias, receivePin, destination: { mode: "disk", diskId, folder } };
   }
   const os = destination.os;
   if (os !== "darwin" && os !== "win32" && os !== "linux") {
@@ -107,6 +147,9 @@ function normalizeSettings(input: Partial<LocalSendSettings>): LocalSendSettings
   }
   if (os !== "win32" && !destinationPath.startsWith("/")) {
     throw new AppError(400, "На macOS и Linux путь начинается с /.");
+  }
+  if (isProtectedVolume(destinationPath)) {
+    throw new AppError(400, "Диск Z: не используется. Выберите другой каталог приёма.");
   }
   return { alias, receivePin, destination: { mode: "path", os, path: destinationPath } };
 }

@@ -1,8 +1,12 @@
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import http from "node:http";
+import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
+import { writeCatalog } from "@/addons/drives/store";
+import type { DiskRecord, IndexedFile } from "@/addons/drives/types";
 import { setAppDataDir } from "@/lib/app-data";
 import { searchCatalog, acceptReceivedFiles } from "@/lib/drive/catalog";
 import { enqueueJob, getJob, listJobs, registerJobHandler, whenJobsIdle } from "@/lib/jobs/queue";
@@ -12,6 +16,8 @@ import { upsertDevice } from "@/lib/localsend/discovery";
 import { PROTOCOL_VERSION } from "@/lib/localsend/protocol";
 import { startPeerServer, type PeerServer } from "@/lib/localsend/server";
 import { enqueueSend } from "@/lib/localsend/service";
+import { saveSettings } from "@/lib/localsend/settings";
+import { listTransfers } from "@/lib/localsend/view";
 
 const sender = {
   alias: "Склад",
@@ -248,6 +254,300 @@ describe("LocalSend receive", () => {
     expect(saved?.policy?.action).toBe("none");
     expect(saved?.source).toBe("localsend");
   });
+
+  it("keeps a local folder tree, records SHA-256, and does not delete the originals", async () => {
+    const previous = process.env.SKLAD_DATA_DIR;
+    process.env.SKLAD_DATA_DIR = dataDir;
+    const root = path.join(dataDir, "notes");
+    await mkdir(path.join(root, "nested"), { recursive: true });
+    const note = Buffer.from("note-a");
+    const clip = Buffer.from("clip-b");
+    const notePath = path.join(root, "a.txt");
+    const clipPath = path.join(root, "nested", "b.txt");
+    await writeFile(notePath, note);
+    await writeFile(clipPath, clip);
+    const server = await track(startPeerServer({ protocol: "http", alias: "Folder peer" }));
+    remember(server);
+    try {
+      await writeCatalog({
+        version: 1,
+        seeded: true,
+        disks: [
+          shelfDisk({
+            id: "disk-here",
+            label: "Здесь",
+            filesystem: "ext4",
+            pathStyle: "posix",
+            lastMountPath: root,
+            lastHostId: "local",
+            lastHostName: "Склад",
+            connectedHosts: [{ id: "local", name: "Склад", os: "darwin", elevated: false, mountPaths: [root] }],
+            files: [indexed("a.txt", "a.txt", note.length), indexed("nested/b.txt", "b.txt", clip.length)],
+          }),
+        ],
+      });
+      const { job } = await enqueueSend({
+        fingerprint: server.fingerprint,
+        entryIds: [],
+        driveFiles: [{ diskId: "disk-here", path: root, name: "notes", kind: "dir" }],
+      });
+      const done = await waitJob(job.id, ["done", "error"]);
+      expect(done.state).toBe("done");
+      const names = Object.values(server.prepares[0].files).map((file) => file.fileName).sort();
+      expect(names).toEqual(["notes/a.txt", "notes/nested/b.txt"]);
+      const noteHash = createHash("sha256").update(note).digest("hex");
+      const clipHash = createHash("sha256").update(clip).digest("hex");
+      const byName = new Map(Object.values(server.prepares[0].files).map((file) => [file.fileName, file.sha256]));
+      expect(byName.get("notes/a.txt")).toBe(noteHash);
+      expect(byName.get("notes/nested/b.txt")).toBe(clipHash);
+      expect(await readFile(notePath)).toEqual(note);
+      expect(await readFile(clipPath)).toEqual(clip);
+      const view = (await listTransfers()).find((item) => item.id === job.id);
+      expect(view?.files.every((file) => file.sha256 && file.sha256.length === 64)).toBe(true);
+      expect(view?.direction).toBe("send");
+    } finally {
+      if (previous === undefined) delete process.env.SKLAD_DATA_DIR;
+      else process.env.SKLAD_DATA_DIR = previous;
+    }
+  });
+
+  it("rejects a checksum mismatch and does not leave the incoming file", async () => {
+    const inbox = path.join(dataDir, "inbox");
+    await mkdir(inbox, { recursive: true });
+    const server = await track(
+      startPeerServer({
+        protocol: "http",
+        alias: "Strict",
+        destination: async () => ({
+          writeRoot: inbox,
+          catalogRoot: inbox,
+          os: "linux",
+          filesystem: "other",
+          diskId: null,
+          hostId: "local",
+        }),
+      }),
+    );
+    const filePath = path.join(dataDir, "source.txt");
+    const bytes = Buffer.from("keep-me");
+    await writeFile(filePath, bytes);
+    const result = await transferToPeer({
+      peer: peerOf(server),
+      sender,
+      files: [{ ...transferFile("bad", "source.txt", bytes.length, filePath), sha256: "b".repeat(64) }],
+    });
+    expect(result.ok).toBe(false);
+    expect(result.status).toBe(422);
+    expect(server.completedUploads).toBe(0);
+    expect(await readdir(inbox)).toEqual([]);
+    expect(await readFile(filePath)).toEqual(bytes);
+  });
+
+  it("receives a folder, reports cumulative progress, and stores each SHA-256", async () => {
+    const inbox = path.join(dataDir, "folder-inbox");
+    const progress: { sessionBytes: number; sessionTotal: number }[] = [];
+    const accepted: string[] = [];
+    const server = await track(
+      startPeerServer({
+        protocol: "http",
+        alias: "Folder inbox",
+        destination: async () => ({
+          writeRoot: inbox,
+          catalogRoot: "/Volumes/vault/Incoming",
+          os: "darwin",
+          filesystem: "apfs",
+          diskId: "disk-mac",
+          hostId: "demo-mac",
+        }),
+        onProgress: async (update) => {
+          progress.push({ sessionBytes: update.sessionBytes, sessionTotal: update.sessionTotal });
+        },
+        onFileAccepted: async (file) => {
+          accepted.push(file.sha256);
+          await acceptReceivedFiles([file]);
+        },
+      }),
+    );
+    const first = Buffer.from("alpha");
+    const second = Buffer.from("bravo!");
+    const firstPath = path.join(dataDir, "a.txt");
+    const secondPath = path.join(dataDir, "b.txt");
+    await writeFile(firstPath, first);
+    await writeFile(secondPath, second);
+    const firstHash = createHash("sha256").update(first).digest("hex");
+    const secondHash = createHash("sha256").update(second).digest("hex");
+    const result = await transferToPeer({
+      peer: peerOf(server),
+      sender,
+      files: [
+        { ...transferFile("a", "Pack/a.txt", first.length, firstPath), sha256: firstHash },
+        { ...transferFile("b", "Pack/nested/b.txt", second.length, secondPath), sha256: secondHash },
+      ],
+    });
+    expect(result.ok).toBe(true);
+    expect(await readFile(path.join(inbox, "Pack", "a.txt"))).toEqual(first);
+    expect(await readFile(path.join(inbox, "Pack", "nested", "b.txt"))).toEqual(second);
+    expect(accepted.sort()).toEqual([firstHash, secondHash].sort());
+    expect(progress.at(-1)).toEqual({ sessionBytes: first.length + second.length, sessionTotal: first.length + second.length });
+    expect(progress.every((item) => item.sessionTotal === first.length + second.length)).toBe(true);
+    expect(await readFile(firstPath)).toEqual(first);
+  });
+});
+
+describe("LocalSend from Mac and PC", () => {
+  let previousData: string | undefined;
+
+  beforeEach(() => {
+    previousData = process.env.SKLAD_DATA_DIR;
+    process.env.SKLAD_DATA_DIR = dataDir;
+  });
+
+  afterEach(() => {
+    if (previousData === undefined) delete process.env.SKLAD_DATA_DIR;
+    else process.env.SKLAD_DATA_DIR = previousData;
+  });
+
+  it("streams a file from the PC agent and leaves the source in place", async () => {
+    const bytes = Buffer.from("from-the-pc");
+    const agent = await mockAgent({ "Games/note.txt": bytes });
+    const server = await track(startPeerServer({ protocol: "http", alias: "Phone" }));
+    remember(server);
+    try {
+      await writeAgents(agent.port);
+      await writeCatalog({
+        version: 1,
+        seeded: true,
+        disks: [
+          shelfDisk({
+            id: "disk-pc",
+            label: "Games",
+            pathStyle: "win32",
+            lastMountPath: "S:\\",
+            lastHostId: "windows-pc",
+            lastHostName: "Windows PC",
+            connectedHosts: [{ id: "windows-pc", name: "Windows PC", os: "win32", elevated: true, mountPaths: ["S:\\"] }],
+            files: [indexed("Games/note.txt", "note.txt", bytes.length)],
+          }),
+        ],
+      });
+      const { job } = await enqueueSend({
+        fingerprint: server.fingerprint,
+        entryIds: [],
+        driveFiles: [{ diskId: "disk-pc", path: "S:\\Games\\note.txt", name: "note.txt", kind: "file" }],
+      });
+      const done = await waitJob(job.id, ["done", "error"]);
+      expect(done.state).toBe("done");
+      expect(done.error).toBeNull();
+      expect(server.uploads[0].bytes.equals(bytes)).toBe(true);
+      const sent = Object.values(server.prepares[0].files)[0];
+      expect(sent.sha256).toBe(createHash("sha256").update(bytes).digest("hex"));
+      const payload = done.payload as { hostLabel: string; files: { sha256: string; hostLabel: string }[] };
+      expect(payload.hostLabel).toBe("ПК");
+      expect(payload.files[0].sha256).toBe(sent.sha256);
+      expect(payload.files[0].hostLabel).toBe("ПК");
+      const again = await fetch(`http://127.0.0.1:${agent.port}/v1/file/content?serial=SN&uuid=uuid&path=Games/note.txt`);
+      expect(Buffer.from(await again.arrayBuffer())).toEqual(bytes);
+    } finally {
+      await agent.close();
+    }
+  });
+
+  it("sends a Mac folder through the agent with relative names", async () => {
+    const photo = Buffer.from("photo");
+    const raw = Buffer.from("raw-data");
+    const agent = await mockAgent({
+      "Photos/trip/a.jpg": photo,
+      "Photos/trip/raw/b.dng": raw,
+    });
+    const server = await track(startPeerServer({ protocol: "http", alias: "Tablet" }));
+    remember(server);
+    try {
+      await writeAgents(agent.port);
+      await writeCatalog({
+        version: 1,
+        seeded: true,
+        disks: [
+          shelfDisk({
+            id: "disk-mac-live",
+            label: "Vault",
+            filesystem: "APFS",
+            pathStyle: "posix",
+            lastMountPath: "/Volumes/vault",
+            lastHostId: "mac-mini",
+            lastHostName: "Mac mini",
+            connectedHosts: [{ id: "mac-mini", name: "Mac mini", os: "darwin", elevated: true, mountPaths: ["/Volumes/vault"] }],
+            files: [
+              indexed("Photos/trip/a.jpg", "a.jpg", photo.length),
+              indexed("Photos/trip/raw/b.dng", "b.dng", raw.length),
+            ],
+          }),
+        ],
+      });
+      const { job } = await enqueueSend({
+        fingerprint: server.fingerprint,
+        entryIds: [],
+        driveFiles: [{ diskId: "disk-mac-live", path: "/Volumes/vault/Photos/trip", name: "trip", kind: "dir" }],
+      });
+      const done = await waitJob(job.id, ["done", "error"]);
+      expect(done.state).toBe("done");
+      const names = Object.values(server.prepares[0].files).map((file) => file.fileName).sort();
+      expect(names).toEqual(["trip/a.jpg", "trip/raw/b.dng"]);
+      const payload = done.payload as { hostLabel: string };
+      expect(payload.hostLabel).toBe("Mac");
+      const bodies = server.uploads.map((upload) => upload.bytes.toString("utf8")).sort();
+      expect(bodies).toEqual(["photo", "raw-data"]);
+    } finally {
+      await agent.close();
+    }
+  });
+
+  it("refuses Z: before any agent read", async () => {
+    const agent = await mockAgent({ "secret.bin": Buffer.from("nope") });
+    const server = await track(startPeerServer({ protocol: "http", alias: "Nowhere" }));
+    remember(server);
+    try {
+      await writeAgents(agent.port);
+      await writeCatalog({
+        version: 1,
+        seeded: true,
+        disks: [
+          shelfDisk({
+            id: "disk-z",
+            label: "Hidden",
+            lastMountPath: "Z:\\",
+            lastHostId: "windows-pc",
+            lastHostName: "Windows PC",
+            pathStyle: "win32",
+            connectedHosts: [{ id: "windows-pc", name: "Windows PC", os: "win32", elevated: true, mountPaths: ["Z:\\"] }],
+            files: [indexed("secret.bin", "secret.bin", 4)],
+          }),
+        ],
+      });
+      await expect(
+        enqueueSend({
+          fingerprint: server.fingerprint,
+          entryIds: [],
+          driveFiles: [{ diskId: "disk-z", path: "Z:\\secret.bin", name: "secret.bin", kind: "file" }],
+        }),
+      ).rejects.toThrow(/Z:/);
+      expect(agent.hits()).toBe(0);
+      expect((await listJobs()).some((job) => job.kind === "localsend.send")).toBe(false);
+    } finally {
+      await agent.close();
+    }
+  });
+});
+
+describe("LocalSend settings", () => {
+  it("does not accept Z: as the receive folder", async () => {
+    await expect(
+      saveSettings({
+        alias: "Склад",
+        receivePin: "",
+        destination: { mode: "path", os: "win32", path: "Z:\\Incoming" },
+      }),
+    ).rejects.toThrow(/Z:/);
+  });
 });
 
 function peerOf(server: PeerServer) {
@@ -293,4 +593,84 @@ async function waitJob(id: string, states: JobState[]): Promise<JobRecord> {
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
   throw new Error(`задача ${id} не пришла в ${states.join(", ")}`);
+}
+
+function indexed(relativePath: string, name: string, size: number): IndexedFile {
+  return { relativePath, name, kind: "file", size, mtimeMs: 1, sidecarCategory: null, categories: [] };
+}
+
+function shelfDisk(partial: Partial<DiskRecord> & { files: IndexedFile[] }): DiskRecord {
+  return {
+    id: partial.id || "disk",
+    serial: "SN",
+    serialNorm: "sn",
+    volumeUuid: "uuid",
+    uuidNorm: "uuid",
+    filesystem: partial.filesystem || "NTFS",
+    label: partial.label || "Disk",
+    namedByUser: false,
+    volumeName: partial.label || "Disk",
+    totalBytes: 1_000_000,
+    freeBytes: 500_000,
+    lastSeenAt: "2026-11-15T00:00:00.000Z",
+    lastHostId: partial.lastHostId || "windows-pc",
+    lastHostName: partial.lastHostName || "Windows PC",
+    pathStyle: partial.pathStyle || "win32",
+    lastMountPath: partial.lastMountPath || "S:\\",
+    priorMountPath: "",
+    connectedHosts: partial.connectedHosts || [],
+    duplicateMounts: false,
+    possibleClone: false,
+    cloneOfIds: [],
+    scan: { status: "complete", strategy: "walk", progress: 1, message: "", elevated: true },
+    files: partial.files,
+  };
+}
+
+async function writeAgents(port: number): Promise<void> {
+  const agents = [
+    { id: "windows-pc", name: "Windows PC", os: "win32", url: `http://127.0.0.1:${port}` },
+    { id: "mac-mini", name: "Mac mini", os: "darwin", url: `http://127.0.0.1:${port}` },
+  ];
+  await writeFile(path.join(dataDir, "drive-agents.json"), JSON.stringify({ mode: "agents", agents }));
+}
+
+function mockAgent(files: Record<string, Buffer>): Promise<{ port: number; hits: () => number; close: () => Promise<void> }> {
+  let hits = 0;
+  const server = http.createServer((req, res) => {
+    hits += 1;
+    const url = new URL(req.url || "/", "http://127.0.0.1");
+    const body = files[url.searchParams.get("path") || ""];
+    if (!body) {
+      res.writeHead(404, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: "Файл не найден на томе." }));
+      return;
+    }
+    if (url.pathname === "/v1/file/stat") {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ ok: true, size: body.length }));
+      return;
+    }
+    if (url.pathname === "/v1/file/content") {
+      res.writeHead(200, {
+        "content-type": "application/octet-stream",
+        "content-length": String(body.length),
+      });
+      res.end(body);
+      return;
+    }
+    res.writeHead(404);
+    res.end();
+  });
+  return new Promise((resolve) => {
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      const port = typeof address === "object" && address ? address.port : 0;
+      resolve({
+        port,
+        hits: () => hits,
+        close: () => new Promise((done, reject) => server.close((error) => (error ? reject(error) : done()))),
+      });
+    });
+  });
 }

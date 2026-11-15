@@ -1,10 +1,10 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 import { stat } from "node:fs/promises";
 import path from "node:path";
 
 import { appDataDir } from "@/lib/app-data";
 import { AppError } from "@/lib/app-error";
-import { acceptReceivedFiles, expandSelection } from "@/lib/drive/catalog";
+import { acceptReceivedFiles } from "@/lib/drive/catalog";
 import {
   bindJobAbort,
   enqueueJob,
@@ -18,7 +18,7 @@ import {
 } from "@/lib/jobs/queue";
 import type { JobRecord } from "@/lib/jobs/types";
 import { progressSnapshot } from "@/lib/jobs/types";
-import { cancelTransfer, fetchPeerInfo, sha256File, transferToPeer } from "@/lib/localsend/client";
+import { cancelTransfer, fetchPeerInfo, sha256File, sha256Stream, transferToPeer } from "@/lib/localsend/client";
 import {
   addDeviceByIp,
   discoveryError,
@@ -32,27 +32,19 @@ import {
   type DiscoveredDevice,
 } from "@/lib/localsend/discovery";
 import {
-  fileTypeForName,
   LOCALSEND_PORT,
   normalizeFingerprint,
   PROTOCOL_VERSION,
   type DeviceInfo,
 } from "@/lib/localsend/protocol";
+import { machineLabel } from "@/lib/localsend/paths";
+import { openAgentFile } from "@/lib/localsend/remote";
 import { loadSettings, resolveReceiveDestination, saveSettings, type LocalSendSettings } from "@/lib/localsend/settings";
+import { collectSendFiles, type SendFilePayload } from "@/lib/localsend/sources";
 import { registerLocalsendProgress } from "@/lib/localsend/progress";
 import { startPeerServer, type IncomingFile, type PeerServer } from "@/lib/localsend/server";
 
-export interface SendFilePayload {
-  fileId: string;
-  fileName: string;
-  size: number;
-  fileType: string;
-  localPath: string;
-  catalogPath: string;
-  diskId: string;
-  hostId: string;
-  sent: boolean;
-}
+export type { SendFilePayload };
 
 export interface SendPayload {
   peer: {
@@ -65,6 +57,13 @@ export interface SendPayload {
   };
   files: SendFilePayload[];
   pin: string | null;
+  hostLabel: string;
+}
+
+interface ReceivePayload {
+  sessionId: string;
+  hostLabel: string;
+  files: { fileId: string; fileName: string; size: number; sha256: string | null }[];
 }
 
 interface Runtime {
@@ -144,29 +143,16 @@ export async function enqueueSend(input: {
   if (device.demo && !runtime().mock) {
     throw new AppError(409, "Демо-получатель не запущен. Отправка не создана.");
   }
-  const selected = await expandSelection(input.entryIds);
-  const fromShelf = await resolveShelfFiles(input.driveFiles ?? []);
-  if (selected.length + fromShelf.length === 0) throw new AppError(400, "Выберите файлы из каталога.");
-  const files: SendFilePayload[] = [];
-  for (const entry of selected) {
-    if (!entry.localPath) {
-      throw new AppError(400, `Нет локальной копии «${entry.path}». Склад не отмечает такую отправку как выполненную.`);
-    }
-    const info = await stat(entry.localPath);
-    if (!info.isFile()) throw new AppError(400, `«${entry.name}» не файл.`);
-    files.push({
-      fileId: randomUUID(),
-      fileName: entry.name,
-      size: info.size,
-      fileType: fileTypeForName(entry.name),
-      localPath: entry.localPath,
-      catalogPath: entry.path,
-      diskId: entry.diskId,
-      hostId: entry.hostId,
-      sent: false,
-    });
-  }
-  files.push(...fromShelf);
+  const files = await collectSendFiles(
+    input.entryIds,
+    (input.driveFiles ?? []).map((file) => ({
+      diskId: file.diskId,
+      path: file.path,
+      name: file.name,
+      kind: file.kind,
+    })),
+  );
+  const hostLabel = [...new Set(files.map((file) => file.hostLabel))].join(" · ") || "эта машина";
   const payload: SendPayload = {
     peer: {
       alias: device.alias,
@@ -178,6 +164,7 @@ export async function enqueueSend(input: {
     },
     files,
     pin: input.pin?.trim() || null,
+    hostLabel,
   };
   return enqueueJob({
     kind: "localsend.send",
@@ -186,54 +173,6 @@ export async function enqueueSend(input: {
     payload,
     bytesTotal: files.reduce((sum, file) => sum + file.size, 0),
   });
-}
-
-async function resolveShelfFiles(
-  picks: { diskId: string; path: string; name: string; kind?: string }[],
-): Promise<SendFilePayload[]> {
-  if (picks.length === 0) return [];
-  const { readCatalog } = await import("@/addons/drives/store");
-  const { joinDisplay } = await import("@/addons/drives/paths");
-  const catalog = await readCatalog();
-  const disks = catalog?.disks ?? [];
-  const files: SendFilePayload[] = [];
-  for (const pick of picks) {
-    const disk = disks.find((item) => item.id === pick.diskId);
-    if (!disk) throw new AppError(404, "Диск из полки не найден.");
-    const mount = disk.lastMountPath || disk.connectedHosts[0]?.mountPaths[0] || "";
-    const chosen = disk.files.filter((file) => {
-      const full = joinDisplay(disk.pathStyle, mount, file.relativePath);
-      if (pick.kind === "dir") return file.kind === "file" && (full === pick.path || full.startsWith(pick.path.endsWith("/") || pick.path.endsWith("\\") ? pick.path : `${pick.path}/`) || full.startsWith(`${pick.path}\\`));
-      return full === pick.path || file.relativePath === pick.path || file.name === pick.name && full.endsWith(pick.name);
-    });
-    const concrete = chosen.filter((file) => file.kind === "file");
-    if (concrete.length === 0) {
-      throw new AppError(400, `В каталоге нет файлов для «${pick.name || pick.path}».`);
-    }
-    for (const file of concrete) {
-      const full = joinDisplay(disk.pathStyle, mount, file.relativePath);
-      let size = file.size;
-      try {
-        const info = await stat(full);
-        if (!info.isFile()) throw new Error("не файл");
-        size = info.size;
-      } catch {
-        throw new AppError(400, `Нет локальной копии «${full}». Передача не создана и не будет отмечена как отправленная.`);
-      }
-      files.push({
-        fileId: randomUUID(),
-        fileName: file.name,
-        size,
-        fileType: fileTypeForName(file.name),
-        localPath: full,
-        catalogPath: full,
-        diskId: disk.id,
-        hostId: disk.lastHostId,
-        sent: false,
-      });
-    }
-  }
-  return files;
 }
 
 async function runSendJob(job: JobRecord): Promise<void> {
@@ -293,22 +232,25 @@ async function runSendJob(job: JobRecord): Promise<void> {
 
     const withHash = [];
     for (const file of pending) {
-      const current = await stat(file.localPath);
-      if (!current.isFile() || current.size !== file.size) {
+      const sha256 = await hashSendFile(file, controller.signal);
+      if (sha256 == null) {
         await updateJob(job.id, {
           state: "error",
-          error: `Файл «${file.fileName}» недоступен или изменился до передачи.`,
+          error: `Файл «${file.fileName}» недоступен или изменился до передачи. Оригинал не удалялся.`,
           finishedAt: Date.now(),
         });
         return;
       }
+      file.sha256 = sha256;
+      await updateJob(job.id, { payload });
       withHash.push({
         id: file.fileId,
         fileName: file.fileName,
         size: file.size,
         fileType: file.fileType,
-        sha256: await sha256File(file.localPath),
-        path: file.localPath,
+        sha256,
+        path: file.localPath || "",
+        open: file.remote ? () => openAgentFile(file.remote!, controller.signal) : undefined,
       });
     }
 
@@ -513,13 +455,27 @@ async function listen(settings: LocalSendSettings, port: number): Promise<void> 
     destination: () => resolveReceiveDestination(),
     onSessionStarted: async (session) => {
       const total = session.files.reduce((sum, file) => sum + file.size, 0);
+      const destination = await resolveReceiveDestination().catch(() => null);
+      const hostLabel = destination
+        ? machineLabel({ os: destination.os, path: destination.catalogRoot })
+        : "эта машина";
+      const payload: ReceivePayload = {
+        sessionId: session.sessionId,
+        hostLabel,
+        files: session.files.map((file) => ({
+          fileId: file.id,
+          fileName: file.fileName,
+          size: file.size,
+          sha256: null,
+        })),
+      };
       const job = await insertJob({
         kind: "localsend.receive",
         idempotencyKey: `localsend.receive:${session.sessionId}`,
         title: "Приём LocalSend",
         state: "running",
         bytesTotal: total,
-        payload: { sessionId: session.sessionId, files: session.files.map((file) => file.fileName) },
+        payload,
       });
       runtime().receiveJobs.set(session.sessionId, job.id);
       await updateJob(job.id, {
@@ -536,8 +492,9 @@ async function listen(settings: LocalSendSettings, port: number): Promise<void> 
       runtime().progressAt.set(jobId, now);
       const job = await getJob(jobId);
       if (!job || job.state !== "running") return;
+      const total = update.sessionTotal || job.progress.bytesTotal;
       await updateJob(jobId, {
-        progress: progressSnapshot(update.fileBytes, Math.max(job.progress.bytesTotal, update.fileSize), job.startedAt, update.fileName),
+        progress: progressSnapshot(update.sessionBytes, Math.max(total, update.sessionBytes), job.startedAt, update.fileName),
       });
     },
     onFileAccepted: async (file: IncomingFile) => {
@@ -550,6 +507,14 @@ async function listen(settings: LocalSendSettings, port: number): Promise<void> 
         os: file.os,
         catalogPath: file.catalogPath,
       });
+      const jobId = runtime().receiveJobs.get(file.sessionId);
+      if (!jobId) return;
+      const job = await getJob(jobId);
+      if (!job) return;
+      const payload = job.payload as ReceivePayload;
+      const match = payload.files?.find((item) => item.fileId === file.fileId);
+      if (match) match.sha256 = file.sha256;
+      await updateJob(jobId, { payload });
     },
     onSessionFinished: async (sessionId) => {
       const jobId = runtime().receiveJobs.get(sessionId);
@@ -630,6 +595,23 @@ function fallbackSelf(): DeviceInfo {
     protocol: "http",
     download: false,
   };
+}
+
+async function hashSendFile(file: SendFilePayload, signal: AbortSignal): Promise<string | null> {
+  if (file.localPath) {
+    try {
+      const current = await stat(file.localPath);
+      if (!current.isFile() || current.size !== file.size) return null;
+    } catch {
+      return null;
+    }
+    return sha256File(file.localPath);
+  }
+  const remote = file.remote;
+  if (!remote) return null;
+  const hashed = await sha256Stream(() => openAgentFile(remote, signal));
+  if (hashed.size !== file.size) return null;
+  return hashed.sha256;
 }
 
 function sendKey(fingerprint: string, paths: string[]): string {

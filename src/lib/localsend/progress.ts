@@ -13,6 +13,17 @@ export function registerLocalsendProgress(): void {
   });
 }
 
+function hostOf(job: JobRecord): string {
+  const payload = job.payload as { hostLabel?: string; files?: { hostLabel?: string | null }[] } | null;
+  if (payload && typeof payload.hostLabel === "string" && payload.hostLabel) return payload.hostLabel;
+  const labels = [
+    ...new Set((payload?.files ?? []).map((file) => file.hostLabel).filter((label): label is string => Boolean(label))),
+  ];
+  if (labels.length === 1) return labels[0];
+  if (labels.length > 1) return labels.join(" · ");
+  return "LocalSend";
+}
+
 function toSnapshot(job: JobRecord): JobSnapshot {
   const total = job.progress.bytesTotal;
   const done = job.progress.bytesDone;
@@ -31,7 +42,7 @@ function toSnapshot(job: JobRecord): JobSnapshot {
     speed,
     eta: speed > 0 ? Math.max(0, total - done) / speed : 8_640_000,
     currentFile: job.progress.fileName,
-    host: "LocalSend",
+    host: hostOf(job),
     diskLabel: null,
     outputPath: null,
     error: job.error ?? job.note,

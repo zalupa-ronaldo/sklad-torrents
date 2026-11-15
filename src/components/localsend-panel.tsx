@@ -34,6 +34,31 @@ interface LocalFile {
   size: number;
   filesystem: string;
   readable: boolean;
+  host?: string;
+}
+
+interface TransferFile {
+  fileName: string;
+  size: number;
+  sha256: string | null;
+  hostLabel: string | null;
+  sent: boolean;
+}
+
+interface Transfer {
+  id: string;
+  title: string;
+  direction: "send" | "receive";
+  state: string;
+  percent: number;
+  bytesDone: number;
+  bytesTotal: number;
+  speed: number;
+  eta: number | null;
+  fileName: string | null;
+  error: string | null;
+  hostLabel: string | null;
+  files: TransferFile[];
 }
 
 interface DriveHit {
@@ -70,16 +95,19 @@ export function LocalsendPanel() {
   const [ip, setIp] = useState("");
   const [notice, setNotice] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
+  const [transfers, setTransfers] = useState<Transfer[]>([]);
 
   const load = useCallback(async () => {
-    const [nextStatus, nextFiles, nextSettings] = await Promise.all([
+    const [nextStatus, nextFiles, nextSettings, nextJobs] = await Promise.all([
       api<Status>("/api/localsend/devices"),
       api<{ entries: LocalFile[] }>("/api/localsend/files"),
       api<SettingsResponse>("/api/localsend/settings"),
+      api<{ transfers: Transfer[] }>("/api/localsend/jobs"),
     ]);
     setStatus(nextStatus);
     setFiles(nextFiles.entries);
     setSettings(nextSettings);
+    setTransfers(nextJobs.transfers);
     setFingerprint((current) => current || nextStatus.devices[0]?.fingerprint || "");
   }, []);
 
@@ -232,7 +260,7 @@ export function LocalsendPanel() {
       <section className="rounded-xl border p-4">
         <h2 className="text-base font-semibold">Что отправить</h2>
         <p className="mt-1 text-sm text-muted-foreground">
-          Файлы, которые каталог уже знает. Папка уходит списком файлов внутри неё. Кнопка только ставит задачу в очередь.
+          Файл или папка с Mac или с ПК. Папка уходит с вложенными именами. Оригинал остаётся на месте. Кнопка только ставит задачу в очередь, SHA-256 считается до отправки.
         </p>
         <div className="mt-3">
           <Input
@@ -286,6 +314,7 @@ export function LocalsendPanel() {
                 <span>
                   <span className="font-medium">{file.name}</span>
                   <span className="ml-2 text-xs text-muted-foreground">
+                    {file.host ? `${file.host} · ` : ""}
                     {file.kind === "folder" ? "папка" : formatBytes(file.size)} · {file.filesystem}
                     {file.readable ? "" : " · нет локальной копии"}
                   </span>
@@ -307,11 +336,54 @@ export function LocalsendPanel() {
       </section>
 
       <section className="rounded-xl border p-4">
+        <h2 className="text-base font-semibold">Передачи</h2>
+        <p className="mt-1 text-sm text-muted-foreground">
+          Прогресс отправки и приёма: проценты, скорость, сколько осталось, текущий файл и SHA-256. Оригиналы не удаляются.
+        </p>
+        <ul className="mt-3 grid gap-3">
+          {transfers.length === 0 ? <li className="text-sm text-muted-foreground">Передач пока нет.</li> : null}
+          {transfers.map((transfer) => (
+            <li key={transfer.id} className="rounded-lg border px-3 py-2">
+              <div className="flex flex-wrap items-baseline justify-between gap-2">
+                <span className="font-medium">{transfer.title}</span>
+                <span className="text-xs text-muted-foreground">
+                  {transfer.direction === "receive" ? "приём" : "отправка"}
+                  {transfer.hostLabel ? ` · ${transfer.hostLabel}` : ""} · {stateLabel(transfer.state)} · {transfer.percent}%
+                </span>
+              </div>
+              <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-muted">
+                <div className="h-full bg-primary" style={{ width: `${Math.min(100, Math.max(0, transfer.percent))}%` }} />
+              </div>
+              <p className="mt-2 text-xs text-muted-foreground">
+                {formatBytes(transfer.bytesDone)} / {formatBytes(transfer.bytesTotal)}
+                {transfer.speed > 0 ? ` · ${formatBytes(transfer.speed)}/с` : ""}
+                {transfer.eta != null ? ` · осталось ${formatEta(transfer.eta)}` : ""}
+                {transfer.fileName ? ` · ${transfer.fileName}` : ""}
+              </p>
+              {transfer.error ? <p className="mt-1 text-sm text-destructive">{transfer.error}</p> : null}
+              <ul className="mt-2 grid gap-1">
+                {transfer.files.map((file) => (
+                  <li key={`${transfer.id}:${file.fileName}`} className="text-xs">
+                    <span className="font-medium">{file.fileName}</span>
+                    <span className="text-muted-foreground">
+                      {file.hostLabel ? ` · ${file.hostLabel}` : ""} · {formatBytes(file.size)}
+                      {file.sent ? " · отправлено" : ""}
+                    </span>
+                    <span className="mt-0.5 block break-all font-mono text-muted-foreground">SHA-256 {file.sha256 || "считается"}</span>
+                  </li>
+                ))}
+              </ul>
+            </li>
+          ))}
+        </ul>
+      </section>
+
+      <section className="rounded-xl border p-4">
         <h2 className="text-base font-semibold">Куда складывать входящие</h2>
         <p className="mt-1 max-w-3xl text-sm text-muted-foreground">
-          Этот Склад сам принимает LocalSend и пишет в выбранный каталог. На Mac это путь APFS вроде /Volumes/vault/Incoming, на
-          Windows — NTFS вроде D:\Incoming. Путь Mac не считается NTFS. После реального upload файл добавляется в индекс полки и
-          проходит сухой прогон правил. Ничего не удаляется.
+          Этот Склад принимает LocalSend на той машине, где запущена панель: на Mac путь вроде /Volumes/vault/Incoming, на ПК —
+          D:\Incoming. Диск Z: не используется. Путь Mac не считается NTFS. После upload файл попадает в индекс, SHA-256 виден в
+          передаче. Ничего не удаляется.
         </p>
         {settings && destination ? (
           <div className="mt-3 grid max-w-xl gap-3">
@@ -436,4 +508,28 @@ export function LocalsendPanel() {
       </section>
     </div>
   );
+}
+
+function stateLabel(state: string): string {
+  switch (state) {
+    case "queued":
+      return "в очереди";
+    case "running":
+      return "идёт";
+    case "paused":
+      return "пауза";
+    case "done":
+      return "готово";
+    case "error":
+      return "ошибка";
+    default:
+      return state;
+  }
+}
+
+function formatEta(seconds: number): string {
+  if (seconds < 60) return `${Math.max(1, Math.ceil(seconds))} с`;
+  const minutes = Math.floor(seconds / 60);
+  const rest = Math.ceil(seconds % 60);
+  return `${minutes} мин ${rest} с`;
 }

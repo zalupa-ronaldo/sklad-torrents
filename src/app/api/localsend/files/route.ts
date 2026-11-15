@@ -1,5 +1,6 @@
 import { guard, json } from "@/app/api/respond";
 import { searchCatalog } from "@/lib/drive/catalog";
+import { machineLabel } from "@/lib/localsend/paths";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -18,6 +19,7 @@ export async function GET(request: Request) {
         filesystem: entry.filesystem,
         os: entry.os,
         readable: Boolean(entry.localPath),
+        host: machineLabel({ os: entry.os, hostId: entry.hostId, path: entry.path }),
         source: entry.source,
         policy: entry.policy,
       })),

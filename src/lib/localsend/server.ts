@@ -1,13 +1,17 @@
 import { execFile } from "node:child_process";
 import { createHash, randomBytes, randomUUID, X509Certificate } from "node:crypto";
 import { createWriteStream } from "node:fs";
-import { mkdir, readFile, rename, rm, stat } from "node:fs/promises";
+import { copyFile, mkdir, readFile, rename, rm, stat } from "node:fs/promises";
 import http from "node:http";
 import https from "node:https";
 import path from "node:path";
+import { Transform } from "node:stream";
+import { pipeline } from "node:stream/promises";
 import { promisify } from "node:util";
 
+import { appDataDir } from "@/lib/app-data";
 import { joinCatalogPath, sanitizeRelative, type FilesystemKind, type OsKind } from "@/lib/drive/filesystem";
+import { isProtectedVolume } from "@/lib/localsend/paths";
 import {
   PROTOCOL_VERSION,
   protocolStatusMessage,
@@ -39,6 +43,7 @@ export interface IncomingFile {
   hostId: string | null;
   sessionId: string;
   fileId: string;
+  sha256: string;
 }
 
 export interface UploadRecord {
@@ -47,6 +52,7 @@ export interface UploadRecord {
   token: string;
   bytes: Buffer;
   status: number;
+  sha256: string | null;
 }
 
 interface SessionFile {
@@ -61,6 +67,7 @@ interface Session {
   remoteAddress: string;
   files: Map<string, SessionFile>;
   cancelled: boolean;
+  received: number;
 }
 
 export interface PeerServer {
@@ -93,7 +100,14 @@ export interface PeerServerOptions {
   /** Called only after an upload body is complete, checked, and about to be acknowledged with HTTP 200. */
   onFileAccepted?: (file: IncomingFile) => Promise<void>;
   onSessionStarted?: (session: { sessionId: string; files: FileMetadata[]; remoteAddress: string }) => Promise<void>;
-  onProgress?: (update: { sessionId: string; fileName: string; fileBytes: number; fileSize: number }) => Promise<void>;
+  onProgress?: (update: {
+    sessionId: string;
+    fileName: string;
+    fileBytes: number;
+    fileSize: number;
+    sessionBytes: number;
+    sessionTotal: number;
+  }) => Promise<void>;
   onSessionFinished?: (sessionId: string) => Promise<void>;
   onSessionFailed?: (sessionId: string, message: string) => Promise<void>;
 }
@@ -277,6 +291,7 @@ async function prepareUpload(
     remoteAddress: normalizeIp(req.socket.remoteAddress),
     files: new Map(),
     cancelled: false,
+    received: 0,
   };
   const tokens: Record<string, string> = {};
   for (const file of entries) {
@@ -327,68 +342,103 @@ async function upload(
   }
 
   const destination = options.destination ? await options.destination() : null;
-  const chunks: Buffer[] = [];
+  if (destination && (isProtectedVolume(destination.writeRoot) || isProtectedVolume(destination.catalogRoot))) {
+    file.failed = true;
+    await options.onSessionFailed?.(sessionId, "Диск Z: не используется.");
+    respondJson(res, 403, { message: "Rejected" });
+    return;
+  }
+
+  const sessionTotal = [...session.files.values()].reduce((sum, item) => sum + item.meta.size, 0);
   const hash = createHash("sha256");
   let received = 0;
-  try {
-    await new Promise<void>((resolve, reject) => {
-      req.on("data", (chunk: Buffer) => {
-        if (session.cancelled) {
-          reject(new Error("cancelled"));
-          req.destroy();
-          return;
-        }
-        received += chunk.length;
-        if (received > file.meta.size + 1024) {
-          reject(new Error("too large"));
-          req.destroy();
-          return;
-        }
-        hash.update(chunk);
-        chunks.push(chunk);
-        void options.onProgress?.({
-          sessionId,
-          fileName: file.meta.fileName,
-          fileBytes: received,
-          fileSize: file.meta.size,
-        });
-      });
-      req.on("end", () => resolve());
-      req.on("error", reject);
+  const before = session.received;
+  let bytes = Buffer.alloc(0);
+  let staged: string | null = null;
+  const noteProgress = () => {
+    void options.onProgress?.({
+      sessionId,
+      fileName: file.meta.fileName,
+      fileBytes: received,
+      fileSize: file.meta.size,
+      sessionBytes: before + received,
+      sessionTotal,
     });
+  };
+
+  try {
+    if (destination) {
+      staged = path.join(appDataDir(), "localsend-staging", sessionId, fileId);
+      await mkdir(path.dirname(staged), { recursive: true });
+      await streamInto(req, staged, session, (chunk) => {
+        received += chunk.length;
+        if (received > file.meta.size + 1024) throw new Error("too large");
+        hash.update(chunk);
+        noteProgress();
+      });
+    } else {
+      const chunks: Buffer[] = [];
+      await new Promise<void>((resolve, reject) => {
+        req.on("data", (chunk: Buffer) => {
+          if (session.cancelled) {
+            reject(new Error("cancelled"));
+            req.destroy();
+            return;
+          }
+          received += chunk.length;
+          if (received > file.meta.size + 1024) {
+            reject(new Error("too large"));
+            req.destroy();
+            return;
+          }
+          hash.update(chunk);
+          chunks.push(chunk);
+          noteProgress();
+        });
+        req.on("end", () => resolve());
+        req.on("error", reject);
+      });
+      bytes = Buffer.concat(chunks);
+    }
   } catch {
     file.failed = true;
+    if (staged) await rm(staged, { force: true }).catch(() => undefined);
     await options.onSessionFailed?.(sessionId, "Загрузка прервана.");
     if (!res.headersSent) respondJson(res, 400, { message: "Invalid body" });
     return;
   }
 
+  session.received = before + received;
   if (options.uploadDelayMs && options.uploadDelayMs > 0) {
     await new Promise((resolve) => setTimeout(resolve, options.uploadDelayMs));
   }
   if (session.cancelled || state.session?.id !== sessionId) {
     file.failed = true;
+    if (staged) await rm(staged, { force: true }).catch(() => undefined);
     if (!res.headersSent) respondJson(res, 409, { message: "Blocked by another session" });
     return;
   }
 
-  const bytes = Buffer.concat(chunks);
+  const digest = hash.digest("hex");
   const failStatus = options.uploadStatus && options.uploadStatus !== 200 ? options.uploadStatus : 0;
   if (failStatus) {
     file.failed = true;
-    state.uploads.push({ sessionId, fileId, token, bytes, status: failStatus });
+    if (staged) await rm(staged, { force: true }).catch(() => undefined);
+    state.uploads.push({ sessionId, fileId, token, bytes, status: failStatus, sha256: digest });
     await options.onSessionFailed?.(sessionId, protocolStatusMessage(failStatus));
     respondJson(res, failStatus, { message: protocolStatusMessage(failStatus) });
     return;
   }
   if (received !== file.meta.size) {
     file.failed = true;
+    if (staged) await rm(staged, { force: true }).catch(() => undefined);
     await options.onSessionFailed?.(sessionId, "Размер файла не совпал.");
     respondJson(res, 400, { message: "Invalid body" });
     return;
   }
-  if (file.meta.sha256 && hash.digest("hex") !== file.meta.sha256.toLowerCase()) {
+  if (file.meta.sha256 && digest !== file.meta.sha256.toLowerCase()) {
     file.failed = true;
+    if (staged) await rm(staged, { force: true }).catch(() => undefined);
     await options.onSessionFailed?.(sessionId, protocolStatusMessage(422));
     respondJson(res, 422, { message: "Checksum mismatch (sha256)" });
     return;
@@ -397,18 +447,17 @@ async function upload(
   let savedPath = "";
   let catalogPath = file.meta.fileName;
   let incoming: IncomingFile | null = null;
-  if (destination) {
+  if (destination && staged) {
     try {
       const relative = sanitizeRelative(file.meta.fileName);
       catalogPath = joinCatalogPath(destination.os, destination.catalogRoot, relative);
       savedPath = localTarget(destination.writeRoot, relative);
-      await mkdir(path.dirname(savedPath), { recursive: true });
-      const partial = `${savedPath}.partial`;
-      await writeFileBuffer(partial, bytes);
-      await rename(partial, savedPath);
+      if (isProtectedVolume(savedPath)) throw new Error("Диск Z: не используется.");
+      await publishStaged(staged, savedPath);
+      staged = null;
       incoming = {
         fileName: relative,
-        size: bytes.length,
+        size: received,
         savedPath,
         catalogPath,
         os: destination.os,
@@ -417,9 +466,11 @@ async function upload(
         hostId: destination.hostId,
         sessionId,
         fileId,
+        sha256: digest,
       };
     } catch (error) {
       file.failed = true;
+      if (staged) await rm(staged, { force: true }).catch(() => undefined);
       await options.onSessionFailed?.(sessionId, error instanceof Error ? error.message : "Не удалось записать файл.");
       respondJson(res, 500, { message: "Unknown error by receiver" });
       return;
@@ -431,7 +482,7 @@ async function upload(
       await options.onFileAccepted(incoming);
     } catch (error) {
       file.failed = true;
-      await rm(savedPath, { force: true }).catch(() => undefined);
+      if (savedPath) await rm(savedPath, { force: true }).catch(() => undefined);
       await options.onSessionFailed?.(sessionId, error instanceof Error ? error.message : "Индекс не принял файл.");
       respondJson(res, 500, { message: "Unknown error by receiver" });
       return;
@@ -439,7 +490,7 @@ async function upload(
   }
 
   file.done = true;
-  state.uploads.push({ sessionId, fileId, token, bytes, status: 200 });
+  state.uploads.push({ sessionId, fileId, token, bytes, status: 200, sha256: digest });
   state.completedUploads += 1;
   res.writeHead(200);
   res.end();
@@ -489,15 +540,44 @@ function readBody(req: http.IncomingMessage, limit: number): Promise<Buffer> {
   });
 }
 
-async function writeFileBuffer(file: string, bytes: Buffer): Promise<void> {
-  await new Promise<void>((resolve, reject) => {
-    const stream = createWriteStream(file, { mode: 0o600 });
-    stream.on("error", reject);
-    stream.on("finish", () => resolve());
-    stream.end(bytes);
+async function streamInto(
+  req: http.IncomingMessage,
+  file: string,
+  session: Session,
+  onChunk: (chunk: Buffer) => void,
+): Promise<void> {
+  let passed = 0;
+  const hasher = new Transform({
+    transform(chunk, _encoding, callback) {
+      try {
+        if (session.cancelled) {
+          callback(new Error("cancelled"));
+          return;
+        }
+        const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+        onChunk(buffer);
+        passed += buffer.length;
+        callback(null, buffer);
+      } catch (error) {
+        callback(error instanceof Error ? error : new Error("too large"));
+      }
+    },
   });
+  await pipeline(req, hasher, createWriteStream(file, { mode: 0o600 }));
   const written = await stat(file);
-  if (written.size !== bytes.length) throw new Error("Файл записан не полностью.");
+  if (written.size !== passed) throw new Error("Файл записан не полностью.");
+}
+
+/** Move our staging file into the inbox. Only the staging file is removed. */
+async function publishStaged(staged: string, savedPath: string): Promise<void> {
+  await mkdir(path.dirname(savedPath), { recursive: true });
+  try {
+    await rename(staged, savedPath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EXDEV") throw error;
+    await copyFile(staged, savedPath);
+    await rm(staged, { force: true });
+  }
 }
 
 function localTarget(root: string, relative: string): string {

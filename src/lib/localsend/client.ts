@@ -4,6 +4,7 @@ import { stat } from "node:fs/promises";
 import http from "node:http";
 import https from "node:https";
 import type { Socket } from "node:net";
+import type { Readable } from "node:stream";
 import tls from "node:tls";
 
 import {
@@ -46,6 +47,8 @@ export interface TransferFile {
   fileType: string;
   sha256?: string | null;
   path: string;
+  /** When set, bytes are read from the Mac or PC agent instead of `path`. */
+  open?: () => Promise<Readable>;
 }
 
 export type TransferResult =
@@ -61,6 +64,8 @@ export async function protocolRequest(options: {
   path: string;
   json?: unknown;
   filePath?: string;
+  open?: () => Promise<Readable>;
+  contentLength?: number;
   signal?: AbortSignal;
   /** First contact may learn a certificate. Later sends must pass the pinned fingerprint. */
   allowUnpinned?: boolean;
@@ -68,7 +73,9 @@ export async function protocolRequest(options: {
   timeoutMs?: number;
 }): Promise<ProtocolResponse> {
   const body = options.json === undefined ? null : Buffer.from(JSON.stringify(options.json));
-  const fileSize = options.filePath ? (await stat(options.filePath)).size : null;
+  const fileSize =
+    options.contentLength ?? (options.filePath ? (await stat(options.filePath)).size : null);
+  const uploadStream = options.open ? await options.open() : options.filePath ? createReadStream(options.filePath) : null;
   const fingerprint = await new Promise<{ status: number; body: Buffer; fingerprint: string | null }>((resolve, reject) => {
     const headers: Record<string, string> = {};
     if (body) {
@@ -139,7 +146,7 @@ export async function protocolRequest(options: {
       }
     });
 
-    const timeout = options.timeoutMs ?? (options.filePath ? 0 : 8000);
+    const timeout = options.timeoutMs ?? (options.filePath || options.open ? 0 : 8000);
     if (timeout > 0) {
       req.setTimeout(timeout, () => {
         req.destroy(new ProtocolError("Таймаут LocalSend. Устройство в сети не ответило."));
@@ -161,8 +168,8 @@ export async function protocolRequest(options: {
       else fail(error instanceof ProtocolError ? error : new ProtocolError(error.message));
     });
 
-    if (options.filePath) {
-      const stream = createReadStream(options.filePath);
+    if (uploadStream) {
+      const stream = uploadStream;
       let sent = 0;
       stream.on("data", (chunk: string | Buffer) => {
         const buffer = typeof chunk === "string" ? Buffer.from(chunk) : chunk;
@@ -171,8 +178,14 @@ export async function protocolRequest(options: {
         if (!req.write(buffer)) stream.pause();
       });
       req.on("drain", () => stream.resume());
-      stream.on("end", () => req.end());
-      stream.on("error", (error) => {
+      stream.on("end", () => {
+        if (fileSize !== null && sent !== fileSize) {
+          req.destroy(new ProtocolError(`Размер изменился во время отправки: ушло ${sent}, ожидалось ${fileSize}.`));
+          return;
+        }
+        req.end();
+      });
+      stream.on("error", (error: Error) => {
         req.destroy(error);
       });
       return;
@@ -339,7 +352,9 @@ export async function transferToPeer(options: {
           fileId: file.id,
           token: tokens[file.id],
         }).toString()}`,
-        filePath: file.path,
+        filePath: file.open ? undefined : file.path,
+        open: file.open,
+        contentLength: file.size,
         signal: options.signal,
         timeoutMs: 0,
         onProgress: (sent) => {
@@ -365,14 +380,20 @@ export async function transferToPeer(options: {
 }
 
 export async function sha256File(filePath: string): Promise<string> {
+  const hashed = await sha256Stream(() => Promise.resolve(createReadStream(filePath)));
+  return hashed.sha256;
+}
+
+export async function sha256Stream(open: () => Promise<Readable>): Promise<{ sha256: string; size: number }> {
   const hash = createHash("sha256");
-  await new Promise<void>((resolve, reject) => {
-    const stream = createReadStream(filePath);
-    stream.on("data", (chunk) => hash.update(chunk));
-    stream.on("end", () => resolve());
-    stream.on("error", reject);
-  });
-  return hash.digest("hex");
+  const stream = await open();
+  let size = 0;
+  for await (const chunk of stream) {
+    const buffer = typeof chunk === "string" ? Buffer.from(chunk) : chunk;
+    hash.update(buffer);
+    size += buffer.length;
+  }
+  return { sha256: hash.digest("hex"), size };
 }
 
 function certificateFingerprint(socket: tls.TLSSocket): string {
