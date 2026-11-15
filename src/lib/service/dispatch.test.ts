@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, expect, it } from "vitest";
 
+const handbrake = spawnSync("HandBrakeCLI", ["--version"], { encoding: "utf8" }).status === 0;
+
 const root = process.cwd();
 const node = process.execPath;
 const dirs: string[] = [];
@@ -19,7 +21,7 @@ afterEach(async () => {
   }));
 });
 
-it("lets one service verify a game copy and an encode without a manual work command", async () => {
+it.skipIf(!handbrake)("lets one service verify a game copy and an encode without a manual work command", async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "sklad-dispatch-"));
   dirs.push(dir);
   const pool = path.join(dir, "pool");

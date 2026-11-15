@@ -8,6 +8,8 @@ import { afterEach, expect, it } from "vitest";
 import { enqueueEncode } from "@/lib/transcode/encode-worker";
 import { startEncodeHub } from "@/lib/encode-remote/hub";
 
+const handbrake = spawnSync("HandBrakeCLI", ["--version"], { encoding: "utf8" }).status === 0;
+
 const root = process.cwd();
 const node = process.execPath;
 const dirs: string[] = [];
@@ -18,7 +20,7 @@ afterEach(async () => {
   await Promise.all(dirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
 });
 
-it("encodes two videos on two workers with separate directories and no shared queue file", async () => {
+it.skipIf(!handbrake)("encodes two videos on two workers with separate directories and no shared queue file", async () => {
   const coord = await scratch("coord");
   const workerA = await scratch("worker-a");
   const workerB = await scratch("worker-b");
@@ -65,7 +67,7 @@ it("encodes two videos on two workers with separate directories and no shared qu
   expect((await stat(blue)).isFile()).toBe(true);
 }, 90_000);
 
-it("does not verify or delete the source when the worker is killed mid-job", async () => {
+it.skipIf(!handbrake)("does not verify or delete the source when the worker is killed mid-job", async () => {
   const coord = await scratch("drop");
   const worker = await scratch("drop-worker");
   const token = randomBytes(16).toString("hex");
@@ -106,6 +108,12 @@ it("rejects anonymous calls, bad hashes, expired leases, unsupported codecs, arb
   expect((await fetch(base + "/v1/jobs/../../etc/passwd/input", { headers: { authorization: `Bearer ${token}` } })).status).toBe(404);
   await expect(enqueueEncode({ source: "E:\\films\\a.mp4", destination: path.join(dir, "out.mp4"), codec: "av1", allowSoftware: true, directory: dir })).rejects.toThrow(/E и Z/);
   await expect(enqueueEncode({ source: path.join(dir, "in.mp4"), destination: "Z:\\out.mp4", codec: "av1", allowSoftware: true, directory: dir })).rejects.toThrow(/E и Z/);
+  if (!handbrake) {
+    await hub.close();
+    if (previous === undefined) delete process.env.SKLAD_LEASE_MS;
+    else process.env.SKLAD_LEASE_MS = previous;
+    return;
+  }
   const source = await clip(dir, "green");
   const queued = await enqueueEncode({ source, destination: path.join(dir, "sec-out.mp4"), codec: "av1", allowSoftware: true, directory: dir });
   expect(queued.ok).toBe(true);

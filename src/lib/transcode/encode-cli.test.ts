@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, expect, it } from "vitest";
 
+const handbrake = spawnSync("HandBrakeCLI", ["--version"], { encoding: "utf8" }).status === 0;
+
 const root = process.cwd();
 const node = process.execPath;
 const dirs: string[] = [];
@@ -22,7 +24,24 @@ function run(dir: string, args: string[], extra: Record<string, string> = {}): {
   return { status: result.status ?? 1, json: JSON.parse(line) as Record<string, unknown>, stdout: result.stdout || "" };
 }
 
-it("probes the real HandBrakeCLI list and does not claim PC, Mac, or hardware AV1", async () => {
+it("reports a missing HandBrakeCLI without encoding", async () => {
+  const dir = await scratch();
+  const missing = run(dir, ["encode", "probe"], { SKLAD_HANDBRAKE: "/no/such/HandBrakeCLI" });
+  expect(missing.status).toBe(3);
+  expect(missing.json.present).toBe(false);
+});
+
+it("rejects E: and Z: before HandBrake starts", async () => {
+  const dir = await scratch();
+  const forbidden = run(dir, ["encode", "--source", "E:\\films\\a.mkv", "--dest", path.join(dir, "no.mp4"), "--codec", "av1"]);
+  expect(forbidden.status).not.toBe(0);
+  expect(String(forbidden.json.error)).toMatch(/E и Z/);
+  const zee = run(dir, ["encode", "--source", path.join(dir, "a.mkv"), "--dest", "Z:\\out.mp4", "--codec", "av1"]);
+  expect(zee.status).not.toBe(0);
+  expect(String(zee.json.error)).toMatch(/E и Z/);
+});
+
+it.skipIf(!handbrake)("probes the real HandBrakeCLI list and does not claim PC, Mac, or hardware AV1", async () => {
   const dir = await scratch();
   const probe = run(dir, ["encode", "probe"]);
   expect(probe.status).toBe(0);
@@ -45,7 +64,7 @@ it("probes the real HandBrakeCLI list and does not claim PC, Mac, or hardware AV
   expect(missing.json.present).toBe(false);
 });
 
-it("encodes a tiny fixture to AV1, verifies it, and does not delete a source outside the owned temp dir", async () => {
+it.skipIf(!handbrake)("encodes a tiny fixture to AV1, verifies it, and does not delete a source outside the owned temp dir", async () => {
   const dir = await scratch();
   const source = path.join(dir, "outside.mp4");
   const dest = path.join(dir, "out", "clip.mp4");
@@ -68,7 +87,7 @@ it("encodes a tiny fixture to AV1, verifies it, and does not delete a source out
   expect((await stat(dest)).size).toBe(output.size);
 });
 
-it("removes only an owned temporary source after a smaller verified output, and keeps it for a torrent or a failed check", async () => {
+it.skipIf(!handbrake)("removes only an owned temporary source after a smaller verified output, and keeps it for a torrent or a failed check", async () => {
   const dir = await scratch();
   const owned = path.join(dir, "encode-owned");
   await (await import("node:fs/promises")).mkdir(owned, { recursive: true });
@@ -104,7 +123,7 @@ it("removes only an owned temporary source after a smaller verified output, and 
   expect((await stat(failedSource)).isFile()).toBe(true);
 });
 
-it("refuses AV1 when hardware is required and this Linux build has none", async () => {
+it.skipIf(!handbrake)("refuses AV1 when hardware is required and this Linux build has none", async () => {
   const dir = await scratch();
   const source = path.join(dir, "in.mp4");
   const dest = path.join(dir, "no.mp4");
@@ -117,7 +136,7 @@ it("refuses AV1 when hardware is required and this Linux build has none", async 
   expect(JSON.parse(jobs).jobs).toEqual([]);
 });
 
-it("lets two Linux worker processes encode two videos without sharing an output", async () => {
+it.skipIf(!handbrake)("lets two Linux worker processes encode two videos without sharing an output", async () => {
   const dir = await scratch();
   const first = path.join(dir, "a.mp4");
   const second = path.join(dir, "b.mp4");
@@ -149,7 +168,7 @@ it("lets two Linux worker processes encode two videos without sharing an output"
   expect(jobs.jobs.every((job) => job.state === "done" && job.verified)).toBe(true);
 });
 
-it("does not publish a destination after a crash, cancel, or a forbidden Windows path", async () => {
+it.skipIf(!handbrake)("does not publish a destination after a crash, cancel, or a forbidden Windows path", async () => {
   const dir = await scratch();
   const source = path.join(dir, "in.mp4");
   const dest = path.join(dir, "out.mp4");
