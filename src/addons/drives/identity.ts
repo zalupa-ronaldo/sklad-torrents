@@ -29,8 +29,11 @@ export function identityKey(serial: string | null | undefined, volumeUuid: strin
 }
 
 export function stableDiskId(serial: string, volumeUuid: string): string {
-  const key = identityKey(serial, volumeUuid);
-  if (!key) return `disk-${randomUUID()}`;
+  const uuidNorm = normalizeUuid(volumeUuid);
+  if (!uuidNorm) return `disk-${randomUUID()}`;
+  // Serial keeps the historical Windows id. A volume that has only a UUID still gets one stable id.
+  const serialNorm = normalizeSerial(serial);
+  const key = serialNorm ? `${serialNorm}|${uuidNorm}` : `uuid|${uuidNorm}`;
   const hash = createHash("sha256").update(key).digest("hex").slice(0, 20);
   return `disk-${hash}`;
 }

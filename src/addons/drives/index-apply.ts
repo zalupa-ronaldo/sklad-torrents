@@ -70,6 +70,10 @@ export function applyIndexUpdate(input: ApplyIndexInput): { files: IndexedFile[]
     return { files: input.previous, scan: base, applied: "kept" };
   }
   if (input.update.files) {
+    // A finished empty list is not a reason to forget a catalog that already has files.
+    if (input.update.files.length === 0 && input.previous.length > 0 && input.update.recordCount !== 0) {
+      return { files: input.previous, scan: { ...base, status: "complete", progress: 1 }, applied: "kept" };
+    }
     return {
       files: tag(input.update.files, input),
       scan: { ...base, status: "complete", progress: 1 },

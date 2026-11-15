@@ -1,6 +1,8 @@
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
+import { assertLetterAllowed } from "../../../src/addons/drives/volume-guard.ts";
+
 /**
  * Raw NTFS reader. DeviceIoControl runs inside usn.ps1 on Windows only.
  * Vitest must not import this module: the throw below fires before any volume is opened.
@@ -46,7 +48,9 @@ function driveLetter(volume: string): string {
   }
   const match = volume.trim().match(/^(?:\\\\\.[\\/])?([A-Za-z]):\\?$/);
   if (!match?.[1]) throw new Error("Ожидалась буква тома NTFS, например D:.");
-  return match[1].toUpperCase();
+  const letter = match[1].toUpperCase();
+  assertLetterAllowed(letter);
+  return letter;
 }
 
 function decodeRecords(output: string): Buffer {

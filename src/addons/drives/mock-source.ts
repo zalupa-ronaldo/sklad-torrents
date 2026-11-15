@@ -4,12 +4,13 @@ import type { DiskRecord, HostObservation, IndexPayload, LibraryRule, RawIndexed
 
 export { MOCK_ARCHIVE, MOCK_BACKUP, MOCK_GAMES, MOCK_IDS, MOCK_VAULT };
 
-const FILE = (relativePath: string, size: number): RawIndexedFile => ({
+const FILE = (relativePath: string, size: number, extra?: Pick<RawIndexedFile, "onDisk" | "compression">): RawIndexedFile => ({
   relativePath,
   name: relativePath.split("/").pop() ?? relativePath,
   kind: "file",
   size,
   mtimeMs: Date.parse("2026-04-01T00:00:00.000Z"),
+  ...extra,
 });
 
 const DIR = (relativePath: string): RawIndexedFile => ({
@@ -49,8 +50,8 @@ export function archiveFiles(): RawIndexedFile[] {
 export function gamesFiles(): RawIndexedFile[] {
   return [
     DIR("Games"),
-    FILE("Games/Control Ultimate Edition/Control_DX12.exe", 80_000_000),
-    FILE("Games/Control Ultimate Edition/data/pack0.pack", 8_000_000_000),
+    FILE("Games/Control Ultimate Edition/Control_DX12.exe", 80_000_000, { onDisk: 80_000_000 }),
+    FILE("Games/Control Ultimate Edition/data/pack0.pack", 8_000_000_000, { onDisk: 5_200_000_000, compression: "wof" }),
   ];
 }
 

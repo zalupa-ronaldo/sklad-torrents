@@ -1,4 +1,5 @@
 import { planIndexCommands, type PlanInput } from "@/addons/drives/commands";
+import { isNtfs } from "@/addons/drives/strategy";
 import type { IndexDelta, IndexPayload, RawIndexedFile } from "@/addons/drives/types";
 
 export interface IndexHandlers {
@@ -24,6 +25,18 @@ export async function executeIndexPlan(input: PlanInput, handlers: IndexHandlers
   const commands = planIndexCommands(input);
   const called: ExecuteResult["called"] = [];
   const strategy = commands.some((command) => command.op === "read-mft") ? "mft-usn" : "walk";
+  if (isNtfs(input.filesystem) && input.platform === "win32" && !input.elevated && !input.busy) {
+    return {
+      called,
+      payload: {
+        state: "error",
+        progress: 0,
+        strategy: "mft-usn",
+        message:
+          "NTFS читается только дампом MFT. Нет прав администратора, обход папок не запускался. Запустите drive-agent от администратора и повторите чтение MFT.",
+      },
+    };
+  }
   if (commands.some((command) => command.op === "pause")) {
     return {
       called,
@@ -46,7 +59,7 @@ export async function executeIndexPlan(input: PlanInput, handlers: IndexHandlers
             state: "error",
             progress: 0,
             strategy,
-            message: "Чтение MFT не завершилось. Прежний каталог не изменён.",
+            message: "Чтение MFT не завершилось. Обход папок не запускался. Прежний каталог не изменён.",
           },
         };
       }
@@ -62,27 +75,13 @@ export async function executeIndexPlan(input: PlanInput, handlers: IndexHandlers
       }
       return { called, payload: { state: "complete", progress: 1, strategy, files: tree.files } };
     } catch {
-      called.push("walk");
-      const walked = await handlers.walk();
-      if (!walked.complete) {
-        return {
-          called,
-          payload: {
-            state: "error",
-            progress: 0,
-            strategy: "walk",
-            message: "MFT недоступна, обход папок не завершился. Прежний каталог не изменён.",
-          },
-        };
-      }
       return {
         called,
         payload: {
-          state: "complete",
-          progress: 1,
-          strategy: "walk",
-          message: "MFT не прочиталась, выполнен обход папок.",
-          files: walked.files,
+          state: "error",
+          progress: 0,
+          strategy: "mft-usn",
+          message: "Чтение MFT не выполнилось. Обход папок не запускался. Прежний каталог не изменён. Повторите снимок MFT, когда том доступен.",
         },
       };
     }

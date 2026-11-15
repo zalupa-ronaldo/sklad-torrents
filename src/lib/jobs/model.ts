@@ -1,5 +1,5 @@
 export const JOB_KINDS = ["move", "copy", "index", "compact", "transcode"] as const;
-export const JOB_HOSTS = ["mac-local", "pc-agent"] as const;
+export const JOB_HOSTS = ["mac-local", "pc-agent", "linux-local"] as const;
 export const JOB_STATES = ["queued", "running", "paused", "done", "error"] as const;
 
 export type JobKind = (typeof JOB_KINDS)[number];

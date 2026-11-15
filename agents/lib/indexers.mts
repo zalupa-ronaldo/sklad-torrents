@@ -3,6 +3,7 @@ import { open } from "node:fs/promises";
 import { promisify } from "node:util";
 
 import { assertSpawnAllowed } from "../../src/addons/drives/commands.ts";
+import { assertLetterAllowed } from "../../src/addons/drives/volume-guard.ts";
 import { readNtfsVolume } from "../../src/addons/drives/ntfs-mft.ts";
 import { parseFsutilUsn } from "../../src/addons/drives/usn.ts";
 import type { IndexDelta } from "../../src/addons/drives/types.ts";
@@ -10,7 +11,7 @@ import type { IndexDelta } from "../../src/addons/drives/types.ts";
 const exec = promisify(execFile);
 
 export async function readNtfsLetter(letter: string): Promise<{ files: Awaited<ReturnType<typeof readNtfsVolume>>["files"]; complete: boolean }> {
-  if (!/^[A-Za-z]$/.test(letter)) throw new Error("Некорректная буква тома.");
+  assertLetterAllowed(letter);
   const handle = await open(`\\\\.\\${letter}:`, "r");
   try {
     return await readNtfsVolume(async (offset, length) => {
@@ -25,7 +26,7 @@ export async function readNtfsLetter(letter: string): Promise<{ files: Awaited<R
 }
 
 export async function readUsn(letter: string, start: string | null): Promise<{ delta: IndexDelta | null; nextUsn: string | null }> {
-  if (!/^[A-Za-z]$/.test(letter)) throw new Error("Некорректная буква тома.");
+  assertLetterAllowed(letter);
   const query = { bin: "fsutil", args: ["usn", "queryJournal", `${letter}:`] };
   assertSpawnAllowed(query);
   const queried = await exec(query.bin, query.args, { timeout: 15_000, windowsHide: true, maxBuffer: 1_000_000 });

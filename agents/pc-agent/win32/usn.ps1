@@ -4,6 +4,10 @@
 $ErrorActionPreference = "Stop"
 $letter = [string]$env:SKLAD_VOLUME
 if ($letter -notmatch '^[A-Z]$') { throw "SKLAD_VOLUME must be a drive letter." }
+foreach ($item in ([string]$env:SKLAD_EXCLUDE_LETTERS).ToUpper().Split(',')) {
+  $token = $item.Trim().TrimEnd(':')
+  if ($token -eq $letter) { throw "Том исключён до открытия устройства." }
+}
 $mode = [string]$env:SKLAD_MODE
 $startText = [string]$env:SKLAD_START_USN
 if ([string]::IsNullOrWhiteSpace($startText)) { $startText = "0" }

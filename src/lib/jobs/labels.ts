@@ -11,6 +11,7 @@ export const KIND_LABEL: Record<JobKind, string> = {
 export const HOST_LABEL: Record<JobHost, string> = {
   "mac-local": "Mac mini",
   "pc-agent": "Windows-ПК",
+  "linux-local": "Linux, эта машина",
 };
 
 export const STATE_LABEL: Record<JobState, string> = {

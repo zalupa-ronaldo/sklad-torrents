@@ -5,6 +5,16 @@ import { QbittorrentError } from "@/lib/qbittorrent/errors";
 const PAUSE_UNSUPPORTED = "Движок не умеет паузу";
 
 registerJobSource({
+  id: "sklad-queue",
+  async list() {
+    const { createJobStore } = await import("@/lib/jobs/engine");
+    const { dataDir } = await import("@/lib/qbittorrent/store");
+    const page = await createJobStore(dataDir()).list({ limit: 100 });
+    return page.jobs.map(engineSnapshot);
+  },
+});
+
+registerJobSource({
   id: "kernel-jobs",
   async list() {
     try {
@@ -41,6 +51,55 @@ export async function performKernelAction(id: string, action: "pause" | "resume"
   } catch (error) {
     throw new QbittorrentError("validation", error instanceof Error && error.message ? error.message : PAUSE_UNSUPPORTED);
   }
+}
+
+function engineSnapshot(job: {
+  id: string;
+  kind: string;
+  host: string;
+  state: string;
+  verified: boolean;
+  cancelled: boolean;
+  lastError: string | null;
+  updatedAt: string;
+  payload: { source: string; destination: string; diskId: string };
+  progress: { percent: number; processedBytes: number; totalBytes: number; speed: number; etaSeconds: number | null; currentFile: string };
+}): JobSnapshot {
+  const status: JobStatus = job.cancelled
+    ? "cancelled"
+    : job.state === "done"
+      ? "completed"
+      : job.state === "error"
+        ? "error"
+        : job.state === "paused"
+          ? "paused"
+          : job.state === "queued"
+            ? "queued"
+            : "running";
+  const kind: JobKind = job.kind === "transcode" ? "transcode" : job.kind === "compact" ? "compact" : job.kind === "index" ? "index" : "copy";
+  return {
+    id: job.id,
+    kind,
+    title: job.payload.diskId.startsWith("game:") ? "Подготовка игры" : kind,
+    status,
+    progress: Math.max(0, Math.min(1, job.progress.percent / 100)),
+    processedBytes: job.progress.processedBytes,
+    totalBytes: job.progress.totalBytes,
+    speed: status === "running" ? job.progress.speed : 0,
+    eta: job.progress.etaSeconds ?? 8_640_000,
+    currentFile: job.progress.currentFile || job.payload.source,
+    host: job.host,
+    diskLabel: null,
+    outputPath: job.payload.destination,
+    error: status === "error" ? job.lastError : null,
+    capabilities: {
+      pause: status === "queued" || status === "running",
+      resume: status === "paused",
+      cancel: status === "queued" || status === "running" || status === "paused",
+    },
+    pauseUnsupportedReason: null,
+    updatedAt: Date.parse(job.updatedAt) || Date.now(),
+  };
 }
 
 function kernelSnapshot(job: {

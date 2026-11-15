@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
 import { normalizeSerial, normalizeUuid } from "@/addons/drives/identity";
+import { ingestIsActive } from "@/addons/drives/shelf-ingest";
+import { indexFetchPlan } from "@/addons/drives/shelf-plan";
 import type { AgentEndpoint, DiskRecord, HostObservation, IndexPayload, RawIndexedFile } from "@/addons/drives/types";
 import { DriveError } from "@/addons/drives/types";
 
@@ -36,7 +38,15 @@ function assertHttpUrl(value: string): string {
   return url.toString().replace(/\/$/, "");
 }
 
-export async function pollAgent(agent: AgentEndpoint, known: readonly DiskRecord[] = []): Promise<HostObservation> {
+export interface DeferredSnapshot {
+  agent: AgentEndpoint;
+  serial: string;
+  volumeUuid: string;
+  revision: string;
+  recordCount: number;
+}
+
+export async function pollAgent(agent: AgentEndpoint, known: readonly DiskRecord[] = [], deferred: DeferredSnapshot[] = []): Promise<HostObservation> {
   const base = assertHttpUrl(agent.url);
   const response = await fetch(`${base}/v1/volumes?metadata=1`, {
     cache: "no-store",
@@ -49,15 +59,41 @@ export async function pollAgent(agent: AgentEndpoint, known: readonly DiskRecord
   // Hydrate only a changed, complete revision. Commit it only after every page arrived.
   for (const volume of body.volumes ?? []) {
     const index = volume.index;
-    const existing = known.find((disk) => normalizeSerial(disk.serial) === normalizeSerial(volume.serial ?? "") && normalizeUuid(disk.volumeUuid) === normalizeUuid(volume.volumeUuid ?? ""));
+    const uuidNorm = normalizeUuid(volume.volumeUuid ?? "");
+    const serialNorm = normalizeSerial(volume.serial ?? "");
+    const sameUuid = known.filter((disk) => disk.uuidNorm === uuidNorm);
+    const existing = sameUuid.find((disk) => serialNorm && disk.serialNorm === serialNorm) ?? sameUuid[0];
     // Compatibility with an already-running older Mac agent until its next restart.
     if (index?.files && !index.revision) index.revision = `legacy:${createHash("sha256").update(JSON.stringify(index.files)).digest("hex")}`;
-    if (index?.revision && existing?.indexRevision === index.revision) { delete index.files; delete index.delta; }
-    if (!index?.revision || index.state !== "complete" || index.files) continue;
-    const prior = known.find((disk) => normalizeSerial(disk.serial) === normalizeSerial(volume.serial ?? "") && normalizeUuid(disk.volumeUuid) === normalizeUuid(volume.volumeUuid ?? ""));
-    if (prior?.indexRevision === index.revision) continue;
-    // Bootstrap from the panel's exact existing tree, imported into this agent.
-    if (prior && !prior.indexRevision && index.revision === `restored:${prior.files.length}` && index.recordCount === prior.files.length) continue;
+    const plan = indexFetchPlan({
+      state: index?.state,
+      revision: index?.revision,
+      recordCount: index?.recordCount ?? (index?.files ? index.files.length : 0),
+      knownRevision: existing?.indexRevision,
+      pendingRevision: existing?.pendingRevision,
+      localRecords: localRecords(existing),
+      ingestActive: Boolean(index?.revision && ingestIsActive(String(volume.volumeUuid ?? ""), index.revision)),
+    });
+    if (plan === "none" || plan === "skip") {
+      if (index) { delete index.files; delete index.delta; }
+      continue;
+    }
+    const prior = existing;
+    if (prior && !prior.indexRevision && index?.revision === `restored:${prior.files.length}` && index.recordCount === prior.files.length) continue;
+    if (plan === "defer" && index?.revision) {
+      index.deferred = true;
+      delete index.files;
+      delete index.delta;
+      deferred.push({
+        agent,
+        serial: String(volume.serial ?? ""),
+        volumeUuid: String(volume.volumeUuid ?? ""),
+        revision: index.revision,
+        recordCount: index.recordCount ?? 0,
+      });
+      continue;
+    }
+    if (!index?.revision) continue;
     const files: RawIndexedFile[] = [];
     const expected = index.recordCount ?? 0;
     while (files.length < expected) {
@@ -92,6 +128,15 @@ export async function pollAgent(agent: AgentEndpoint, known: readonly DiskRecord
   };
 }
 
+function localRecords(disk?: DiskRecord): number {
+  if (!disk) return 0;
+  if (disk.files.length > 0) return disk.files.length;
+  if (disk.fileStore && ((disk.shardBytes ?? 0) > 0 || (disk.summary?.fileCount ?? 0) > 0)) {
+    return disk.summary?.fileCount || disk.reportedRecords || 1;
+  }
+  return 0;
+}
+
 function sanitizeIndex(index: IndexPayload | null | undefined): IndexPayload | null {
   if (!index || typeof index !== "object") return null;
   const state = index.state;
@@ -117,21 +162,24 @@ function isRawFile(value: unknown): value is RawIndexedFile {
 
 export async function pollAgents(agents: readonly AgentEndpoint[], known: readonly DiskRecord[] = []): Promise<{
   observations: HostObservation[];
-  errors: { hostName: string; message: string }[];
+  errors: { hostId?: string; hostName: string; message: string }[];
+  deferred: DeferredSnapshot[];
 }> {
   const observations: HostObservation[] = [];
-  const errors: { hostName: string; message: string }[] = [];
+  const errors: { hostId?: string; hostName: string; message: string }[] = [];
+  const deferred: DeferredSnapshot[] = [];
   await Promise.all(
     agents.map(async (agent) => {
       try {
-        observations.push(await pollAgent(agent, known));
+        observations.push(await pollAgent(agent, known, deferred));
       } catch (error) {
         errors.push({
+          hostId: agent.id,
           hostName: agent.name,
           message: error instanceof Error ? error.message : "Агент недоступен.",
         });
       }
     }),
   );
-  return { observations, errors };
+  return { observations, errors, deferred };
 }

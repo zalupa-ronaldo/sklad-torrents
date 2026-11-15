@@ -23,13 +23,25 @@ export interface ProgressPayload {
   jobs: JobSnapshot[];
   queues: DiskQueueView[];
   fetchedAt: number;
+  games: {
+    id: string;
+    name: string;
+    state: string;
+    online: boolean;
+    ready: boolean;
+    location: string;
+    compact: string;
+    compressed: boolean;
+  }[];
 }
 
 export async function getProgressPayload(now = Date.now()): Promise<ProgressPayload> {
   await registerLocalsendJobs();
   const tick = await tickScheduler();
   const jobs = await collectJobs(tick, now);
-  return { jobs, queues: tick.plan.queues, fetchedAt: now };
+  const { listGames, publicGame } = await import("@/lib/games/library");
+  const games = (await listGames()).map(publicGame);
+  return { jobs, queues: tick.plan.queues, fetchedAt: now, games };
 }
 
 async function registerLocalsendJobs(): Promise<void> {

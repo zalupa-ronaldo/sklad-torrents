@@ -35,7 +35,8 @@ const KNOWN: Record<string, string[]> = {
 
 export async function lookupBinary(name: string): Promise<string | null> {
   const base = name.replace(/\.exe$/i, "");
-  const candidates = [...(KNOWN[name] ?? []), ...(KNOWN[base] ?? [])];
+  const knownList = (key: string): string[] => (Object.hasOwn(KNOWN, key) ? KNOWN[key] ?? [] : []);
+  const candidates = [...knownList(name), ...knownList(base)];
   for (const candidate of candidates) {
     if (await canExecute(candidate)) return candidate;
   }

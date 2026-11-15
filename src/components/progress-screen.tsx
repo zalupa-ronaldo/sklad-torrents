@@ -99,6 +99,22 @@ export function ProgressScreen({ initial }: { initial: ProgressPayload }) {
       <div className="grid items-start gap-6 lg:grid-cols-[minmax(0,1fr)_22rem]">
         <section className="order-2 grid gap-3 lg:order-1">
           <FileEnqueue />
+          <h2 className="text-base font-semibold">Игры</h2>
+          {(data?.games.length ?? 0) === 0 ? (
+            <p className="text-sm text-muted-foreground">В общей библиотеке пока нет игр. Команда game register пишет сюда же.</p>
+          ) : (
+            <ul className="grid gap-2">
+              {data?.games.map((game) => (
+                <li key={game.id} className="rounded-lg border px-3 py-2 text-sm">
+                  <span className="font-medium">{game.name}</span>
+                  <span className="ml-2 text-muted-foreground">
+                    {game.online ? "на месте" : "offline"} · {game.ready ? "готова" : game.state}
+                    {game.compressed ? "" : " · не сжата"}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          )}
           <h2 className="text-base font-semibold">Операции</h2>
           {jobs.length === 0 ? (
             <div className="rounded-xl border border-dashed px-4 py-10">

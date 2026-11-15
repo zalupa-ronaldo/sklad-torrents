@@ -108,7 +108,7 @@ describe("disk identity", () => {
     expect(new Set(disks.map((disk) => disk.id)).size).toBe(2);
   });
 
-  it("does not merge a missing serial with the same UUID", () => {
+  it("keeps one stable id when the serial is missing and the UUID is the same", () => {
     let disks = reconcileCatalog(
       [],
       [host({ os: "darwin", volumes: [volume({ serial: "", volumeUuid: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee", filesystem: "APFS", mountPaths: ["/Volumes/one"] })] })],
@@ -122,8 +122,8 @@ describe("disk identity", () => {
       libs,
       "2026-03-03T00:00:00.000Z",
     );
-    expect(disks).toHaveLength(2);
-    expect(disks.every((disk) => disk.possibleClone)).toBe(true);
+    expect(disks).toHaveLength(1);
+    expect(disks[0]?.lastMountPath).toBe("/Volumes/two");
     expect(normalizeSerial("")).toBe("");
     expect(normalizeUuid("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee")).toBe(normalizeUuid("{AAAAAAAA-BBBB-4CCC-8DDD-EEEEEEEEEEEE}"));
   });
@@ -179,8 +179,9 @@ describe("shelf retention and search", () => {
     const game = vault.files.find((entry) => entry.relativePath.includes("ULUS10479"));
     expect(movie?.categories).toContain("media");
     expect(game?.categories).toContain("game");
-    expect(disks.find((disk) => disk.serial === MOCK_GAMES.serial)?.scan.strategy).toBe("walk");
+    expect(disks.find((disk) => disk.serial === MOCK_GAMES.serial)?.scan.strategy).toBe("mft-usn");
     expect(disks.find((disk) => disk.serial === MOCK_GAMES.serial)?.scan.message).toMatch(/администратор/);
+    expect(disks.find((disk) => disk.serial === MOCK_GAMES.serial)?.scan.message).toMatch(/не запуска/);
     expect(vault.scan.strategy).toBe("walk");
     expect(vault.scan.message).toMatch(/MFT не используется/);
     expect(disks.find((disk) => disk.serial === MOCK_BACKUP.serial)?.namedByUser).toBe(false);
@@ -268,7 +269,8 @@ describe("shelf retention and search", () => {
 describe("read-only indexer", () => {
   it("uses MFT/USN only for elevated Windows NTFS", () => {
     expect(selectIndexStrategy({ filesystem: "NTFS", platform: "win32", elevated: true }).strategy).toBe("mft-usn");
-    expect(selectIndexStrategy({ filesystem: "NTFS", platform: "win32", elevated: false }).strategy).toBe("walk");
+    expect(selectIndexStrategy({ filesystem: "NTFS", platform: "win32", elevated: false }).strategy).toBe("mft-usn");
+    expect(selectIndexStrategy({ filesystem: "NTFS", platform: "win32", elevated: false }).usesMft).toBe(true);
     expect(selectIndexStrategy({ filesystem: "APFS", platform: "darwin", elevated: true }).strategy).toBe("walk");
     expect(selectIndexStrategy({ filesystem: "APFS", platform: "win32", elevated: true }).strategy).toBe("walk");
     expect(selectIndexStrategy({ filesystem: "HFS+", platform: "darwin", elevated: true }).strategy).toBe("walk");
@@ -292,6 +294,8 @@ describe("read-only indexer", () => {
     }
     expect(plans[0].map((command) => command.op)).toEqual(["identify-volume", "stat-volume", "walk"]);
     expect(plans[1].map((command) => command.op)).toEqual(["identify-volume", "stat-volume", "read-mft", "read-usn"]);
+    expect(plans[2].map((command) => command.op)).toEqual(["identify-volume", "stat-volume", "read-mft"]);
+    expect(plans[2].some((command) => command.op === "walk")).toBe(false);
     expect(plans[4]).toEqual([{ op: "pause", reason: "disk-busy" }]);
     expect(() => assertSpawnAllowed({ bin: "format.com", args: ["E:"] })).toThrow();
     expect(() => assertSpawnAllowed({ bin: "fsutil", args: ["usn", "createJournal", "E:"] })).toThrow();
@@ -346,6 +350,23 @@ describe("read-only indexer", () => {
     );
     expect(failed.payload.state).toBe("error");
     expect(failed.payload.files).toBeUndefined();
+    calls.length = 0;
+    const mftFailed = await executeIndexPlan(
+      { filesystem: "NTFS", platform: "win32", elevated: true, busy: false, usnCheckpoint: false },
+      { ...handlers, readMft: async () => { calls.push("readMft"); throw new Error("том недоступен"); } },
+    );
+    expect(mftFailed.payload.state).toBe("error");
+    expect(mftFailed.payload.strategy).toBe("mft-usn");
+    expect(mftFailed.payload.message).toMatch(/Обход папок не запускался/);
+    expect(calls).toEqual(["readMft"]);
+    const blocked = await executeIndexPlan(
+      { filesystem: "NTFS", platform: "win32", elevated: false, busy: false, usnCheckpoint: false },
+      handlers,
+    );
+    expect(blocked.called).toEqual([]);
+    expect(blocked.payload.state).toBe("error");
+    expect(blocked.payload.message).toMatch(/администратора/);
+    expect(calls).toEqual(["readMft"]);
   });
 
   it("keeps indexer sources free of destructive commands", () => {
@@ -462,6 +483,45 @@ Volume Free Space:         1.2 TB (1200000000000 Bytes)
     });
     expect(read.complete).toBe(true);
     expect(read.files.some((entry) => entry.relativePath === "Cinema/movie.mkv")).toBe(true);
+    const sized = filesFromRecords(
+      [
+        makeRecord({ parent: 5, name: "movie.mkv", size: 0, data: { size: 5_000, allocated: 8_192 } }),
+        makeRecord({ parent: 5, name: "note.txt", size: 99, data: { size: 4, allocated: 4, resident: true } }),
+        makeRecord({ parent: 5, name: "sparse.bin", size: 0 }),
+        makeRecord({ parent: 5, name: "big.mkv", size: 0 }),
+        makeRecord({ name: "", base: 3, data: { size: 9_000, allocated: 12_288 } }),
+      ],
+      1024,
+      512,
+    );
+    expect(sized.find((entry) => entry.name === "movie.mkv")).toMatchObject({ size: 5_000, allocated: 8_192 });
+    expect(sized.find((entry) => entry.name === "note.txt")).toMatchObject({ size: 4, allocated: 4 });
+    expect(sized.find((entry) => entry.name === "sparse.bin")?.size).toBeNull();
+    expect(sized.find((entry) => entry.name === "sparse.bin")?.allocated).toBeUndefined();
+    expect(sized.find((entry) => entry.name === "big.mkv")).toMatchObject({ size: 9_000, allocated: 12_288 });
+    const wof = filesFromRecords(
+      [
+        makeRecord({
+          parent: 5,
+          name: "pack.bin",
+          size: 0,
+          data: { size: 10_000, allocated: 10_000 },
+          wof: { size: 2_000, allocated: 4_096 },
+        }),
+        makeRecord({
+          parent: 5,
+          name: "tagged.bin",
+          size: 0,
+          data: { size: 10_000, allocated: 10_000 },
+          reparseWof: true,
+        }),
+      ],
+      1024,
+      512,
+    );
+    expect(wof.find((entry) => entry.name === "pack.bin")).toMatchObject({ size: 10_000, allocated: 10_000, onDisk: 2_000, compression: "wof" });
+    expect(wof.find((entry) => entry.name === "tagged.bin")?.onDisk).toBeUndefined();
+    expect(wof.find((entry) => entry.name === "tagged.bin")?.compression).toBe("wof");
     expect(decodeRunlist(Buffer.from([0x11, 0x04, 0x0a, 0x00]))).toEqual([{ lcn: 10, length: 4 }]);
     const delta = parseFsutilUsn("File name: Cinema/movie.mkv\nReason: 0x80000100\n");
     expect(delta.complete).toBe(true);
@@ -469,28 +529,85 @@ Volume Free Space:         1.2 TB (1200000000000 Bytes)
   });
 });
 
-function makeRecord(options: { parent: number; name: string; directory?: boolean; size?: number }): Buffer {
+function makeRecord(options: {
+  parent?: number;
+  name: string;
+  directory?: boolean;
+  size?: number;
+  /** Non-zero base file reference: this record is an extension of that MFT index. */
+  base?: number;
+  data?: { size: number; allocated: number; resident?: boolean };
+  wof?: { size: number; allocated: number };
+  reparseWof?: boolean;
+}): Buffer {
   const record = Buffer.alloc(1024);
   record.write("FILE", 0, "latin1");
   record.writeUInt16LE(0x30, 4);
   record.writeUInt16LE(1, 6);
   record.writeUInt16LE(0x38, 0x14);
   record.writeUInt16LE(options.directory ? 0x03 : 0x01, 0x16);
-  const name = Buffer.from(options.name, "utf16le");
-  const valueLength = 0x42 + name.length;
-  const padded = Math.ceil((0x18 + valueLength) / 8) * 8;
-  const offset = 0x38;
-  record.writeUInt32LE(0x30, offset);
-  record.writeUInt32LE(padded, offset + 4);
-  record.writeUInt32LE(valueLength, offset + 0x10);
-  record.writeUInt16LE(0x18, offset + 0x14);
-  const value = offset + 0x18;
-  record.writeUInt32LE(options.parent, value);
-  record.writeBigUInt64LE(BigInt(options.size ?? 0), value + 0x30);
-  record.writeUInt8(options.name.length, value + 0x40);
-  record.writeUInt8(1, value + 0x41);
-  name.copy(record, value + 0x42);
-  record.writeUInt32LE(0xffffffff, offset + padded);
+  if (options.base) record.writeUInt32LE(options.base, 0x20);
+  let cursor = 0x38;
+  if (options.name) {
+    const name = Buffer.from(options.name, "utf16le");
+    const valueLength = 0x42 + name.length;
+    const padded = Math.ceil((0x18 + valueLength) / 8) * 8;
+    record.writeUInt32LE(0x30, cursor);
+    record.writeUInt32LE(padded, cursor + 4);
+    record.writeUInt32LE(valueLength, cursor + 0x10);
+    record.writeUInt16LE(0x18, cursor + 0x14);
+    const value = cursor + 0x18;
+    record.writeUInt32LE(options.parent ?? 0, value);
+    record.writeBigUInt64LE(BigInt(options.size ?? 0), value + 0x30);
+    record.writeUInt8(options.name.length, value + 0x40);
+    record.writeUInt8(1, value + 0x41);
+    name.copy(record, value + 0x42);
+    cursor += padded;
+  }
+  if (options.data) {
+    if (options.data.resident) {
+      const length = 0x18;
+      record.writeUInt32LE(0x80, cursor);
+      record.writeUInt32LE(length, cursor + 4);
+      record.writeUInt8(0, cursor + 8);
+      record.writeUInt32LE(options.data.size, cursor + 0x10);
+      record.writeUInt16LE(0x18, cursor + 0x14);
+      cursor += length;
+    } else {
+      const length = 0x40;
+      record.writeUInt32LE(0x80, cursor);
+      record.writeUInt32LE(length, cursor + 4);
+      record.writeUInt8(1, cursor + 8);
+      record.writeBigUInt64LE(BigInt(options.data.allocated), cursor + 0x28);
+      record.writeBigUInt64LE(BigInt(options.data.size), cursor + 0x30);
+      cursor += length;
+    }
+  }
+  if (options.wof) {
+    const name = Buffer.from("WofCompressedData", "utf16le");
+    const nameOffset = 0x40;
+    const length = Math.ceil((nameOffset + name.length) / 8) * 8;
+    record.writeUInt32LE(0x80, cursor);
+    record.writeUInt32LE(length, cursor + 4);
+    record.writeUInt8(1, cursor + 8);
+    record.writeUInt8(name.length / 2, cursor + 9);
+    record.writeUInt16LE(nameOffset, cursor + 0x0a);
+    record.writeBigUInt64LE(BigInt(options.wof.allocated), cursor + 0x28);
+    record.writeBigUInt64LE(BigInt(options.wof.size), cursor + 0x30);
+    name.copy(record, cursor + nameOffset);
+    cursor += length;
+  }
+  if (options.reparseWof) {
+    const length = 0x18 + 8;
+    record.writeUInt32LE(0xc0, cursor);
+    record.writeUInt32LE(length, cursor + 4);
+    record.writeUInt8(0, cursor + 8);
+    record.writeUInt32LE(8, cursor + 0x10);
+    record.writeUInt16LE(0x18, cursor + 0x14);
+    record.writeUInt32LE(0x80000017, cursor + 0x18);
+    cursor += length;
+  }
+  record.writeUInt32LE(0xffffffff, cursor);
   return record;
 }
 

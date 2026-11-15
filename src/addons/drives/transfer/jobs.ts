@@ -9,7 +9,7 @@ import { displayDiskPickerLabel, displayDiskTitle, isBrowsableDisk, isRemovableD
 import { mountPathsOf, online } from "@/addons/drives/reconcile";
 import { getShelf } from "@/addons/drives/service";
 import { readAgentConfig, readCatalog } from "@/addons/drives/store";
-import { isZMount, safeRelativePath, uniqueFileName } from "@/addons/drives/transfer/paths";
+import { safeRelativePath, uniqueFileName } from "@/addons/drives/transfer/paths";
 import type { AgentEndpoint, DiskRecord, DiskView } from "@/addons/drives/types";
 import { DriveError } from "@/addons/drives/types";
 import { registerJobSource } from "@/lib/progress/sources";
@@ -111,7 +111,6 @@ function mountsOfView(disk: DiskView): string[] {
 
 function isCopyTarget(disk: DiskView): boolean {
   const mounts = mountsOfView(disk);
-  if (mounts.some((mount) => isZMount(mount))) return false;
   if (!disk.online) return false;
   if (disk.totalBytes <= 0 && disk.freeBytes <= 0) return false;
   if (!isBrowsableDisk(disk)) return false;
@@ -153,7 +152,6 @@ export async function listDestinations(sourceDiskId?: string | null): Promise<Tr
   for (const disk of shelf.disks) {
     if (sourceDiskId && disk.id === sourceDiskId) continue;
     if (!disk.online) continue;
-    if (mountsOfView(disk).some((mount) => isZMount(mount))) continue;
     if (!isCopyTarget(disk)) continue;
     out.push({
       id: `disk:${disk.id}`,
@@ -196,8 +194,6 @@ export async function enqueueCopy(input: { diskId: string; path: string; destina
   const relative = safeRelativePath(input.path);
   if (!relative) throw new DriveError(400, "Некорректный путь файла.");
   const disk = await findDisk(input.diskId);
-  const mounts = [...mountPathsOf(disk), disk.lastMountPath];
-  if (mounts.some((mount) => isZMount(mount))) throw new DriveError(403, "Том Z недоступен.");
   if (!online(disk)) throw new DriveError(409, "Нужен подключённый диск.");
   const file = disk.files.find((item) => item.kind === "file" && safeRelativePath(item.relativePath) === relative);
   if (!file) throw new DriveError(404, "Файл не найден в снимке каталога.");
@@ -220,7 +216,7 @@ export async function enqueueCopy(input: { diskId: string; path: string; destina
     destinationLabel: destination.label,
     destPath: null,
     bytesDone: 0,
-    bytesTotal: file.size > 0 ? file.size : 0,
+    bytesTotal: file.size != null && file.size > 0 ? file.size : 0,
     speed: 0,
     sourceSha256: null,
     destSha256: null,
@@ -327,8 +323,6 @@ async function runCopyJob(id: string): Promise<void> {
     const destDiskId = job.destinationId.slice("disk:".length);
     const destDisk = await findDisk(destDiskId);
     if (!online(destDisk)) throw new DriveError(409, "Диск назначения офлайн.");
-    const destMounts = [...mountPathsOf(destDisk), destDisk.lastMountPath];
-    if (destMounts.some((mount) => isZMount(mount))) throw new DriveError(403, "Том Z недоступен.");
     const destAgent = await agentForDisk(destDisk);
     const base = relative.split("/").pop() || "file";
     let destRelative = base;
@@ -387,8 +381,6 @@ export async function openBrowserDownload(
   const relative = safeRelativePath(relativeRaw);
   if (!relative) throw new DriveError(400, "Некорректный путь файла.");
   const disk = await findDisk(diskId);
-  const mounts = [...mountPathsOf(disk), disk.lastMountPath];
-  if (mounts.some((mount) => isZMount(mount))) throw new DriveError(403, "Том Z недоступен.");
   if (!online(disk)) throw new DriveError(409, "Нужен подключённый диск.");
   const agent = await agentForDisk(disk);
   const sourceUrl = new URL(`${agent.url.replace(/\/$/, "")}/v1/file/content`);
@@ -406,7 +398,7 @@ export async function openBrowserDownload(
       label: disk.label,
       volumeName: disk.volumeName,
       lastMountPath: disk.lastMountPath,
-      mountPaths: mounts,
+      mountPaths: [...mountPathsOf(disk), disk.lastMountPath].filter(Boolean),
       totalBytes: disk.totalBytes,
       filesystem: disk.filesystem,
     }),
