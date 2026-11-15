@@ -6,6 +6,22 @@
 
 Прокси и VLESS не нужны. Панель ходит в Web UI qBittorrent и в агентов напрямую по домашней сети.
 
+## Одна команда
+
+Нужен уже установленный Node.js 22. Из корня репозитория:
+
+```bash
+bash scripts/one-command.sh
+```
+
+Та же команда в Ubuntu WSL ставит только пакет `qbittorrent-nox` и не собирает `node_modules` поверх диска Windows. На Windows, в PowerShell из того же корня, одна команда ставит зависимости панели и вызывает WSL:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\one-command.ps1
+```
+
+Диск `Z:` не читается. Пароли, прошивки и ключи команда не скачивает и в git не пишет. Проверка, запуск и откат — в [docs/ustanovka.md](docs/ustanovka.md).
+
 ## Запуск
 
 Нужен Node.js 22. Команды ниже — из корня репозитория, где лежит `package.json`.
