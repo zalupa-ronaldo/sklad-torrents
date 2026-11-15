@@ -1,5 +1,7 @@
 import path from "node:path";
 
+export { diskTouchesForbiddenZ, isForbiddenMount, isZMount } from "@/addons/drives/transfer/forbidden";
+
 /** Relative path only inside a volume. */
 export function safeRelativePath(raw: string): string | null {
   let value = String(raw || "").replace(/\\/g, "/").trim();
@@ -9,10 +11,6 @@ export function safeRelativePath(raw: string): string | null {
   const parts = value.split("/").filter((part) => part.length > 0);
   if (!parts.length || parts.some((part) => part === "." || part === "..")) return null;
   return parts.join("/");
-}
-
-export function isZMount(mount: string): boolean {
-  return /^z:\\/i.test(mount) || mount.toUpperCase() === "Z:";
 }
 
 export function uniqueFileName(dir: string, baseName: string, exists: (full: string) => boolean): string {

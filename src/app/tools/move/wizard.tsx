@@ -17,6 +17,11 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { api } from "@/lib/api-client";
 
+function touchesForbiddenDisk(value: string): boolean {
+  const text = value.trim();
+  return /^z:/i.test(text) || /^\\\\[.?]\\z:/i.test(text) || /^\/mnt\/z(\/|$)/i.test(text);
+}
+
 export function MoveWizard() {
   const router = useRouter();
   const query = readToolQuery(useSearchParams());
@@ -41,6 +46,10 @@ export function MoveWizard() {
   const sameDisk = Boolean(sourceVolume && destVolume && sourceVolume === destVolume);
 
   function review() {
+    if (touchesForbiddenDisk(sourcePath) || touchesForbiddenDisk(destinationPath)) {
+      setFormError("Диск Z: не используется.");
+      return;
+    }
     try {
       planMove({
         hostId,

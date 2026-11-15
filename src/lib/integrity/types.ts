@@ -1,3 +1,5 @@
+import type { Sha256State } from "@/lib/integrity/sha256-state";
+
 export const HASH_STATUSES = ["pending", "hashing", "match", "mismatch", "error", "recorded"] as const;
 
 export type HashStatus = (typeof HASH_STATUSES)[number];
@@ -22,8 +24,9 @@ export interface HashFileRecord {
 
 export interface HashCheckpoint {
   relativePath: string;
-  /** Next byte to persist. SHA-256 still covers the whole file. */
+  /** Next byte to read. Earlier bytes are inside `sha256`. */
   byteOffset: number;
+  sha256?: Sha256State | null;
 }
 
 export interface TorrentHashRecord {
@@ -76,6 +79,8 @@ export interface IntegrityJob {
   torrentHash: string;
   torrentName: string;
   rewritable: boolean;
+  /** Why the job is paused. Missing on older records. */
+  pauseCause?: "user" | "queue" | "restart" | null;
   createdAt: string;
   updatedAt: string;
 }

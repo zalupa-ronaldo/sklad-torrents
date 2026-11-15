@@ -132,8 +132,10 @@ describe("LocalSend jobs", () => {
     const done = await waitJob(first.job.id, ["done", "error"]);
     expect(done.state).toBe("done");
     expect(done.sessionId).toBeTruthy();
-    const bytes = await readFile(path.join(process.cwd(), "fixtures", "localsend", "sklad-note.txt"));
+    const sourcePath = path.join(process.cwd(), "fixtures", "localsend", "sklad-note.txt");
+    const bytes = await readFile(sourcePath);
     expect(server.uploads[0].bytes.equals(bytes)).toBe(true);
+    expect(Buffer.compare(await readFile(sourcePath), bytes)).toBe(0);
     expect(server.uploads[0].sessionId).toBe(done.sessionId);
     expect(server.uploads[0].token.length).toBeGreaterThan(8);
     expect(server.prepares[0].info.alias).toBe("Склад");
@@ -167,6 +169,22 @@ describe("LocalSend jobs", () => {
       expect(recovered?.state).toBe("error");
       expect(recovered?.state).not.toBe("done");
       expect(recovered?.error).toMatch(/перезапуск/i);
+      const { restoreLocalsendAfterRestart } = await import("@/lib/localsend/service");
+      const kept = path.join(dataDir, "keep.txt");
+      await writeFile(kept, "abc");
+      const { insertJob } = await import("@/lib/jobs/queue");
+      const send = await insertJob({
+        kind: "localsend.send",
+        idempotencyKey: "keep-restart",
+        title: "send",
+        state: "running",
+        payload: { files: [{ localPath: kept, sent: true, sha256: "abc" }] },
+      });
+      await recoverInterruptedJobs();
+      expect(await restoreLocalsendAfterRestart()).toBeGreaterThan(0);
+      const restored = await getJob(send.id);
+      expect(restored?.state).toBe("paused");
+      expect(await readFile(kept, "utf8")).toBe("abc");
     } finally {
       release();
       await whenJobsIdle();

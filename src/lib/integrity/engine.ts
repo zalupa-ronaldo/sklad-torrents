@@ -1,12 +1,14 @@
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 
 import { ACTIVE_JOB, type BackgroundJob } from "@/lib/jobs/types";
 import { mutateJobs, patchJob } from "@/lib/jobs/store";
 import { applyComparison, deletionDecision, filesDone, isHashed } from "@/lib/integrity/compare";
 import type { ByteReader } from "@/lib/integrity/hash";
+import { acquireCopySlot, currentCopyLoad, releaseCopySlot, resetCopySlotsForTests } from "@/lib/integrity/load";
 import { manifestDocument, manifestFilename } from "@/lib/integrity/manifest";
+import { createSha256, isSha256State, restoreSha256 } from "@/lib/integrity/sha256-state";
 import { mutateIntegrity, readIntegrity } from "@/lib/integrity/store";
-import type { HashFileRecord, HashSide, IntegrityJob, IntegrityKind } from "@/lib/integrity/types";
+import type { HashFileRecord, HashSide, IntegrityFile, IntegrityJob, IntegrityKind } from "@/lib/integrity/types";
 
 export const INTEGRITY_JOB_KIND = "sha256";
 
@@ -53,6 +55,7 @@ export function clearIntegrityRuntimeForTests(): void {
   running.clear();
   for (const controller of aborts.values()) controller.abort();
   aborts.clear();
+  resetCopySlotsForTests();
 }
 
 export async function enqueueIntegrity(input: EnqueueInput): Promise<IntegrityJob> {
@@ -97,8 +100,25 @@ export async function getIntegrityJob(id: string): Promise<IntegrityJob | null> 
 }
 
 export async function listIntegrityJobs(): Promise<IntegrityJob[]> {
+  await settleInterruptedIntegrity();
   const file = await readIntegrity();
   return [...file.jobs].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+}
+
+/** A crash leaves `running` on disk. The next process treats that as a pause at the checkpoint. */
+export async function settleInterruptedIntegrity(): Promise<void> {
+  const file = await readIntegrity();
+  if (!file.jobs.some((job) => job.state === "running" && !running.has(job.id))) return;
+  await mutateIntegrity((stored) => {
+    for (const job of stored.jobs) {
+      if (job.state !== "running" || running.has(job.id)) continue;
+      job.state = "paused";
+      job.pauseCause = "restart";
+      job.deleteAllowed = false;
+      job.deleteReason = "Пауза после перезапуска. Продолжение с сохранённого места, файлы не удалялись.";
+      touch(job);
+    }
+  });
 }
 
 export async function cancelIntegrity(id: string): Promise<IntegrityJob> {
@@ -116,6 +136,108 @@ export async function cancelIntegrity(id: string): Promise<IntegrityJob> {
   });
   if (!job) throw new Error("Задача хэша не найдена.");
   await mirror(job);
+  return job;
+}
+
+export async function pauseIntegrity(id: string, cause: "user" | "queue" = "user"): Promise<IntegrityJob> {
+  aborts.get(id)?.abort();
+  const job = await mutateIntegrity((file) => {
+    const current = file.jobs.find((item) => item.id === id);
+    if (!current) return null;
+    if (current.state === "done" || current.state === "cancelled" || current.state === "error") return current;
+    current.state = "paused";
+    current.pauseCause = cause;
+    current.deleteAllowed = false;
+    current.deleteReason =
+      cause === "queue"
+        ? "Очередь на паузе. Хэш сохранён с места остановки, файлы не удалялись."
+        : "На паузе. Хэш сохранён с места остановки, файлы не удалялись.";
+    touch(current);
+    return current;
+  });
+  if (!job) throw new Error("Задача хэша не найдена.");
+  await mirror(job);
+  return job;
+}
+
+export async function resumeIntegrity(id: string): Promise<IntegrityJob> {
+  const existing = await getIntegrityJob(id);
+  if (!existing) throw new Error("Задача хэша не найдена.");
+  if (existing.state !== "paused") throw new Error("Продолжить можно только задачу на паузе.");
+  if (!readersById.has(id)) {
+    return update(id, (job) => {
+      job.deleteReason = "Пауза сохранена. Читатель файлов подключится при продолжении, файлы не удалялись.";
+    });
+  }
+  await update(id, (job) => {
+    job.state = "queued";
+    job.pauseCause = null;
+    job.error = null;
+  });
+  return runJob(id);
+}
+
+export async function pauseIntegrityQueue(): Promise<void> {
+  const jobs = await listIntegrityJobs();
+  for (const job of jobs) {
+    if (job.state === "running" || job.state === "queued") await pauseIntegrity(job.id, "queue");
+  }
+}
+
+export async function resumeIntegrityQueue(): Promise<void> {
+  const jobs = await listIntegrityJobs();
+  for (const job of jobs) {
+    if (job.state === "paused" && job.pauseCause === "queue") await resumeIntegrity(job.id);
+  }
+}
+
+/** Store hashes that were already checked. Does not read disks and does not delete sources. */
+export async function recordVerifiedHashes(input: {
+  kind: IntegrityKind;
+  title: string;
+  comparable: boolean;
+  files: { relativePath: string; size: number; sha256: string; side: HashSide }[];
+}): Promise<IntegrityJob> {
+  const now = new Date().toISOString();
+  const files: HashFileRecord[] = input.files
+    .filter((file) => /^[0-9a-f]{64}$/i.test(file.sha256))
+    .map((file) => ({
+      relativePath: file.relativePath,
+      size: file.size,
+      sha256: file.sha256.toLowerCase(),
+      status: input.comparable ? "match" : "recorded",
+      bytesHashed: file.size,
+      updatedAt: now,
+      side: file.side,
+    }));
+  const bytes = files.reduce((sum, file) => sum + file.size, 0);
+  const job = blankJob({
+    id: `hash-${randomUUID()}`,
+    kind: input.kind,
+    title: input.title,
+    comparable: input.comparable,
+    transferDone: true,
+    rewritable: false,
+    sourceLabel: "",
+    destinationLabel: "",
+    torrentHostId: "",
+    torrentHash: "",
+    torrentName: "",
+    now,
+  });
+  job.state = "done";
+  job.files = files;
+  job.filesDone = files.length;
+  job.filesTotal = files.length;
+  job.bytesHashed = bytes;
+  job.bytesTotal = bytes;
+  job.percent = files.length ? 100 : 0;
+  job.deleteAllowed = false;
+  job.deleteReason = "Совпадение SHA-256 записано. Исходные файлы не удалялись.";
+  job.userConfirmed = false;
+  await mutateIntegrity((file) => {
+    file.jobs.push(job);
+  });
   return job;
 }
 
@@ -157,6 +279,15 @@ export async function continueIntegrity(
   attached: { source: ByteReader; destination?: ByteReader | null },
 ): Promise<IntegrityJob> {
   readersById.set(id, { source: attached.source, destination: attached.destination ?? null });
+  const existing = await getIntegrityJob(id);
+  if (!existing) throw new Error("Задача хэша не найдена.");
+  if (existing.state === "paused" || existing.state === "queued") {
+    await update(id, (job) => {
+      job.state = "queued";
+      job.pauseCause = null;
+      job.error = null;
+    });
+  }
   return runJob(id);
 }
 
@@ -215,6 +346,7 @@ async function runJob(id: string): Promise<IntegrityJob> {
   const started = Date.now();
   try {
     if (gate) await gate;
+    if (controller.signal.aborted) throw new IntegrityHalt();
     let job = await getIntegrityJob(id);
     if (!job) throw new Error("Задача хэша не найдена.");
     if (job.state === "cancelled" || job.state === "paused") return job;
@@ -223,11 +355,13 @@ async function runJob(id: string): Promise<IntegrityJob> {
       job = await fail(id, "Нет читателя файлов. Диск из этого процесса не открывался.");
       return job;
     }
+    const admitted = await acquireCopySlot(id, () => controller.signal.aborted);
+    if (!admitted) return (await getIntegrityJob(id)) ?? job;
     job = await update(id, (current) => {
-      if (current.state === "cancelled") return;
+      if (current.state === "cancelled" || current.state === "paused") return;
       current.state = "running";
     });
-    if (job.state === "cancelled") return job;
+    if (job.state === "cancelled" || job.state === "paused") return job;
     await ensureFileList(job, readers, controller.signal);
     await mergeDestination(id, readers, controller.signal);
     job = (await getIntegrityJob(id)) ?? job;
@@ -246,6 +380,7 @@ async function runJob(id: string): Promise<IntegrityJob> {
   } finally {
     running.delete(id);
     aborts.delete(id);
+    releaseCopySlot(id);
   }
 }
 
@@ -330,23 +465,43 @@ async function digestFile(
   const initial = await getIntegrityJob(id);
   const file = initial?.files[index];
   if (!file || isHashed(file)) return;
-  const hash = createHash("sha256");
-  let offset = 0;
+  const checkpoint = initial?.checkpoint;
+  const canResume =
+    checkpoint?.relativePath === file.relativePath &&
+    checkpoint.byteOffset > 0 &&
+    checkpoint.byteOffset < file.size &&
+    isSha256State(checkpoint.sha256) &&
+    checkpoint.sha256.bytes === checkpoint.byteOffset;
+  const hasher = canResume ? restoreSha256(checkpoint.sha256 as NonNullable<typeof checkpoint.sha256>) : createSha256();
+  let offset = canResume ? checkpoint.byteOffset : 0;
   while (offset < file.size) {
     if (signal.aborted) throw new IntegrityHalt();
+    const live = await getIntegrityJob(id);
+    if (!live || live.state === "cancelled" || live.state === "paused") throw new IntegrityHalt();
+    const load = await currentCopyLoad();
+    if (load.queuePaused) {
+      await pauseIntegrity(id, "queue");
+      throw new IntegrityHalt();
+    }
+    if (load.chunkDelayMs > 0) await delay(load.chunkDelayMs);
     const length = Math.min(CHUNK, file.size - offset);
     const chunk = await reader.read(file.relativePath, offset, length);
     if (chunk.byteLength === 0) break;
-    hash.update(chunk);
+    if (load.bytesPerSecond > 0) {
+      const wait = Math.min(200, (chunk.byteLength / load.bytesPerSecond) * 1000);
+      if (wait > 2) await delay(wait);
+    }
+    hasher.update(chunk);
     offset += chunk.byteLength;
+    const sha256 = hasher.exportState();
     await update(id, (job) => {
-      if (job.state === "cancelled") return;
+      if (job.state === "cancelled" || job.state === "paused") return;
       const target = job.files[index];
       if (!target || isHashed(target)) return;
       target.status = "hashing";
       target.bytesHashed = offset;
       target.updatedAt = new Date().toISOString();
-      job.checkpoint = { relativePath: target.relativePath, byteOffset: offset };
+      job.checkpoint = { relativePath: target.relativePath, byteOffset: offset, sha256 };
       job.currentFile = target.relativePath;
       refreshProgress(job, started);
     });
@@ -354,7 +509,7 @@ async function digestFile(
   if (offset !== file.size && file.size > 0) {
     throw new Error(`Прочитано ${offset} из ${file.size} байт: ${file.relativePath}`);
   }
-  const digest = hash.digest("hex");
+  const digest = hasher.digestHex();
   await update(id, (job) => {
     const target = job.files[index];
     if (!target) return;
@@ -368,38 +523,42 @@ async function digestFile(
 }
 
 async function finish(id: string): Promise<IntegrityJob> {
-  return update(id, (job) => {
-    if (job.state === "cancelled" || job.state === "paused") return;
-    applyComparison(job);
-    const decision = deletionDecision(job);
-    job.deleteAllowed = decision.deleteAllowed;
-    job.deleteReason = decision.reason;
-    job.filesDone = filesDone(job.files);
-    job.filesTotal = job.files.length;
-    job.percent = 100;
-    job.bytesHashed = job.bytesTotal;
-    job.speed = 0;
-    job.etaSeconds = 0;
-    job.checkpoint = null;
-    if (job.kind === "compact" && job.mismatchPaths.length > 0) job.state = "error";
-    else if (job.kind === "optical" && (job.mismatchPaths.length > 0 || job.files.some((file) => file.status === "error"))) {
-      job.state = "error";
-      job.discVerified = false;
-    } else if (job.files.some((file) => file.status === "error") && job.files.every((file) => file.status === "error" || !file.sha256)) {
-      job.state = "error";
-    } else job.state = "done";
-    if (job.kind === "optical" && job.state === "done" && job.mismatchPaths.length === 0 && job.files.some((file) => file.status === "match")) {
-      job.discVerified = true;
+  const job = await mutateIntegrity((file) => {
+    const current = file.jobs.find((item) => item.id === id);
+    if (!current) return null;
+    if (current.state === "cancelled" || current.state === "paused") return current;
+    applyComparison(current);
+    const decision = deletionDecision(current);
+    current.deleteAllowed = decision.deleteAllowed;
+    current.deleteReason = decision.reason;
+    current.filesDone = filesDone(current.files);
+    current.filesTotal = current.files.length;
+    current.percent = 100;
+    current.bytesHashed = current.bytesTotal;
+    current.speed = 0;
+    current.etaSeconds = 0;
+    current.checkpoint = null;
+    if (current.kind === "compact" && current.mismatchPaths.length > 0) current.state = "error";
+    else if (current.kind === "optical" && (current.mismatchPaths.length > 0 || current.files.some((item) => item.status === "error"))) {
+      current.state = "error";
+      current.discVerified = false;
+    } else if (current.files.some((item) => item.status === "error") && current.files.every((item) => item.status === "error" || !item.sha256)) {
+      current.state = "error";
+    } else current.state = "done";
+    if (current.kind === "optical" && current.state === "done" && current.mismatchPaths.length === 0 && current.files.some((item) => item.status === "match")) {
+      current.discVerified = true;
     }
-    touch(job);
-  }).then(async (job) => {
-    await rememberCatalog(job);
-    return job;
+    touch(current);
+    refreshProgress(current, Date.parse(current.createdAt) || Date.now());
+    rememberCatalog(file, current);
+    return current;
   });
+  if (!job) throw new Error("Задача хэша не найдена.");
+  await mirror(job);
+  return job;
 }
 
-async function rememberCatalog(job: IntegrityJob): Promise<void> {
-  await mutateIntegrity((file) => {
+function rememberCatalog(file: IntegrityFile, job: IntegrityJob): void {
     if (job.kind === "torrent" && job.torrentHash) {
       const files = job.files.filter((item) => item.side === "source" && item.sha256);
       const row = {
@@ -430,7 +589,6 @@ async function rememberCatalog(job: IntegrityJob): Promise<void> {
         });
       }
     }
-  });
 }
 
 async function fail(id: string, message: string): Promise<IntegrityJob> {
@@ -573,7 +731,16 @@ async function publishBackground(job: IntegrityJob, key: string): Promise<void> 
 }
 
 async function mirror(job: IntegrityJob): Promise<void> {
-  const status = job.state === "cancelled" ? "paused" : job.state === "running" ? "running" : job.state === "queued" ? "queued" : job.state === "done" ? "done" : "error";
+  const status =
+    job.state === "cancelled" || job.state === "paused"
+      ? "paused"
+      : job.state === "running"
+        ? "running"
+        : job.state === "queued"
+          ? "queued"
+          : job.state === "done"
+            ? "done"
+            : "error";
   await patchJob(job.id, {
     status,
     phase: phaseOf(job),
@@ -608,8 +775,13 @@ function readableError(error: unknown): string {
   return error instanceof Error && error.message ? error.message : "Не удалось посчитать SHA-256.";
 }
 
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 function phaseOf(job: IntegrityJob): string {
   if (job.state === "cancelled") return "Отменено. Уже посчитанные хэши сохранены, файлы не удалялись.";
+  if (job.state === "paused") return job.deleteReason || "На паузе. Продолжение с сохранённого места, файлы не удалялись.";
   if (job.state === "queued") return "В очереди. SHA-256 считается в фоне и не блокирует окно.";
   if (job.state === "error") return job.error || "Ошибка SHA-256. Файлы не удалялись.";
   if (job.state === "done" && job.mismatchPaths.length > 0) {

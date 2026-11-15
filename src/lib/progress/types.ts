@@ -35,6 +35,12 @@ export interface JobSnapshot {
   /** Shown when pause must stay hidden. Null when the engine can pause. */
   pauseUnsupportedReason: string | null;
   updatedAt: number;
+  /** Present for copy, hash, and LocalSend. False means the source stays. */
+  verified?: boolean;
+  sha256Match?: boolean | null;
+  deleteAllowed?: boolean;
+  sourceSha256?: string | null;
+  destSha256?: string | null;
 }
 
 export interface JobSource {

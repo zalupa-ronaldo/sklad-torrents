@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isZMount, safeRelativePath, uniqueFileName } from "@/addons/drives/transfer/paths";
+import { diskTouchesForbiddenZ, isForbiddenMount, isZMount, safeRelativePath, uniqueFileName } from "@/addons/drives/transfer/paths";
 import { displayDiskPickerLabel, displayDiskTitle, isRemovableDisk } from "@/addons/drives/inventory";
 
 describe("transfer paths", () => {
@@ -12,6 +12,15 @@ describe("transfer paths", () => {
   it("detects Z", () => {
     expect(isZMount("Z:\\")).toBe(true);
     expect(isZMount("S:\\")).toBe(false);
+    expect(isForbiddenMount("Z:")).toBe(true);
+    expect(isForbiddenMount("z:\\Games")).toBe(true);
+    expect(isForbiddenMount("\\\\.\\Z:")).toBe(true);
+    expect(isForbiddenMount("/mnt/z")).toBe(true);
+    expect(isForbiddenMount("/mnt/z/folder")).toBe(true);
+    expect(isForbiddenMount("S:\\")).toBe(false);
+    expect(isForbiddenMount("/mnt/zoo")).toBe(false);
+    expect(diskTouchesForbiddenZ({ lastMountPath: "Z:\\", mountPaths: ["S:\\"] })).toBe(true);
+    expect(diskTouchesForbiddenZ({ lastMountPath: "S:\\", mountPaths: ["S:\\"] })).toBe(false);
   });
   it("avoids clobber names", () => {
     const name = uniqueFileName("/tmp", "a.dmg", (full) => full.endsWith("/a.dmg"));

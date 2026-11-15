@@ -10,6 +10,7 @@ import {
   enqueueJob,
   getJob,
   insertJob,
+  listJobs,
   recoverInterruptedJobs,
   registerJobHandler,
   resumeQueue,
@@ -397,8 +398,27 @@ async function stopped(
   return true;
 }
 
+export async function restoreLocalsendAfterRestart(): Promise<number> {
+  const jobs = await listJobs();
+  let restored = 0;
+  for (const job of jobs) {
+    if (!job.kind.startsWith("localsend.")) continue;
+    if (job.state !== "error" || !/перезапуск/i.test(job.error || "")) continue;
+    await updateJob(job.id, {
+      state: "paused",
+      error: null,
+      finishedAt: null,
+      control: null,
+      note: "Пауза после перезапуска. Уже отправленные файлы не отправляются снова, исходные файлы на месте.",
+    });
+    restored += 1;
+  }
+  return restored;
+}
+
 async function boot(): Promise<void> {
   await recoverInterruptedJobs();
+  await restoreLocalsendAfterRestart();
   await loadManualDevices();
   const settings = await loadSettings();
   const destination = await resolveReceiveDestination(settings);
