@@ -1,4 +1,5 @@
 import { enqueueCompress, enqueueMove, enqueueTranscode } from "@/addons/media-games/service";
+import { writeEncodePolicy } from "@/lib/transcode/policy";
 
 import { json, readBody, toolsGuard } from "@/app/api/tools/guard";
 
@@ -9,6 +10,7 @@ export async function POST(request: Request) {
     const body = await readBody(request);
     const hostId = String(body.hostId || "");
     if (body.kind === "transcode") {
+      if (typeof body.replaceOriginal === "boolean") await writeEncodePolicy({ replaceOriginal: body.replaceOriginal });
       const job = await enqueueTranscode({
         hostId,
         inputPath: String(body.inputPath || ""),

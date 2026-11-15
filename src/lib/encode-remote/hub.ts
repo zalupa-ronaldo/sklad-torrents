@@ -13,6 +13,8 @@ import { dataDir } from "@/lib/qbittorrent/store";
 import { assignEncodeJobs, type EncodeCodec } from "@/lib/transcode/assign";
 import { resolveTool } from "@/lib/transcode/binaries";
 import { assertEncodePaths, containerFromPath, formatMatchesContainer } from "@/lib/transcode/encode-plan";
+import { chooseQueuedFile } from "@/lib/transcode/placement";
+import { admitMachine, DEFAULT_MACHINE_LIMIT } from "@/lib/transcode/workload";
 
 const CHUNK = 64 * 1024;
 
@@ -25,6 +27,8 @@ interface WorkerInfo {
   freeBytes: number;
   lastSeen: number;
   busy: number;
+  paused: boolean;
+  userBusy: boolean;
 }
 
 interface Lease {
@@ -36,6 +40,7 @@ interface Lease {
   sourceSha: string;
   received: number;
   codec: EncodeCodec;
+  local: boolean;
 }
 
 export async function startEncodeHub(input: { token: string; port?: number; bind?: string; directory?: string }): Promise<{ port: number; bound: string; close: () => Promise<void> }> {
@@ -79,7 +84,8 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: { token: s
       send(res, 400, { error: "Нужны id, role, encoders и slots." });
       return;
     }
-    ctx.workers.set(worker.id, { ...worker, lastSeen: Date.now(), busy: ctx.workers.get(worker.id)?.busy ?? 0 });
+    const previous = ctx.workers.get(worker.id);
+    ctx.workers.set(worker.id, { ...worker, lastSeen: Date.now(), busy: previous?.busy ?? 0, paused: previous?.paused ?? false, userBusy: previous?.userBusy ?? false });
     send(res, 200, { ok: true, id: worker.id });
     return;
   }
@@ -93,6 +99,9 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: { token: s
     }
     worker.lastSeen = Date.now();
     if (typeof body.freeBytes === "number") worker.freeBytes = body.freeBytes;
+    if (body.paused === true || body.paused === false) worker.paused = body.paused;
+    if (body.userBusy === true || body.userBusy === false) worker.userBusy = body.userBusy;
+    if (Number.isInteger(body.maxParallel) && Number(body.maxParallel) >= 1 && Number(body.maxParallel) <= 4) worker.slots = Number(body.maxParallel);
     send(res, 200, { ok: true });
     return;
   }
@@ -105,17 +114,31 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: { token: s
       return;
     }
     await expireLeases(ctx);
-    if (worker.busy >= worker.slots) {
-      send(res, 200, { job: null, reason: "Слот занят." });
+    const gate = admitMachine({ ...DEFAULT_MACHINE_LIMIT, maxParallel: worker.slots, paused: worker.paused, userBusy: worker.userBusy }, worker.busy);
+    if (!gate.admit) {
+      send(res, 200, { job: null, reason: gate.reason });
       return;
     }
     const store = createJobStore(ctx.directory);
     const queued = await store.list({ limit: 100 });
-    const open = queued.jobs.find((job) => job.kind === "transcode" && job.state === "queued" && fits(worker, job));
-    if (!open) {
+    const peers = [...ctx.workers.values()].filter((item) => item.id !== worker.id && Date.now() - item.lastSeen <= 5_000).map((item) => ({
+      role: item.role,
+      freeSlots: Math.max(0, item.slots - item.busy),
+      paused: item.paused,
+      userBusy: item.userBusy,
+    }));
+    const choice = chooseQueuedFile({
+      jobs: queued.jobs
+        .filter((job) => job.kind === "transcode" && job.state === "queued" && fits(worker, job))
+        .map((job) => ({ ...job, source: job.payload.source })),
+      workerRole: worker.role,
+      peers,
+    });
+    if (!choice) {
       send(res, 200, { job: null });
       return;
     }
+    const open = choice.job;
     const codec = codecOf(open.payload.handbrakeProfile);
     if (!codec) {
       send(res, 200, { job: null, reason: "Профиль не из настроенного пресета." });
@@ -146,6 +169,25 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: { token: s
       return;
     }
     claimedToken = claim.job.workerToken;
+    const place = choice;
+    const revision = (ctx.leases.get(open.id)?.revision ?? 0) + 1;
+    if (place.transport === "local") {
+      const lease: Lease = {
+        jobId: open.id,
+        workerId: worker.id,
+        token: claimedToken,
+        revision,
+        expiresAt: Date.now() + ctx.leaseMs,
+        sourceSha: "",
+        received: 0,
+        codec,
+        local: true,
+      };
+      ctx.leases.set(open.id, lease);
+      worker.busy += 1;
+      send(res, 200, { job: { jobId: open.id, lease: lease.token, revision, codec, container, ship: false, sourcePath: open.payload.source, bytes: 0, sourceSha256: "" } });
+      return;
+    }
     const info = await stat(open.payload.source);
     if (info.size <= 0 || info.size > 8 * 1024 * 1024 || worker.freeBytes < info.size * 3) {
       await store.fail(open.id, claimedToken, "Файл больше бюджета воркера или пустой.");
@@ -153,7 +195,6 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: { token: s
       return;
     }
     const sourceSha = await shaFile(open.payload.source);
-    const revision = (ctx.leases.get(open.id)?.revision ?? 0) + 1;
     const lease: Lease = {
       jobId: open.id,
       workerId: worker.id,
@@ -163,11 +204,12 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: { token: s
       sourceSha,
       received: 0,
       codec,
+      local: false,
     };
     ctx.leases.set(open.id, lease);
     worker.busy += 1;
     await mkdir(path.join(ctx.directory, "remote-incoming"), { recursive: true });
-    send(res, 200, { job: { jobId: open.id, lease: lease.token, revision, codec, container, bytes: info.size, sourceSha256: sourceSha } });
+    send(res, 200, { job: { jobId: open.id, lease: lease.token, revision, codec, container, ship: true, bytes: info.size, sourceSha256: sourceSha } });
     return;
   }
   const jobId = parts[2] || "";
@@ -248,8 +290,8 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: { token: s
       send(res, 409, { error: "Задание уже сдано. Второй результат не записывается.", verified: false });
       return;
     }
-    const currentSource = await shaFile(job.payload.source);
-    if (currentSource !== lease.sourceSha) {
+    const currentSource = lease.local ? (typeof body.sourceSha256 === "string" ? body.sourceSha256 : "") : await shaFile(job.payload.source);
+    if (!lease.local && currentSource !== lease.sourceSha) {
       await failJob(ctx, lease, "Источник изменился. Результат не принят.");
       send(res, 409, { error: "Источник изменился.", verified: false });
       return;
@@ -290,7 +332,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: { token: s
     const worker = ctx.workers.get(lease.workerId);
     if (worker) worker.busy = Math.max(0, worker.busy - 1);
     ctx.leases.delete(jobId);
-    send(res, 200, { verified: true, codec, outputSha256: outputShaDisk, sourceDeleted: false });
+    send(res, 200, { verified: true, codec, outputSha256: outputShaDisk, sourceSha256: currentSource, sourceDeleted: false });
     return;
   }
   if (req.method === "POST" && parts[3] === "fail") {
@@ -359,7 +401,7 @@ function fresh(workers: Map<string, WorkerInfo>, id: string): WorkerInfo | null 
   return worker;
 }
 
-function readWorker(body: Record<string, unknown>): Omit<WorkerInfo, "lastSeen" | "busy"> | null {
+function readWorker(body: Record<string, unknown>): Omit<WorkerInfo, "lastSeen" | "busy" | "paused" | "userBusy"> | null {
   const id = typeof body.id === "string" ? body.id : "";
   const role = body.role === "pc" || body.role === "mac" ? body.role : null;
   const encoders = Array.isArray(body.encoders) ? body.encoders.filter((item): item is string => typeof item === "string") : [];
