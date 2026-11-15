@@ -436,6 +436,8 @@ function toProgressSnapshot(job: BackgroundJob): JobSnapshot {
     diskLabel: payload.plan?.medium ?? null,
     outputPath: payload.outputPath,
     error: status === "paused" ? null : job.error,
+    sourceSha256: typeof job.payload.sourceSha256 === "string" ? job.payload.sourceSha256 : null,
+    deleteAllowed: false,
     capabilities: {
       pause: status === "running" || status === "queued" || status === "paused",
       resume: status === "running" || status === "queued" || status === "paused",

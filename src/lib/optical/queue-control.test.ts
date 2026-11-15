@@ -119,6 +119,28 @@ describe("optical queue control", () => {
     expect(await readFile(source, "utf8")).toBe("abc");
   });
 
+  it("pauses a burn from the shared progress action and keeps the source", async () => {
+    const source = path.join(dir, "booklet.pdf");
+    await writeFile(source, "abc");
+    const gate = deferred();
+    release = gate.resolve;
+    const runner = createMockRunner({ hold: gate.promise });
+    setRunnerForTests(runner);
+    setSourceReaderForTests(async () => new Uint8Array([97, 98, 99]));
+    const job = await enqueueOptical(burnInput());
+    await waitFor(() => runner.calls.length === 1);
+    const { performJobAction } = await import("@/lib/progress/jobs");
+    const notice = await performJobAction(`optical__${job.id}`, "pause");
+    expect(notice.notice).toMatch(/не удалялись/);
+    gate.resolve();
+    const paused = await waitForJob(job.id, "paused");
+    expect(paused.payload.pausedBy).toBe("user");
+    expect(await readFile(source, "utf8")).toBe("abc");
+    const burn = (await listRegisteredJobs()).find((item) => item.id === `optical__${job.id}`);
+    expect(burn?.deleteAllowed).toBe(false);
+    expect(burn?.sourceSha256).toMatch(/^[a-f0-9]{64}$/);
+  });
+
   it("rejects a forbidden volume before a job exists", async () => {
     setRunnerForTests(createMockRunner());
     const hidden: IndexedPath = { ...booklet, path: "Z:\\secret\\a.bin", name: "a.bin" };

@@ -35,6 +35,8 @@ function toSnapshot(job: BackgroundJob, now = Date.now()): JobSnapshot {
     diskLabel: job.mock ? "демо, не настоящий диск" : null,
     outputPath: typeof job.payload.isoPath === "string" ? job.payload.isoPath : null,
     error: status === "paused" ? null : job.error,
+    sourceSha256: typeof job.payload.sourceSha256 === "string" ? job.payload.sourceSha256 : null,
+    deleteAllowed: false,
     capabilities: { pause: open, resume: open, cancel: open },
     pauseUnsupportedReason: null,
     updatedAt: Date.parse(job.updatedAt) || now,
