@@ -10,6 +10,8 @@ import { registerJobSource } from "@/lib/progress/sources";
 import type { JobSnapshot, JobStatus } from "@/lib/progress/types";
 import { dataDir } from "@/lib/qbittorrent/store";
 import { getDashboard, getTorrentDetail } from "@/lib/qbittorrent/service";
+import { shouldSuspendRunning } from "@/lib/optical/admission";
+import { admissionFor, onOpticalQueueKick, opticalRunningCount } from "@/lib/optical/control";
 import { OpticalError } from "@/lib/optical/errors";
 import {
   BD_R_SL_TOTAL_SECTORS,
@@ -236,6 +238,8 @@ async function pumpDiscJobs(): Promise<void> {
   pumping = true;
   try {
     for (;;) {
+      const decision = await admissionFor(await opticalRunningCount());
+      if (!decision.start) return;
       const claimed = await mutateJobs((jobs) => {
         const next = jobs
           .filter((job) => job.kind === OPTICAL_JOB_KIND && job.status === "queued")
@@ -276,6 +280,12 @@ async function executeClaimed(job: BackgroundJob): Promise<void> {
   if (payload.mock) {
     await touch(job.id, { percent: 20, phase: "макет", mock: true, message: "Макет очереди: процесс DiscImageStudio не запускался." });
     if (control?.hold) await control.hold;
+    if (!(await stillRunning(job.id))) return;
+    const decision = await admissionFor(0);
+    if (shouldSuspendRunning(decision)) {
+      await pauseForLoad(job.id, decision.reason);
+      return;
+    }
     await finish(job.id, mockDoneMessage(payload.plan), true);
     return;
   }
@@ -312,6 +322,22 @@ async function executeClaimed(job: BackgroundJob): Promise<void> {
     throw new OpticalError("tool_not_found", `DiscImageStudio завершился с кодом ${result.code}. ${detail}`.trim());
   }
   await finish(job.id, exitZeroMessage(payload.plan, result.stdout), false);
+}
+
+async function stillRunning(id: string): Promise<boolean> {
+  const job = await getJob(id);
+  return job?.status === "running";
+}
+
+async function pauseForLoad(id: string, reason: "queue" | "disturb" | "schedule" | "parallel" | null): Promise<void> {
+  await mutateJobs((jobs) => {
+    const job = jobs.find((item) => item.id === id);
+    if (!job || job.status !== "running") return;
+    job.status = "paused";
+    job.claimedBy = null;
+    job.error = null;
+    job.payload = { ...job.payload, pausedBy: reason === "parallel" ? "queue" : reason };
+  });
 }
 
 async function touch(id: string, patch: { percent?: number; phase?: string; mock?: boolean; message?: string }): Promise<void> {
@@ -409,9 +435,13 @@ function toProgressSnapshot(job: BackgroundJob): JobSnapshot {
     host: platform === "win32" ? "Windows" : platform === "darwin" ? "macOS" : "Linux",
     diskLabel: payload.plan?.medium ?? null,
     outputPath: payload.outputPath,
-    error: job.error,
-    capabilities: { pause: false, resume: false, cancel: false },
-    pauseUnsupportedReason: "Эту сборку нельзя поставить на паузу.",
+    error: status === "paused" ? null : job.error,
+    capabilities: {
+      pause: status === "running" || status === "queued" || status === "paused",
+      resume: status === "running" || status === "queued" || status === "paused",
+      cancel: status === "running" || status === "queued" || status === "paused",
+    },
+    pauseUnsupportedReason: null,
     updatedAt: Date.parse(job.updatedAt) || Date.now(),
   };
 }
@@ -419,6 +449,10 @@ function toProgressSnapshot(job: BackgroundJob): JobSnapshot {
 registerJobSource({
   id: "disc-image-studio",
   list: async () => (await listOpticalJobs()).map(toProgressSnapshot),
+});
+
+onOpticalQueueKick(() => {
+  void pumpDiscJobs();
 });
 
 async function isExecutable(file: string): Promise<boolean> {

@@ -5,6 +5,7 @@ import { readCatalog } from "@/addons/drives/store";
 import type { DiskRecord } from "@/addons/drives/types";
 import { demoIndexedPaths } from "@/lib/optical/demo";
 import type { IndexedPath } from "@/lib/optical/media";
+import { isForbiddenVolumePath } from "@/lib/optical/paths";
 import { dataDir } from "@/lib/qbittorrent/store";
 
 const CANDIDATES = ["drive-catalog.json", "drive-manager.json", "catalog.json"];
@@ -42,7 +43,7 @@ export function normalizeCatalog(value: unknown): IndexedPath[] {
     if (!row || typeof row !== "object") continue;
     const item = row as Record<string, unknown>;
     const filePath = stringOf(item.path);
-    if (!filePath) continue;
+    if (!filePath || isForbiddenVolumePath(filePath)) continue;
     const size = numberOf(item.size ?? item.bytes);
     const name = stringOf(item.name) || filePath.split(/[/\\]/).pop() || filePath;
     records.push({
@@ -60,6 +61,7 @@ function filesFromDisks(disks: DiskRecord[]): IndexedPath[] {
   const records: IndexedPath[] = [];
   for (const disk of disks) {
     if (!disk || !Array.isArray(disk.files)) continue;
+    if (isForbiddenVolumePath(disk.lastMountPath || "")) continue;
     for (const file of disk.files) {
       if (!file?.relativePath) continue;
       const root = (disk.lastMountPath || "").replace(/[\\/]+$/, "");

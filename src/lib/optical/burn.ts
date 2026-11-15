@@ -1,9 +1,23 @@
 import { randomUUID } from "node:crypto";
-import { access } from "node:fs/promises";
+import { access, readFile, stat } from "node:fs/promises";
 
 import type { BackgroundJob } from "@/lib/jobs/types";
 import { claimNext, getJob, insertIfIdle, patchJob, readJobs } from "@/lib/jobs/store";
+import { shouldSuspendRunning } from "@/lib/optical/admission";
 import { checkCapacity, treeBytes } from "@/lib/optical/capacity";
+import { sourceDigest, type SourceReader } from "@/lib/optical/checksum";
+import {
+  admissionFor,
+  clearOpticalLive,
+  markOpticalLive,
+  onOpticalQueueKick,
+  pauseOpticalJob,
+  opticalRunningCount,
+  recoverOpticalAfterRestart,
+  resumeOpticalJob,
+  stepIndexOf,
+} from "@/lib/optical/control";
+import { assertOpticalPath } from "@/lib/optical/paths";
 import { addBurnedDisc, listDiscs } from "@/lib/optical/catalog";
 import { demoDrives } from "@/lib/optical/demo";
 import { detectDrives, spawnExec } from "@/lib/optical/host-detect";
@@ -31,11 +45,16 @@ const WORKER_ID = "pc-agent";
 const LOCAL_MAC_BURN = /\b(?:drutil|hdiutil)\s+burn\b/i;
 
 let runnerOverride: ProcessRunner | null = null;
+let sourceReader: SourceReader | null = null;
 let pumpTail: Promise<void> = Promise.resolve();
 let pumping = false;
 
 export function setRunnerForTests(runner: ProcessRunner | null): void {
   runnerOverride = runner;
+}
+
+export function setSourceReaderForTests(reader: SourceReader | null): void {
+  sourceReader = reader;
 }
 
 export function opticalIdle(): Promise<void> {
@@ -124,8 +143,15 @@ export async function enqueueOptical(input: EnqueueInput, deps?: { detect?: () =
     throw new OpticalError("validation", "Выберите файлы или папку из каталога.");
   }
   const profile = input.profile ?? drive?.suggestedProfile ?? null;
-  if (action !== "erase" && profile !== "cd" && profile !== "dvd-sl" && profile !== "dvd-dl") {
-    throw new OpticalError("validation", "Выберите профиль: CD, DVD или DVD DL.");
+  if (
+    action !== "erase" &&
+    profile !== "cd" &&
+    profile !== "dvd-sl" &&
+    profile !== "dvd-dl" &&
+    profile !== "bd-sl" &&
+    profile !== "bd-dl"
+  ) {
+    throw new OpticalError("validation", "Выберите профиль: CD, DVD, DVD DL, Blu-ray или Blu-ray DL.");
   }
   const totalBytes = treeBytes(files);
   if (action !== "erase" && profile) {
@@ -141,6 +167,7 @@ export async function enqueueOptical(input: EnqueueInput, deps?: { detect?: () =
     if (!isAbsoluteFolder(outputDir)) {
       throw new OpticalError("validation", "Укажите папку на диске, куда положить образ.");
     }
+    assertOpticalPath(outputDir);
     if (!demo) {
       try {
         await access(outputDir);
@@ -194,6 +221,10 @@ export async function enqueueOptical(input: EnqueueInput, deps?: { detect?: () =
     source: null,
     steps: plan.steps,
     totalBytes,
+    stepIndex: 0,
+    sourceSha256: null,
+    pausedBy: null,
+    processPriority: "below-normal",
   };
   const job: OpticalJob = {
     id: randomUUID(),
@@ -224,19 +255,7 @@ export async function enqueueOptical(input: EnqueueInput, deps?: { detect?: () =
 }
 
 export async function setJobPaused(id: string, paused: boolean): Promise<BackgroundJob> {
-  const job = await getJob(id);
-  if (!job) throw new OpticalError("not_found", "Задача не найдена.");
-  if (paused && job.status !== "queued" && job.status !== "running") {
-    throw new OpticalError("validation", "Эту задачу уже нельзя поставить на паузу.");
-  }
-  if (!paused && job.status !== "paused") {
-    throw new OpticalError("validation", "Задача не на паузе.");
-  }
-  const resumed = job.claimedBy ? "running" : "queued";
-  const next = await patchJob(id, { status: paused ? "paused" : resumed });
-  if (!next) throw new OpticalError("not_found", "Задача не найдена.");
-  if (!paused && resumed === "queued") schedulePump();
-  return next;
+  return paused ? pauseOpticalJob(id) : resumeOpticalJob(id);
 }
 
 export async function listOpticalJobs(): Promise<BackgroundJob[]> {
@@ -252,7 +271,10 @@ async function pump(): Promise<void> {
   if (pumping) return;
   pumping = true;
   try {
+    await recoverOpticalAfterRestart();
     for (;;) {
+      const decision = await admissionFor(await opticalRunningCount());
+      if (!decision.start) break;
       const job = await claimNext(WORKER_ID, OPTICAL_KINDS);
       if (!job) break;
       await executeClaimed(job);
@@ -265,12 +287,30 @@ async function pump(): Promise<void> {
 async function executeClaimed(claimed: BackgroundJob): Promise<void> {
   const payload = readPayload(claimed);
   const runner = runnerFor(payload.demo);
+  markOpticalLive(claimed.id);
   try {
+    const digest = await sourceDigest(payload.files, sourceReader ?? defaultSourceRead).catch((error: unknown) => {
+      if (error instanceof OpticalError && error.code === "forbidden") throw error;
+      return null;
+    });
+    if (digest) await patchJob(claimed.id, { payload: { sourceSha256: digest } });
     let verifyRan = 0;
     const verifyNeeded = payload.steps.filter((step) => step.phase === "проверка").length;
-    for (const step of payload.steps) {
-      const ready = await waitIfPaused(claimed.id);
-      if (!ready || ready.status === "error" || ready.status === "done") return;
+    const steps = payload.steps;
+    for (let index = stepIndexOf(claimed); index < steps.length; index += 1) {
+      const step = steps[index];
+      const ready = await getJob(claimed.id);
+      if (!ready || ready.status !== "running") return;
+      const decision = await admissionFor(0);
+      if (shouldSuspendRunning(decision)) {
+        await patchJob(claimed.id, {
+          status: "paused",
+          claimedBy: null,
+          error: null,
+          payload: { pausedBy: decision.reason, stepIndex: index, processPriority: decision.processPriority },
+        });
+        return;
+      }
       if (LOCAL_MAC_BURN.test(step.argv.join(" "))) {
         await failJob(claimed.id, "Mac не записывает диск локально.", runner.mock);
         return;
@@ -283,6 +323,7 @@ async function executeClaimed(claimed: BackgroundJob): Promise<void> {
         currentFile: step.currentFile,
         bytesDone: Math.round(((payload.totalBytes || 0) * percent) / 100),
         bytesTotal: payload.totalBytes,
+        payload: { stepIndex: index, processPriority: decision.processPriority },
       });
       let result;
       try {
@@ -297,7 +338,12 @@ async function executeClaimed(claimed: BackgroundJob): Promise<void> {
         await failJob(claimed.id, detail, runner.mock);
         return;
       }
+      const after = await getJob(claimed.id);
+      if (!after || after.status !== "running") return;
+      await patchJob(claimed.id, { payload: { stepIndex: index + 1 } });
     }
+    const finished = await getJob(claimed.id);
+    if (!finished || finished.status !== "running") return;
     const hadBurn = payload.steps.some((step) => step.phase === "запись");
     const verified =
       claimed.claimedBy === "pc-agent" &&
@@ -330,6 +376,8 @@ async function executeClaimed(claimed: BackgroundJob): Promise<void> {
     });
   } catch (error) {
     await failJob(claimed.id, error instanceof Error ? error.message : "Задача остановилась.", runner.mock);
+  } finally {
+    clearOpticalLive(claimed.id);
   }
 }
 
@@ -343,11 +391,14 @@ async function failJob(id: string, message: string, mock: boolean): Promise<void
   });
 }
 
-async function waitIfPaused(id: string): Promise<BackgroundJob | null> {
-  for (;;) {
-    const job = await getJob(id);
-    if (!job || job.status !== "paused") return job;
-    await new Promise((resolve) => setTimeout(resolve, 100));
+async function defaultSourceRead(filePath: string): Promise<Uint8Array | null> {
+  assertOpticalPath(filePath);
+  try {
+    const info = await stat(filePath);
+    if (!info.isFile() || info.size > 32 * 1024 * 1024) return null;
+    return new Uint8Array(await readFile(filePath));
+  } catch {
+    return null;
   }
 }
 
@@ -381,15 +432,17 @@ function discFrom(jobId: string, payload: OpticalPayload, source: "mock" | "tool
 
 function normalizeFiles(files: IndexedPath[] | undefined): IndexedPath[] {
   if (!Array.isArray(files)) return [];
-  return files
+  const records = files
     .filter((file) => file && typeof file.path === "string" && file.path.trim())
     .map((file) => ({
       diskLabel: String(file.diskLabel || "Диск").slice(0, 80),
       path: file.path.trim(),
       name: String(file.name || file.path.split(/[/\\]/).pop() || file.path).slice(0, 180),
       size: Number.isFinite(file.size) ? Math.max(0, file.size) : 0,
-      kind: file.kind === "folder" ? "folder" : "file",
+      kind: file.kind === "folder" ? ("folder" as const) : ("file" as const),
     }));
+  for (const file of records) assertOpticalPath(file.path);
+  return records;
 }
 
 function idempotencyKey(action: OpticalAction, driveId: string | null, files: IndexedPath[]): string {
@@ -420,3 +473,7 @@ function toStored(job: OpticalJob): BackgroundJob {
 export function readOpticalPayload(job: BackgroundJob): OpticalPayload {
   return readPayload(job);
 }
+
+onOpticalQueueKick(() => {
+  schedulePump();
+});
