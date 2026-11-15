@@ -127,10 +127,19 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: { token: s
       paused: item.paused,
       userBusy: item.userBusy,
     }));
+    const eligible: Array<(typeof queued.jobs)[number] & { source: string }> = [];
+    for (const job of queued.jobs) {
+      if (job.kind !== "transcode" || job.state !== "queued" || !fits(worker, job)) continue;
+      try {
+        assertEncodePaths([job.payload.source, job.payload.destination]);
+      } catch (error) {
+        await store.cancel(job.id, error instanceof Error ? error.message : "Путь закрыт.");
+        continue;
+      }
+      eligible.push({ ...job, source: job.payload.source });
+    }
     const choice = chooseQueuedFile({
-      jobs: queued.jobs
-        .filter((job) => job.kind === "transcode" && job.state === "queued" && fits(worker, job))
-        .map((job) => ({ ...job, source: job.payload.source })),
+      jobs: eligible,
       workerRole: worker.role,
       peers,
     });
