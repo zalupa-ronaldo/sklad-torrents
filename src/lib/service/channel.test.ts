@@ -221,7 +221,10 @@ it("keeps job claim and does not take a paused or queued job from a channel hear
     body: JSON.stringify({ role: "channel", host: "pc-agent", ...heartbeat({ socatOk: false }) }),
   }));
   expect(beat.status).toBe(200);
-  const body = await beat.json() as { actions: { op: string }[]; link: { peers: { "pc-agent": { detail: string } } } };
+  const body = await beat.json() as {
+    actions: { op: string }[];
+    link: { state: string; peers: { "pc-agent": { detail: string; qbittorrent: string } } };
+  };
   expect(body.link.peers["pc-agent"].detail).toBe(CHANNEL_TEXT.socatDown);
   expect(body.link.peers["pc-agent"].qbittorrent).toBe("down");
   expect(body.link.state).toBe("recovering");
