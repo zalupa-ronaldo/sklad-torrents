@@ -34,6 +34,7 @@ export function JobActions({
         </Button>
       ) : null}
       {card.pauseNote ? <p className="text-xs text-muted-foreground">{card.pauseNote}</p> : null}
+      {card.boundaryNote ? <p className="text-xs text-muted-foreground">{card.boundaryNote}</p> : null}
       {card.cancelNote ? <p className="text-xs text-muted-foreground">{card.cancelNote}</p> : null}
     </div>
   );
@@ -60,6 +61,7 @@ export function JobCard({
             {card.title}
           </Link>
           <p className="mt-1 text-xs text-muted-foreground">{card.statusLabel}</p>
+          {card.encoder ? <p className="mt-1 text-xs text-muted-foreground">{card.encoder}</p> : null}
         </div>
         <p className="text-lg font-semibold tabular-nums">{card.percentLabel}</p>
       </div>

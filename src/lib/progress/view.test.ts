@@ -95,6 +95,16 @@ describe("job view model", () => {
     expect(cards[1]?.etaLabel).toBe("на паузе");
   });
 
+  it("names the HandBrake encoder and keeps a paused file from replacing the original", () => {
+    const mac = toJobCard(snapshot({ kind: "transcode", host: "mac-local", status: "paused", speed: 0, capabilities: { pause: false, resume: true, cancel: true } }));
+    const pc = toJobCard(snapshot({ kind: "transcode", host: "pc-agent", status: "running" }));
+    expect(mac.encoder).toBe("Apple VideoToolbox");
+    expect(mac.boundaryNote).toBe("Пауза по файлам. Частичный результат не заменяет оригинал.");
+    expect(mac.canResume).toBe(true);
+    expect(pc.encoder).toBe("AMD RX 9070 XT · VCE/AMF");
+    expect(pc.boundaryNote).toBeNull();
+  });
+
   it("does not claim that cancel deleted files", () => {
     const card = toJobCard(
       snapshot({

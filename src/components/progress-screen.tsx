@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
 
+import { QueueBar } from "@/app/progress/queue-bar";
 import { AppShell } from "@/components/app-shell";
 import { FileEnqueue } from "@/components/file-enqueue";
 import { DownloadQueue, type QueueCommand } from "@/components/download-queue";
@@ -96,6 +97,7 @@ export function ProgressScreen({ initial }: { initial: ProgressPayload }) {
   return (
     <AppShell current="progress" subtitle="Долгие операции и очередь загрузок">
       <BoardMessage error={error} hasData={Boolean(data)} onRetry={() => void refresh()} />
+      <QueueBar data={data} onChanged={refresh} />
       <div className="grid items-start gap-6 lg:grid-cols-[minmax(0,1fr)_22rem]">
         <section className="order-2 grid gap-3 lg:order-1">
           <FileEnqueue />

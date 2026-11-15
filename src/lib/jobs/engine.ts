@@ -188,7 +188,48 @@ export interface EnqueueResult {
   created: boolean;
 }
 
-export type ClaimResult = { ok: true; job: Job } | { ok: false; reason: "not_found" | "conflict"; job: Job | null };
+export type ClaimResult =
+  | { ok: true; job: Job }
+  | { ok: false; reason: "not_found" | "conflict" | "limited"; job: Job | null; detail?: string };
+
+export type JobAdmission = (
+  host: JobHost,
+  job: Job,
+  running: readonly Job[],
+) => Promise<{ ok: true } | { ok: false; detail: string }> | { ok: true } | { ok: false; detail: string };
+
+export type JobFailureClass = (message: string) => "channel" | "task";
+
+let admission: JobAdmission | null = null;
+let failureClass: JobFailureClass | null = null;
+let binding: Promise<void> | null = null;
+
+export function setJobAdmission(next: JobAdmission | null): void {
+  admission = next;
+}
+
+export function setJobFailureClass(next: JobFailureClass | null): void {
+  failureClass = next;
+}
+
+function bindQueuePolicy(): Promise<void> {
+  if (!binding) {
+    binding = import("@/lib/progress/admission")
+      .then((mod) => {
+        mod.bindAdmission();
+      })
+      .catch((error: unknown) => {
+        binding = null;
+        throw error;
+      });
+  }
+  return binding;
+}
+
+async function admissionDecision(host: JobHost, job: Job, running: readonly Job[]): Promise<{ ok: true } | { ok: false; detail: string }> {
+  if (!admission) return { ok: true };
+  return admission(host, job, running);
+}
 
 export class JobStore {
   private jobs: StoredJob[] = [];
@@ -281,11 +322,21 @@ export class JobStore {
   }
 
   async claim(id: string, host: JobHost): Promise<ClaimResult> {
+    await bindQueuePolicy();
     return this.exclusive<ClaimResult>(async () => {
       const job = this.jobs.find((item) => item.id === id);
       if (!job) return { result: { ok: false as const, reason: "not_found" as const, job: null }, dirty: false, events: [] };
       if (job.host !== host || job.state !== "queued") {
         return { result: { ok: false as const, reason: "conflict" as const, job: cloneJob(job) }, dirty: false, events: [] };
+      }
+      const running = this.jobs.filter((item) => item.host === host && item.state === "running").map((item) => cloneJob(item));
+      const decision = await admissionDecision(host, cloneJob(job), running);
+      if (!decision.ok) {
+        return {
+          result: { ok: false as const, reason: "limited" as const, job: cloneJob(job), detail: decision.detail },
+          dirty: false,
+          events: [],
+        };
       }
       this.markRunning(job);
       return { result: { ok: true as const, job: cloneJob(job) }, dirty: true, events: [this.upsertEvent(job)] };
@@ -293,8 +344,20 @@ export class JobStore {
   }
 
   async claimNext(host: JobHost, where?: (job: Job) => boolean): Promise<Job | null> {
+    await bindQueuePolicy();
     return this.exclusive(async () => {
-      const job = this.jobs.filter((item) => item.host === host && item.state === "queued" && (where ? where(item) : true)).sort((a, b) => a.seq - b.seq)[0];
+      const candidates = this.jobs
+        .filter((item) => item.host === host && item.state === "queued" && (where ? where(item) : true))
+        .sort((a, b) => a.seq - b.seq);
+      const running = this.jobs.filter((item) => item.host === host && item.state === "running").map((item) => cloneJob(item));
+      let job: StoredJob | undefined;
+      for (const candidate of candidates) {
+        const decision = await admissionDecision(host, cloneJob(candidate), running);
+        if (decision.ok) {
+          job = candidate;
+          break;
+        }
+      }
       if (!job) return { result: null, dirty: false, events: [] };
       this.markRunning(job);
       return { result: cloneJob(job), dirty: true, events: [this.upsertEvent(job)] };
@@ -356,12 +419,18 @@ export class JobStore {
   }
 
   async fail(id: string, token: string, message: string): Promise<Job | null> {
+    await bindQueuePolicy();
     return this.exclusive(async () => {
       const job = this.jobs.find((item) => item.id === id);
       if (!job || job.workerToken !== token || job.state !== "running") return { result: null, dirty: false, events: [] };
+      const text = cleanText(message, 500) || "Сбой задачи";
       job.workerToken = null;
-      job.lastError = cleanText(message, 500) || "Сбой задачи";
+      job.lastError = text;
       job.updatedAt = new Date().toISOString();
+      if (failureClass?.(text) === "channel") {
+        job.state = "queued";
+        return { result: cloneJob(job), dirty: true, events: [this.upsertEvent(job)] };
+      }
       if (job.cancelled || job.verified || job.autoRetries >= MAX_AUTO_RETRIES) job.state = "error";
       else {
         job.autoRetries += 1;

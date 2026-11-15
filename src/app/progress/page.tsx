@@ -1,5 +1,5 @@
 import { ProgressScreen } from "@/components/progress-screen";
-import { getProgressPayload } from "@/lib/progress/jobs";
+import { loadProgressPage } from "@/lib/progress/page-data";
 
 export const dynamic = "force-dynamic";
 
@@ -9,6 +9,6 @@ export const metadata = {
 };
 
 export default async function ProgressPage() {
-  const initial = await getProgressPayload();
+  const initial = await loadProgressPage();
   return <ProgressScreen initial={initial} />;
 }

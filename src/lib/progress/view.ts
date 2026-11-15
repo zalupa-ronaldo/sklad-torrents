@@ -45,6 +45,8 @@ export interface JobCardModel {
   canCancel: boolean;
   pauseNote: string | null;
   cancelNote: string | null;
+  encoder: string | null;
+  boundaryNote: string | null;
 }
 
 /** Pure view of a job snapshot: labels, counters, and which buttons exist. */
@@ -80,6 +82,11 @@ export function toJobCard(snapshot: JobSnapshot): JobCardModel {
     canCancel,
     pauseNote,
     cancelNote: snapshot.status === "cancelled" ? "Остановлено. Файлы на диске не удалялись." : null,
+    encoder: encoderOf(snapshot),
+    boundaryNote:
+      snapshot.kind === "transcode" && snapshot.status === "paused"
+        ? "Пауза по файлам. Частичный результат не заменяет оригинал."
+        : null,
   };
 }
 
@@ -99,6 +106,14 @@ function etaLabel(snapshot: JobSnapshot): string {
   if (snapshot.status === "error" || snapshot.status === "cancelled") return "—";
   const eta = formatEta(snapshot.eta);
   return eta === "—" ? "осталось —" : `осталось ${eta}`;
+}
+
+function encoderOf(snapshot: JobSnapshot): string | null {
+  if (snapshot.kind !== "transcode") return null;
+  const host = snapshot.host;
+  if (host === "mac-local" || host === "Mac mini" || host === "demo-mac") return "Apple VideoToolbox";
+  if (host === "pc-agent" || host === "Windows PC" || host === "demo-pc") return "AMD RX 9070 XT · VCE/AMF";
+  return null;
 }
 
 function clamp01(value: number): number {

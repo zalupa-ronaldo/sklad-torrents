@@ -12,7 +12,8 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
     const result = await getJobStore().claim(id, host);
     if (!result.ok) {
       if (result.reason === "not_found") throw new JobError("not_found", "Задача не найдена.");
-      return jobJson({ error: "Задачу уже забрал другой воркер.", job: result.job ? publicJob(result.job) : null }, 409);
+      const message = result.reason === "limited" ? result.detail || "Лимит очереди." : "Задачу уже забрал другой воркер.";
+      return jobJson({ error: message, job: result.job ? publicJob(result.job) : null }, 409);
     }
     return jobJson({ job: publicJob(result.job) });
   });

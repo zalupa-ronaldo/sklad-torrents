@@ -1,3 +1,5 @@
+import { isChannelDetail } from "@/lib/progress/channel";
+import { isIgnoredVolume } from "@/lib/progress/paths";
 import { registerJobSource } from "@/lib/progress/sources";
 import type { JobKind, JobSnapshot, JobStatus } from "@/lib/progress/types";
 import { QbittorrentError } from "@/lib/qbittorrent/errors";
@@ -91,7 +93,7 @@ function engineSnapshot(job: {
     host: job.host,
     diskLabel: null,
     outputPath: job.payload.destination,
-    error: status === "error" ? job.lastError : null,
+    error: jobError(status, job.lastError, job.payload.source, job.payload.destination),
     capabilities: {
       pause: status === "queued" || status === "running",
       resume: status === "paused",
@@ -196,6 +198,13 @@ function toolSnapshot(job: {
       kind === "transcode" || kind === "compact" ? `${PAUSE_UNSUPPORTED}. ${kind === "compact" ? "compact.exe не умеет паузу." : "HandBrakeCLI из Склада нельзя поставить на паузу."}` : PAUSE_UNSUPPORTED,
     updatedAt: job.updatedAt,
   };
+}
+
+function jobError(status: JobStatus, lastError: string | null, source: string, destination: string): string | null {
+  if (isIgnoredVolume(source) || isIgnoredVolume(destination)) return "Диск Z: не используется.";
+  if (status === "error") return lastError;
+  if (isChannelDetail(lastError)) return lastError;
+  return null;
 }
 
 function kernelKind(kind: string): JobKind {
