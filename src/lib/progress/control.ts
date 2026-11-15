@@ -5,7 +5,7 @@ import { localJobHost } from "@/lib/jobs/local-host";
 import type { JobHost } from "@/lib/jobs/model";
 
 import { isChannelDetail, parseLinkStatus, type LinkStatus } from "@/lib/progress/channel";
-import { isIgnoredVolume, machineOfPath } from "@/lib/progress/paths";
+import { isIgnoredVolume } from "@/lib/progress/paths";
 
 export type ProcessPriority = "idle" | "below-normal" | "normal";
 export type QueueScope = "all" | "mac-local" | "pc-agent";
@@ -237,10 +237,6 @@ export async function decideAdmission(host: JobHost, job: AdmissionJob, running:
     return { ok: false, detail: "Сейчас вне расписания фоновой очереди." };
   }
   if (job.kind === "transcode") {
-    const owner = machineOfPath(source);
-    if (owner && owner !== host) {
-      return { ok: false, detail: "Файл лежит на другой машине. По сети его не гоняем: нужна отдельная копия с SHA-256." };
-    }
     const slots = host === "linux-local" ? undefined : control.load.handbrakeSlots[host];
     if (typeof slots === "number" && running.filter((item) => item.kind === "transcode").length >= slots) {
       return { ok: false, detail: "Лимит HandBrake на этой машине уже занят." };
