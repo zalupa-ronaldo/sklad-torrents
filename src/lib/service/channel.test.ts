@@ -286,9 +286,9 @@ it("keeps the link down when the agent cannot be pulled", async () => {
 });
 
 it("builds the pull address only from an http agent URL", () => {
-  expect(channelPullUrl({ SKLAD_PC_AGENT_URL: "http://192.168.0.16:4730" } as NodeJS.ProcessEnv)).toBe("http://192.168.0.16:4730/v1/channel");
-  expect(channelPullUrl({} as NodeJS.ProcessEnv)).toBeNull();
-  expect(channelPullUrl({ SKLAD_PC_AGENT_URL: "file:///etc" } as NodeJS.ProcessEnv)).toBeNull();
+  expect(channelPullUrl({ SKLAD_PC_AGENT_URL: "http://192.168.0.16:4730" } as unknown as NodeJS.ProcessEnv)).toBe("http://192.168.0.16:4730/v1/channel");
+  expect(channelPullUrl({} as unknown as NodeJS.ProcessEnv)).toBeNull();
+  expect(channelPullUrl({ SKLAD_PC_AGENT_URL: "file:///etc" } as unknown as NodeJS.ProcessEnv)).toBeNull();
 });
 
 function heartbeat(patch: Partial<HeartbeatInput> = {}): HeartbeatInput {

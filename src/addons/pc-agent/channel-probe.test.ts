@@ -21,7 +21,7 @@ it("reads portproxy rows from localized netsh output", () => {
 });
 
 it("treats the LAN forward to the current WSL address as healthy", () => {
-  const cfg = channelConfig({});
+  const cfg = channelConfig({} as unknown as NodeJS.ProcessEnv);
   const rows = parsePortproxy(SHOW);
   expect(portproxyHealthy(rows, "172.31.244.147", cfg)).toBe(true);
   expect(portproxyHealthy(rows, "172.31.250.1", cfg)).toBe(false);
