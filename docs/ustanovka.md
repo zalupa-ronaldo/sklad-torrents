@@ -58,6 +58,14 @@ SKLAD_DRIVE_MODE=agents SKLAD_MAC_AGENT_URL=http://127.0.0.1:4371 npm run dev
 
 Без этих переменных панель остаётся в демо и диски машины не читает.
 
+Панель можно запустить в Docker, образ `linux/arm64`. Агент дисков при этом остаётся командой выше, на хосте. Из контейнера панель ходит на `http://host.docker.internal:4371`. Данные — bind-mount `/Users/uzer/.local/sklad-data-clean`, не копия volume. Агент ПК: `http://192.168.0.16:4730` (`GET /v1/channel`). qBittorrent этого ПК на `192.168.0.16:8080` и `192.168.0.16:18080` доступен из контейнера, эти порты наружу не публикуются.
+
+```bash
+docker compose up -d --build
+```
+
+Адрес панели тот же: http://127.0.0.1:4317. Остановка: `docker compose down`. Пока контейнер запущен, второй `npm run dev` на порту `4317` не поднимайте.
+
 ## Windows и WSL
 
 PowerShell, корень репозитория, не диск `Z:`:

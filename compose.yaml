@@ -1,0 +1,36 @@
+# Панель Склада. Drive-agent Mac (порт 4371) здесь не запускается: ему нужен каталог томов на хосте.
+# Из контейнера панель ходит к нему через host.docker.internal:4371.
+# Сеть bridge не internal: исходящие к 192.168.0.16 (агент ПК 4730, qBittorrent 8080 и 18080) разрешены.
+# Эти порты compose не публикует.
+name: sklad
+
+services:
+  panel:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: sklad-panel:local
+    platform: linux/arm64
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:4317:4317"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - lan
+    environment:
+      NODE_ENV: production
+      PORT: "4317"
+      HOSTNAME: "0.0.0.0"
+      SKLAD_DATA_DIR: /Users/uzer/.local/sklad-data-clean
+      SKLAD_DRIVE_MODE: agents
+      SKLAD_REAL_ONLY: "1"
+      SKLAD_MAC_AGENT_URL: http://host.docker.internal:4371
+      SKLAD_PC_AGENT_URL: http://192.168.0.16:4730
+    volumes:
+      - /Users/uzer/.local/sklad-data-clean:/Users/uzer/.local/sklad-data-clean
+
+networks:
+  lan:
+    driver: bridge
+    internal: false
