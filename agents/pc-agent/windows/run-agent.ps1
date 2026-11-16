@@ -26,6 +26,8 @@ foreach ($pattern in $patterns) {
 Start-Sleep -Milliseconds 500
 
 Set-Location $repo
+# Windows PowerShell 5.1 turns any native stderr line into a terminating error under "Stop".
+$ErrorActionPreference = "Continue"
 if ($Kind -eq "job") {
   $log = Join-Path $logDir "supervisor.out.log"
   & $node (Join-Path $PSScriptRoot "supervisor.mjs") *>> $log
