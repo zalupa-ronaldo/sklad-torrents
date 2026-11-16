@@ -171,10 +171,14 @@ function lastFlag(argv, name) {
 
 function run(command, args, { allowFail = false, env } = {}) {
   return new Promise((resolve, reject) => {
+    // Node 18.20+/20.12+/22 refuses to spawn .cmd/.bat without a shell (spawn EINVAL).
+    // Arguments here are fixed literals, so shell mode on Windows is safe.
+    const needsShell = process.platform === "win32" && /\.(cmd|bat)$/i.test(command);
     const child = spawn(command, args, {
       cwd: root,
       stdio: "inherit",
       env: env ?? process.env,
+      shell: needsShell,
     });
     child.on("error", (error) => {
       if (allowFail) resolve({ code: 127, error });
