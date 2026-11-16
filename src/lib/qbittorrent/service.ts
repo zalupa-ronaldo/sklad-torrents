@@ -19,8 +19,12 @@ import {
   createHost,
   dataDir,
   deleteHost,
+  EMPTY_HOSTS_ERROR,
+  hostsFileStatus,
   loadHosts,
   loadMarks,
+  MISSING_HOSTS_ERROR,
+  UNREADABLE_HOSTS_ERROR,
   removeMark,
   requireHost as loadRequiredHost,
   saveMark,
@@ -58,7 +62,7 @@ export function clientFor(host: HostRecord): QbittorrentClient {
 }
 
 export async function getDashboard(): Promise<DashboardPayload> {
-  const hosts = await loadHosts();
+  const [hosts, hostsFile] = await Promise.all([loadHosts(), hostsFileStatus()]);
   const marks = await loadMarks();
   const results = await Promise.all(hosts.map((host) => loadHost(host)));
   const visible = results.map((result) => ({
@@ -69,7 +73,15 @@ export async function getDashboard(): Promise<DashboardPayload> {
   }));
   const torrents = visible.flatMap((result) => result.torrents.map((torrent) => decorate(torrent, result.host, marks)));
   torrents.sort((a, b) => a.hostName.localeCompare(b.hostName, "ru") || a.name.localeCompare(b.name, "ru"));
+  const error = hosts.length > 0
+    ? null
+    : hostsFile === "unreadable"
+      ? UNREADABLE_HOSTS_ERROR
+      : hostsFile === "missing"
+        ? MISSING_HOSTS_ERROR
+        : EMPTY_HOSTS_ERROR;
   return {
+    error,
     hosts: visible.map((result) => ({
       ...toPublic(result.host),
       online: result.error === null,

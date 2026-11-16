@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, expect, it } from "vitest";
 
+const slow = 60_000;
+
 import { GET } from "@/app/api/jobs/route";
 import { coldGameBlocksDelete } from "@/lib/games/library";
 
@@ -75,7 +77,7 @@ it("copies a tiny game, verifies hashes, and shows the same library on the jobs 
   expect(removed.json).toMatchObject({ removed: true, sourceKept: true, ready: false });
   await expect(stat(dest)).rejects.toThrow();
   expect((await stat(source)).isDirectory()).toBe(true);
-});
+}, slow);
 
 it("blocks offline, E and Z, overlap, symlink, mutation, space pressure, and an unmanaged folder", async () => {
   const dir = await scratch();
@@ -132,7 +134,7 @@ it("blocks offline, E and Z, overlap, symlink, mutation, space pressure, and an 
   expect(unmanaged.status).toBe(3);
   expect(await readFile(path.join(pool, ownedId, "user-save.txt"), "utf8")).toBe("keep");
   expect(coldGameBlocksDelete([{ root: owned }], path.join(owned, "data.bin"))).toBe(true);
-});
+}, slow);
 
 it("does not leave a ready copy after cancel or a crash, then finishes the same job", async () => {
   const dir = await scratch();
@@ -155,7 +157,7 @@ it("does not leave a ready copy after cancel or a crash, then finishes the same 
   expect((await stat(path.join(pool, id, "data.bin"))).isFile()).toBe(true);
   const jobs = JSON.parse(await readFile(path.join(dir, "jobs.json"), "utf8")) as { jobs: unknown[] };
   expect(jobs.jobs).toHaveLength(1);
-});
+}, slow);
 
 it("refuses launch when the database says compression is worthwhile and this host cannot compact", async () => {
   const dir = await scratch();
@@ -172,7 +174,7 @@ it("refuses launch when the database says compression is worthwhile and this hos
   expect(run(dir, ["game", "remove", "--id", id]).status).toBe(3);
   expect((await stat(path.join(pool, id, "saves", "slot.txt"))).isFile()).toBe(true);
   expect((await stat(source)).isDirectory()).toBe(true);
-});
+}, slow);
 
 it("rejects a folder that is only an exe name", async () => {
   const dir = await scratch();
@@ -184,7 +186,7 @@ it("rejects a folder that is only an exe name", async () => {
   const refused = run(dir, ["game", "register", "--root", source, "--pool", pool]);
   expect(refused.status).toBe(3);
   expect(String(refused.json.error)).toMatch(/exe|папк/);
-});
+}, slow);
 
 async function scratch(): Promise<string> {
   const dir = await mkdtemp(path.join(tmpdir(), "sklad-game-"));

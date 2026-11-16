@@ -16,11 +16,13 @@ export function TorrentDock({
   torrents,
   hosts,
   query,
+  alert,
   onChanged,
 }: {
   torrents: TorrentView[];
   hosts: HostView[];
   query: string;
+  alert?: string | null;
   onChanged: () => void;
 }) {
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
@@ -64,10 +66,11 @@ export function TorrentDock({
         <span className="text-[11px] text-muted-foreground">{query.trim() ? `${visible.length} в поиске` : `${visible.length}`}</span>
       </div>
       <div className="min-h-0 flex-1 overflow-auto">
-        {visible.length === 0 ? (
+        {alert ? <p className="px-2 py-3 text-[11px] text-destructive">{alert}</p> : null}
+        {visible.length === 0 && !alert ? (
           <p className="px-2 py-3 text-[11px] text-muted-foreground">{query.trim() ? "В раздачах ничего не найдено." : "Раздач пока нет."}</p>
-        ) : (
-          visible.map((torrent) => {
+        ) : null}
+        {visible.length > 0 ? visible.map((torrent) => {
             const key = `${torrent.hostId}:${torrent.hash}`;
             const active = key === selectedKey;
             return (
@@ -99,8 +102,7 @@ export function TorrentDock({
                 </span>
               </button>
             );
-          })
-        )}
+          }) : null}
       </div>
       {selected && host ? (
         <form

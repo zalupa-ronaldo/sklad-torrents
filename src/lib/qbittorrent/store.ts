@@ -44,9 +44,28 @@ export function toPublic(host: HostRecord): HostPublic {
   };
 }
 
+export const MISSING_HOSTS_ERROR =
+  "В каталоге данных нет hosts.json. Раздачи не загружены. Добавьте хост qBittorrent в панели. Пароль в программу не подставляется.";
+
+export const EMPTY_HOSTS_ERROR =
+  "В hosts.json нет хостов qBittorrent. Раздачи не загружены. Пароль в программу не подставляется.";
+
+export const UNREADABLE_HOSTS_ERROR = "Не удалось прочитать hosts.json. Раздачи не загружены.";
+
 export async function loadHosts(): Promise<HostRecord[]> {
   const custom = await readCustomHosts();
   return process.env.SKLAD_REAL_ONLY === "1" ? custom : [...demoHosts(), ...custom];
+}
+
+export async function hostsFileStatus(): Promise<"missing" | "ready" | "unreadable"> {
+  try {
+    await readFile(hostsPath(), "utf8");
+    return "ready";
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") return "missing";
+    return "unreadable";
+  }
 }
 
 export async function getHost(id: string): Promise<HostRecord | null> {

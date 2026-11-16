@@ -119,6 +119,8 @@ export interface AddTorrentInput {
 export interface DashboardPayload {
   hosts: HostView[];
   torrents: TorrentView[];
+  /** Set when the catalog has no qBittorrent hosts. Null when the list is a real or demo host. */
+  error: string | null;
 }
 
 export interface TorrentLocation {

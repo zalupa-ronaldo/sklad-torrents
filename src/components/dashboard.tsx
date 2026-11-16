@@ -142,6 +142,7 @@ function OnDiskCell({
 
 export function Dashboard() {
   const [data, setData] = useState<DashboardPayload | null>(null);
+  const [torrentError, setTorrentError] = useState<string | null>(null);
   const [shelf, setShelf] = useState<ShelfResponse | null>(null);
   const [progress, setProgress] = useState<ProgressPayload | null>(null);
   const [browse, setBrowse] = useState<BrowseResponse | null>(null);
@@ -192,11 +193,12 @@ export function Dashboard() {
         api<ChannelLinkView>("/api/hosts/link").catch(() => null),
       ]);
       if (link) nextTorrents.hosts = nextTorrents.hosts.map((host) => overlayHostError(host, link));
+      setTorrentError(nextTorrents.error);
       setData(nextTorrents);
       setShelf(nextShelf);
       setProgress(nextProgress);
-    } catch {
-      // Keep last good shelf/browse visible.
+    } catch (error) {
+      setTorrentError(error instanceof Error ? error.message : "Не удалось загрузить раздачи.");
     }
   }, []);
 
@@ -1235,7 +1237,7 @@ export function Dashboard() {
       ) : null}
 
       <div className="grid max-h-[38%] min-h-[168px] shrink-0 grid-rows-[minmax(0,1fr)] border-t lg:grid-cols-2">
-        <TorrentDock torrents={(data?.torrents ?? []).filter((torrent) => !isZPath(torrent.savePath) && !isZPath(torrent.contentPath))} hosts={data?.hosts ?? []} query={query} onChanged={() => void refreshMeta()} />
+        <TorrentDock torrents={(data?.torrents ?? []).filter((torrent) => !isZPath(torrent.savePath) && !isZPath(torrent.contentPath))} hosts={data?.hosts ?? []} query={query} alert={torrentError} onChanged={() => void refreshMeta()} />
         <QueueDock
           jobs={(progress?.jobs ?? []).filter((job) => isQueueJob(job))}
           pending={queuePending}

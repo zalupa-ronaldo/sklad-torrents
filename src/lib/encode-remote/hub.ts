@@ -172,7 +172,8 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: { token: s
       send(res, 200, { job: null, reason: "Контейнер назначения не .mp4 и не .mkv." });
       return;
     }
-    const claim = await store.claim(open.id, host);
+    const spareJobIds = [...ctx.leases.values()].filter((lease) => lease.workerId !== worker.id).map((lease) => lease.jobId);
+    const claim = await store.claim(open.id, host, { spareJobIds });
     if (!claim.ok || !claim.job.workerToken) {
       send(res, 200, { job: null });
       return;
