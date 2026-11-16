@@ -21,36 +21,25 @@ $logDir = Join-Path $data "logs"
 New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 
 $mockValue = if ($Mock) { "1" } else { "0" }
-$envFile = Join-Path $data "service-env.cmd"
-$lines = @(
-  "@echo off"
-  "set SKLAD_PC_AGENT_STATE=$data\jobs.json"
-  "set SKLAD_PC_AGENT_LOG_DIR=$logDir"
-  "set SKLAD_PC_AGENT_HOST=$BindHost"
-  "set SKLAD_PC_AGENT_MOCK=$mockValue"
-)
-if ($StableQbUrl) { $lines += "set SKLAD_CHANNEL_STABLE_URL=$StableQbUrl" }
-$lines += @(
-  "cd /d `"$repo`""
-  "`"$node`" `"$supervisor`" >> `"$logDir\supervisor.out.log`" 2>&1"
-)
-$lines | Set-Content -Path $envFile -Encoding ASCII
-
-$driveFile = Join-Path $data "drive-agent.cmd"
-@(
-  "@echo off"
-  "cd /d `"$repo`""
-  "`"$node`" --import ./agents/register.mjs agents/pc-agent/drive.mts --port 4372 >> `"$logDir\drive-agent.log`" 2>&1"
-) | Set-Content -Path $driveFile -Encoding ASCII
+$envValues = [ordered]@{
+  SKLAD_PC_AGENT_STATE = "$data\jobs.json"
+  SKLAD_PC_AGENT_LOG_DIR = $logDir
+  SKLAD_PC_AGENT_HOST = $BindHost
+  SKLAD_PC_AGENT_MOCK = $mockValue
+  SKLAD_NODE = $node
+}
+if ($StableQbUrl) { $envValues["SKLAD_CHANNEL_STABLE_URL"] = $StableQbUrl }
+$envValues | ConvertTo-Json | Set-Content -Path (Join-Path $data "agent-env.json") -Encoding UTF8
+$launcher = Join-Path $PSScriptRoot "run-agent.ps1"
 
 # S4U: runs at boot without a logged-on user and without storing a password.
 $principal = New-ScheduledTaskPrincipal -UserId ([Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType S4U -RunLevel Highest
 $trigger = New-ScheduledTaskTrigger -AtStartup
 $settings = New-ScheduledTaskSettingsSet -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit ([TimeSpan]::Zero)
 
-$action = New-ScheduledTaskAction -Execute "cmd.exe" -Argument "/c `"$envFile`"" -WorkingDirectory $repo
+$action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$launcher`" -Kind job" -WorkingDirectory $repo
 Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Force | Out-Null
-$driveAction = New-ScheduledTaskAction -Execute "cmd.exe" -Argument "/c `"$driveFile`"" -WorkingDirectory $repo
+$driveAction = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$launcher`" -Kind drive" -WorkingDirectory $repo
 Register-ScheduledTask -TaskName $driveTask -Action $driveAction -Trigger $trigger -Settings $settings -Principal $principal -Force | Out-Null
 
 # The older hand-made drive task would race for port 4372 at boot. Disable it, keep it for rollback.

@@ -7,10 +7,10 @@ foreach ($name in @("SkladPcAgent", "SkladDriveAgent")) {
     Write-Output "$name removed"
   }
 }
-# Stop-ScheduledTask ends cmd.exe; end the node processes it started from this repo.
+# Stop-ScheduledTask ends only the launcher; end the node processes it started.
 $repo = Split-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) -Parent
 Get-CimInstance Win32_Process -Filter "Name='node.exe'" |
-  Where-Object { $_.CommandLine -and ($_.CommandLine -like "*supervisor.mjs*" -or $_.CommandLine -like "*pc-agent*server.mjs*" -or $_.CommandLine -like "*pc-agent/drive.mts*") } |
+  Where-Object { $_.CommandLine -and ($_.CommandLine -like "*pc-agent*windows*supervisor.mjs*" -or $_.CommandLine -like "*pc-agent*server.mjs*" -or $_.CommandLine -like "*pc-agent*drive.mts*") } |
   ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
 $legacy = Get-ScheduledTask -TaskName "Sklad Windows Drive Agent" -ErrorAction SilentlyContinue
 if ($legacy -and $legacy.State -eq "Disabled") {
