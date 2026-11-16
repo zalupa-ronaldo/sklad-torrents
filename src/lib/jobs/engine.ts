@@ -321,7 +321,7 @@ export class JobStore {
     });
   }
 
-  async claim(id: string, host: JobHost): Promise<ClaimResult> {
+  async claim(id: string, host: JobHost, options?: { spareJobIds?: readonly string[] }): Promise<ClaimResult> {
     await bindQueuePolicy();
     return this.exclusive<ClaimResult>(async () => {
       const job = this.jobs.find((item) => item.id === id);
@@ -329,7 +329,11 @@ export class JobStore {
       if (job.host !== host || job.state !== "queued") {
         return { result: { ok: false as const, reason: "conflict" as const, job: cloneJob(job) }, dirty: false, events: [] };
       }
-      const running = this.jobs.filter((item) => item.host === host && item.state === "running").map((item) => cloneJob(item));
+      // A file already leased to the other machine must not consume this machine's HandBrake slot.
+      const spare = new Set(options?.spareJobIds ?? []);
+      const running = this.jobs
+        .filter((item) => item.host === host && item.state === "running" && !spare.has(item.id))
+        .map((item) => cloneJob(item));
       const decision = await admissionDecision(host, cloneJob(job), running);
       if (!decision.ok) {
         return {

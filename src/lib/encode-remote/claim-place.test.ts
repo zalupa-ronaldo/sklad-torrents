@@ -7,18 +7,34 @@ import { afterEach, expect, it } from "vitest";
 import { createJobStore } from "@/lib/jobs/engine";
 import { localJobHost } from "@/lib/jobs/local-host";
 import { startEncodeHub } from "@/lib/encode-remote/hub";
+import { defaultControl, resetQueueControlForTests, writeControl } from "@/lib/progress/control";
 
 const dirs: string[] = [];
 const closers: (() => Promise<void>)[] = [];
+let previousData: string | undefined;
+let restoreData = false;
 
 afterEach(async () => {
   await Promise.all(closers.splice(0).map((close) => close()));
   await Promise.all(dirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
+  resetQueueControlForTests();
+  if (!restoreData) return;
+  restoreData = false;
+  if (previousData === undefined) delete process.env.SKLAD_DATA_DIR;
+  else process.env.SKLAD_DATA_DIR = previousData;
 });
 
 it("gives each machine the file that already lives there and does not ship it", async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "sklad-claim-"));
   dirs.push(dir);
+  previousData = process.env.SKLAD_DATA_DIR;
+  restoreData = true;
+  process.env.SKLAD_DATA_DIR = dir;
+  resetQueueControlForTests();
+  const control = defaultControl();
+  control.load.maxParallel = { "mac-local": 1, "pc-agent": 1, "linux-local": 1 };
+  control.load.handbrakeSlots = { "mac-local": 1, "pc-agent": 1 };
+  await writeControl(control);
   const host = localJobHost();
   expect(host).toBeTruthy();
   const store = createJobStore(dir);

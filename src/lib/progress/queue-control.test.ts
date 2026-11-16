@@ -364,6 +364,7 @@ describe("shared task queue", () => {
     expect(saved.processPriority).toBe("idle");
     expect(saved.quietHours).toEqual([{ startHour: 23, endHour: 7 }]);
     expect(saved.userActive).toEqual({ "mac-local": true, "pc-agent": false });
+    setQueueClock(() => new Date(2026, 10, 15, 12, 0).getTime());
     const store = getJobStore();
     await store.enqueue(copy);
     await store.enqueue({

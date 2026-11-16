@@ -43,6 +43,7 @@ describe("torrent service", () => {
   it("lists both demo hosts and the folder each torrent lives in", async () => {
     const dashboard = await getDashboard();
     expect(dashboard.hosts.map((host) => host.id)).toEqual([DEMO_MAC_ID, DEMO_PC_ID]);
+    expect(dashboard.error).toBeNull();
     expect(dashboard.hosts.every((host) => host.online)).toBe(true);
     const gow = dashboard.torrents.find((torrent) => torrent.hash === DEMO_HASH.godOfWar);
     expect(gow).toMatchObject({
@@ -59,6 +60,21 @@ describe("torrent service", () => {
     );
     const archive = await getTorrentDetail(DEMO_PC_ID, DEMO_HASH.archive);
     expect(archive.files[1].absolutePath).toBe("E:\\Archive\\Семейный архив 2019\\видео\\день рождения.mp4");
+  });
+
+  it("names a missing hosts file when the catalog has no qBittorrent hosts", async () => {
+    const previous = process.env.SKLAD_REAL_ONLY;
+    process.env.SKLAD_REAL_ONLY = "1";
+    try {
+      const dashboard = await getDashboard();
+      expect(dashboard.hosts).toEqual([]);
+      expect(dashboard.torrents).toEqual([]);
+      expect(dashboard.error).toMatch(/hosts\.json/);
+      expect(dashboard.error).toMatch(/не загружены/);
+    } finally {
+      if (previous === undefined) delete process.env.SKLAD_REAL_ONLY;
+      else process.env.SKLAD_REAL_ONLY = previous;
+    }
   });
 
   it("adds a magnet on the demo Mac, pauses it, and keeps the chosen folder", async () => {

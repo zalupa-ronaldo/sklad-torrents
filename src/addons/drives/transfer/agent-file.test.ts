@@ -9,6 +9,8 @@ import { startAgent } from "../../../../agents/lib/agent.mts";
 const root = path.join(process.cwd(), ".tmp-transfer-agent");
 const filePath = path.join(root, "hello.bin");
 const payload = Buffer.from("sklad-transfer-bytes-32!!!!!!!!!!!!"); // 32 bytes
+const savedSnapshot = process.env.SKLAD_AGENT_SNAPSHOT;
+const savedDisabled = process.env.SKLAD_AGENT_DISABLED;
 
 describe("agent file content", () => {
   let server: ReturnType<typeof createServer>;
@@ -19,6 +21,8 @@ describe("agent file content", () => {
   beforeAll(async () => {
     await rm(root, { recursive: true, force: true });
     await mkdir(root, { recursive: true });
+    process.env.SKLAD_AGENT_SNAPSHOT = path.join(root, "snapshot.json.gz");
+    process.env.SKLAD_AGENT_DISABLED = path.join(root, "disabled.json");
     await writeFile(filePath, payload);
     server = startAgent({
       port: 0,
@@ -57,6 +61,10 @@ describe("agent file content", () => {
   afterAll(async () => {
     await new Promise<void>((resolve) => server.close(() => resolve()));
     await rm(root, { recursive: true, force: true });
+    if (savedSnapshot === undefined) delete process.env.SKLAD_AGENT_SNAPSHOT;
+    else process.env.SKLAD_AGENT_SNAPSHOT = savedSnapshot;
+    if (savedDisabled === undefined) delete process.env.SKLAD_AGENT_DISABLED;
+    else process.env.SKLAD_AGENT_DISABLED = savedDisabled;
   });
 
   it("streams file bytes and rejects path escape", async () => {
