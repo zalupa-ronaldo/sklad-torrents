@@ -5,6 +5,7 @@ import path from "node:path";
 import { JobError } from "@/lib/jobs/errors";
 import { dataDir, getHost, updateHost } from "@/lib/qbittorrent/store";
 import {
+  CHANNEL_STALE_MS,
   CHANNEL_TEXT,
   channelErrorForProbe,
   emptyChannel,
@@ -28,11 +29,59 @@ async function exclusive<T>(directory: string, fn: () => Promise<T>): Promise<T>
   return run;
 }
 
-export async function tickChannel(directory = dataDir(), now = Date.now()): Promise<ChannelLinkView> {
+const PULL_TIMEOUT_MS = 4_000;
+
+type ChannelFetch = (url: string, init: { signal: AbortSignal; cache: "no-store" }) => Promise<{ ok: boolean; json(): Promise<unknown> }>;
+
+/**
+ * Agent URL for pulling the heartbeat. The PC often cannot reach the Mac (separate router),
+ * so when no fresh heartbeat was pushed the panel asks the job agent for `GET /v1/channel`.
+ */
+export function channelPullUrl(env: NodeJS.ProcessEnv = process.env): string | null {
+  const raw = env.SKLAD_PC_AGENT_URL?.trim();
+  if (!raw) return null;
+  try {
+    const url = new URL("/v1/channel", raw);
+    if (url.protocol !== "http:" && url.protocol !== "https:") return null;
+    return url.toString();
+  } catch {
+    return null;
+  }
+}
+
+export async function tickChannel(
+  directory = dataDir(),
+  now = Date.now(),
+  options: { pullUrl?: string | null; fetchImpl?: ChannelFetch } = {},
+): Promise<ChannelLinkView> {
+  const pullUrl = options.pullUrl === undefined ? channelPullUrl() : options.pullUrl;
   return exclusive(directory, async () => {
-    const file = await ensureChannel(directory, now);
+    let file = await ensureChannel(directory, now);
+    const fresh = file.agentLastSeenMs !== null && now - file.agentLastSeenMs <= CHANNEL_STALE_MS / 2;
+    if (!fresh && pullUrl) {
+      const pulled = await pullHeartbeat(pullUrl, options.fetchImpl ?? (fetch as unknown as ChannelFetch));
+      if (pulled) {
+        file = reconcile(file, pulled, now).file;
+        await pinStableBaseUrl(file);
+        await writeChannel(directory, file);
+      }
+    }
     return project(file, now);
   });
+}
+
+async function pullHeartbeat(url: string, fetchImpl: ChannelFetch): Promise<HeartbeatInput | null> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), PULL_TIMEOUT_MS);
+  try {
+    const response = await fetchImpl(url, { signal: controller.signal, cache: "no-store" });
+    if (!response.ok) return null;
+    return parseChannelBody(await response.json());
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 export async function applyHeartbeat(

@@ -8,7 +8,7 @@ import { GET as linkGet } from "@/app/api/hosts/link/route";
 import { POST as testPost } from "@/app/api/hosts/test/route";
 import { createJobStore } from "@/lib/jobs/engine";
 import { createHost, getHost } from "@/lib/qbittorrent/store";
-import { applyHeartbeat, parseChannelBody, tickChannel } from "@/lib/service/channel";
+import { applyHeartbeat, channelPullUrl, parseChannelBody, tickChannel } from "@/lib/service/channel";
 import { CHANNEL_TEXT, emptyChannel, overlayHostError, reconcile, type HeartbeatInput } from "@/lib/service/channel-view";
 import { dispatchOnce } from "@/lib/service/dispatch";
 
@@ -257,6 +257,38 @@ it("serves the link status the panel reads", async () => {
   const body = await response.json() as { state: string; peers: { "pc-agent": { detail: string } } };
   expect(body.state).toBe("down");
   expect(body.peers["pc-agent"].detail).toBe(CHANNEL_TEXT.agentMissing);
+});
+
+it("pulls the heartbeat from the Windows agent when none was pushed", async () => {
+  const dir = await tempDir();
+  const calls: string[] = [];
+  const fetchImpl = async (url: string) => {
+    calls.push(url);
+    return { ok: true, json: async () => ({ role: "channel", ...heartbeat() }) };
+  };
+  const link = await tickChannel(dir, 10_000, { pullUrl: "http://192.168.0.16:4730/v1/channel", fetchImpl });
+  expect(calls).toEqual(["http://192.168.0.16:4730/v1/channel"]);
+  expect(link.state).toBe("up");
+  expect(link.peers["pc-agent"].qbittorrent).toBe("up");
+  const again = await tickChannel(dir, 12_000, { pullUrl: "http://192.168.0.16:4730/v1/channel", fetchImpl });
+  expect(calls).toHaveLength(1);
+  expect(again.state).toBe("up");
+});
+
+it("keeps the link down when the agent cannot be pulled", async () => {
+  const dir = await tempDir();
+  const fetchImpl = async () => {
+    throw new Error("ECONNREFUSED");
+  };
+  const link = await tickChannel(dir, 10_000, { pullUrl: "http://192.168.0.16:4730/v1/channel", fetchImpl });
+  expect(link.state).toBe("down");
+  expect(link.peers["pc-agent"].detail).toBe(CHANNEL_TEXT.agentMissing);
+});
+
+it("builds the pull address only from an http agent URL", () => {
+  expect(channelPullUrl({ SKLAD_PC_AGENT_URL: "http://192.168.0.16:4730" } as unknown as NodeJS.ProcessEnv)).toBe("http://192.168.0.16:4730/v1/channel");
+  expect(channelPullUrl({} as unknown as NodeJS.ProcessEnv)).toBeNull();
+  expect(channelPullUrl({ SKLAD_PC_AGENT_URL: "file:///etc" } as unknown as NodeJS.ProcessEnv)).toBeNull();
 });
 
 function heartbeat(patch: Partial<HeartbeatInput> = {}): HeartbeatInput {

@@ -20,6 +20,7 @@ import {
   confirmJob,
   httpError,
 } from "./commands.mjs";
+import { collectChannel, ensureLanForward } from "./channel-probe.mjs";
 import { readLogTail, redactLine } from "./log-redact.mjs";
 import {
   admitHeavy,
@@ -65,6 +66,19 @@ const server = http.createServer((req, res) => {
   });
 });
 
+if (!MOCK && process.platform === "win32") {
+  const keepForward = () => {
+    ensureLanForward().then(
+      (result) => {
+        if (result !== "ok" && result !== "skipped") note(`channel ${result}`);
+      },
+      () => note("channel forward check failed"),
+    );
+  };
+  setTimeout(keepForward, 2_000).unref();
+  setInterval(keepForward, 60_000).unref();
+}
+
 server.listen(PORT, HOST, () => {
   const address = server.address();
   const port = address && typeof address === "object" ? address.port : PORT;
@@ -76,6 +90,10 @@ async function handle(req, res) {
   const parts = url.pathname.split("/").filter(Boolean);
   if (req.method === "GET" && parts.length === 2 && parts[0] === "v1" && parts[1] === "health") {
     send(res, 200, health());
+    return;
+  }
+  if (req.method === "GET" && parts.length === 2 && parts[0] === "v1" && parts[1] === "channel") {
+    send(res, 200, await collectChannel());
     return;
   }
   if (req.method === "GET" && parts.length === 2 && parts[0] === "v1" && parts[1] === "logs") {
