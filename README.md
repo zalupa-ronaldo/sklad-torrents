@@ -40,10 +40,9 @@ npm run dev
 
 ## Настоящие агенты хостов
 
-Полка в демо, пока режим не `agents`. Это решает `src/addons/drives/store.ts`. `SKLAD_DRIVE_MODE=agents` включает агентов, `SKLAD_DRIVE_MODE=mock` возвращает демо. Если переменная не задана, берётся `"mode"` из `data/drive-agents.json`, а когда файла нет — снова `mock`. Адреса, которые панель подставляет, когда в этом файле нет списка агентов:
+Полка в демо, пока режим не `agents`. Это решает `src/addons/drives/store.ts`. `SKLAD_DRIVE_MODE=agents` включает агентов, `SKLAD_DRIVE_MODE=mock` возвращает демо. Если переменная не задана, берётся `"mode"` из `data/drive-agents.json`, а когда файла нет — снова `mock`.
 
-- Mac: `SKLAD_MAC_AGENT_URL`, иначе `http://127.0.0.1:4371`
-- Windows: `SKLAD_WINDOWS_AGENT_URL`, иначе `http://127.0.0.1:4372`
+Адрес Mac-агента: если задан `SKLAD_MAC_AGENT_URL`, панель ставит его агенту `mac-mini` и любому сохранённому адресу loopback на порту `4371`, в том числе из `data/drive-agents.json`. Без переменной список из файла остаётся, а если файла нет — `http://127.0.0.1:4371`. Windows, когда в файле нет списка агентов: `SKLAD_WINDOWS_AGENT_URL`, иначе `http://127.0.0.1:4372`. Если список в файле есть, адрес Windows берётся из файла.
 
 Оба процесса полки слушают `0.0.0.0` на своём порту. Макет включается только флагом `--mock` (`process.argv`). Переменной `SKLAD_PC_AGENT_MOCK` эти два файла не смотрят. Чтобы читать эту машину, `--mock` не передают.
 
@@ -63,7 +62,34 @@ node --import ./agents/register.mjs agents/mac-agent/drive.mts --port 4371
 SKLAD_DRIVE_MODE=agents SKLAD_MAC_AGENT_URL=http://127.0.0.1:4371 npm run dev
 ```
 
-Адрес, который должна использовать панель: `http://127.0.0.1:4371`.
+Адрес, который должна использовать панель на этом же Mac, без Docker: `http://127.0.0.1:4371`.
+
+### Панель в Docker
+
+Образ `linux/arm64`. Слушает `4317` и публикует его только на `127.0.0.1`. Агент дисков в образ не входит и в контейнере не запускается: ему нужны тома Mac, поэтому он остаётся на хосте.
+
+Сначала агент на Mac, из корня репозитория:
+
+```bash
+node --import ./agents/register.mjs agents/mac-agent/drive.mts --port 4371
+```
+
+Потом панель, из того же корня:
+
+```bash
+docker compose up -d --build
+```
+
+Панель: [http://127.0.0.1:4317](http://127.0.0.1:4317). Остановка: `docker compose down`. Второй `npm run dev` на порту `4317` не нужен.
+
+`compose.yaml` задаёт адреса, не ключи:
+
+- `SKLAD_MAC_AGENT_URL=http://host.docker.internal:4371` — drive-agent на хосте
+- `SKLAD_PC_AGENT_URL=http://192.168.0.16:4730` — панель сама запрашивает `GET /v1/channel`
+- `SKLAD_DRIVE_MODE=agents` и `SKLAD_REAL_ONLY=1`
+- `SKLAD_DATA_DIR=/Users/uzer/.local/sklad-data-clean` — этот каталог примонтирован как bind, не как копия volume
+
+Сеть `lan` не `internal`, поэтому из контейнера открываются `192.168.0.16:4730`, `192.168.0.16:8080` и `192.168.0.16:18080`. Эти порты compose наружу не публикует. `.env`, ключи и пароли в образ и в git не входят.
 
 ### Windows
 

@@ -4,6 +4,7 @@ import { copyFile, mkdir, readFile, rename, unlink, writeFile, stat } from "node
 import path from "node:path";
 import { createInterface } from "node:readline";
 
+import { applyMacDriveAgentUrl, macDriveAgentUrl } from "@/addons/drives/agent-url";
 import { uniqueDisks } from "@/addons/drives/disk-table";
 import { summarizeIndexed } from "@/addons/drives/disk-summary";
 import { mergeVolumeRecords } from "@/addons/drives/reconcile";
@@ -244,12 +245,11 @@ async function writeCatalogChangesBody(file: CatalogFile, previous: CatalogFile)
 
 export function defaultAgentConfig(): AgentConfigFile {
   const mode = process.env.SKLAD_DRIVE_MODE === "agents" ? "agents" : "mock";
-  const mac = process.env.SKLAD_MAC_AGENT_URL || "http://127.0.0.1:4371";
-  const win = process.env.SKLAD_WINDOWS_AGENT_URL || "http://127.0.0.1:4372";
+  const win = process.env.SKLAD_WINDOWS_AGENT_URL?.trim() || "http://127.0.0.1:4372";
   return {
     mode,
     agents: [
-      { id: "mac-mini", name: "Mac mini", os: "darwin", url: mac },
+      { id: "mac-mini", name: "Mac mini", os: "darwin", url: macDriveAgentUrl() },
       { id: "windows-pc", name: "Windows PC", os: "win32", url: win },
     ],
   };
@@ -265,8 +265,8 @@ export async function readAgentConfig(): Promise<AgentConfigFile> {
       : parsed.mode === "agents"
         ? "agents"
         : fallback.mode;
-    const agents = Array.isArray(parsed.agents) && parsed.agents.length > 0 ? parsed.agents.filter(isAgent) : fallback.agents;
-    return { mode, agents };
+    const stored = Array.isArray(parsed.agents) && parsed.agents.length > 0 ? parsed.agents.filter(isAgent) : fallback.agents;
+    return { mode, agents: applyMacDriveAgentUrl(stored, process.env) };
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return fallback;
     throw new DriveError(500, "Не удалось прочитать адреса агентов.");
