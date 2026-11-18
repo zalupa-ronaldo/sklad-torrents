@@ -12,8 +12,7 @@ const pages = {
   torrents: ["Торренты", "ArrowDownUp", "Раздачи qBittorrent на ваших хостах."],
   scheduler: ["Планировщик", "Clock3", "Одна активная загрузка на физический диск."],
   jobs: ["Очередь задач", "ListChecks", "Ход операций на ваших хостах."],
-  games: ["Игровая полка", "Gamepad2", "Библиотека игр и подготовка копий на SSD."],
-  move: ["Перенос и копирование", "ArrowDownUp", "Выберите файл и носитель назначения."],
+  games: ["Игровая полка", "Gamepad2", "Windows-игры, архивные диски и игровой SSD."],  move: ["Перенос и копирование", "ArrowDownUp", "Выберите файл и носитель назначения."],
   integrity: ["Проверка SHA-256", "Check", "Манифесты файлов и сверка копий."],
   index: ["Индекс файлов", "Database", "Поиск по снимкам и обновление индекса."],
   localsend: ["LocalSend", "Network", "Отправка и приём файлов по локальной сети."],
@@ -48,8 +47,7 @@ const diskOf = (s, f) => byId(s.disks, f.diskId);
 const hostOf = (s, d) => (d && d.host ? byId(s.hosts, d.host) : undefined) || { id: "", name: "Хост не сообщён", online: false };
 function kindMark(kind) {
   return families[kind] ? families[kind][0] : "—";
-}
-const available = (s, d) => Boolean(d?.online && hostOf(s, d)?.online);
+}const available = (s, d) => Boolean(d?.online && hostOf(s, d)?.online);
 const pathOf = (s, f) => (diskOf(s, f).mount || "") + f.dir + f.name;
 const action = (name, value = "") => `data-action="${name}" data-value="${esc(value)}"`;
 function button(name, label, value = "", classes = "secondary-action", extra = "") {
@@ -144,8 +142,7 @@ function topbar(s) {
 function heading(s) {
   const page = s.ui.page;
   return (
-    `<div><h1 id="title" tabindex="-1">${page === "overview" ? "Диспетчер склада" : pages[page][0]}</h1><p>${pages[page][2]}</p></div>` +
-    (page === "overview"
+    `<div><h1 id="title" tabindex="-1">${page === "overview" ? "Диспетчер склада" : page === "games" ? "Игры" : pages[page][0]}</h1><p>${pages[page][2]}</p></div>` +    (page === "overview"
       ? button("find", icon("Search") + "Найти файл", "", "primary")
       : page === "torrents"
         ? button(
@@ -187,8 +184,7 @@ function shelf(s) {
       const detail = online ? hostOf(s, d).name + " · " + bytes(d.sizeBytes) : "Был в сети " + dateText(d.lastSeen);
       return button(
         "disk",
-        `<span class="carrier-type">${kindMark(d.kind)}</span><span class="carrier-label"><b>${esc(d.label)}</b><small>${esc(detail)}</small></span><span class="connect-state ${online ? "" : "off"}">${online ? "В сети" : "Не в сети"}</span>`,
-        d.id,
+        `<span class="carrier-type">${kindMark(d.kind)}</span><span class="carrier-label"><b>${esc(d.label)}</b><small>${esc(detail)}</small></span><span class="connect-state ${online ? "" : "off"}">${online ? "В сети" : "Не в сети"}</span>`,        d.id,
         "inventory-drive" + (online ? "" : " unavailable"),
       );
     })
@@ -234,8 +230,7 @@ function devicesPage(s) {
           const used = d.sizeBytes - d.freeBytes;
           const retry = scan?.state === "error";
           return `<article class="device-panel card ${online ? "" : "device-offline"}">
-        <div class="device-heading"><span class="carrier-type">${kindMark(d.kind)}</span><h3>${esc(d.label)}</h3><span class="device-status">${online ? "В сети" : "Не в сети"}</span></div>
-        <p class="device-path">${esc(d.mount || d.location)} · ${esc(d.fs)}</p>
+        <div class="device-heading"><span class="carrier-type">${kindMark(d.kind)}</span><h3>${esc(d.label)}</h3><span class="device-status">${online ? "В сети" : "Не в сети"}</span></div>        <p class="device-path">${esc(d.mount || d.location)} · ${esc(d.fs)}</p>
         ${meter(d.sizeBytes ? Math.round((100 * used) / d.sizeBytes) : 0, "Занято на " + d.label)}
         <div class="device-volume"><span>Занято <b>${bytes(used)}</b></span><span>Свободно <b>${bytes(d.freeBytes)}</b></span></div>
         <p class="scan-time">Последний скан · ${esc(scanTime(d.lastScan))}</p>
@@ -292,8 +287,7 @@ function queue(s, compact = false) {
       return `<article class="job-row ${j.state}" data-job="${esc(j.id)}"><div class="job-body">${button("pipeTask", esc(j.title), j.id, "task-link", `aria-label="Детали задачи · ${esc(j.title)}"`)}${!compact && route ? `<p class="task-route">${route}</p>` : ""}<small>${esc(byId(s.hosts, j.host)?.name)} · <strong>${label}</strong></small>
       ${j.state !== "done" ? meter(j.progress, j.title) : ""}<div class="job-metrics">${j.state !== "done" ? num(j.progress) + "%" : ""} ${metrics}</div>
       ${!online && active ? empty("Для продолжения подключите носитель и его хост.") : ""}
-      ${j.sha256 ? `<p class="task-route">SHA-256 ${j.sha256.verified === true ? "совпала" : j.sha256.verified === false ? "различается" : "без сверки"}${j.sha256.source ? " · " + esc(j.sha256.source) : ""}</p>` : ""}
-      ${j.state === "done" && j.verified ? '<p class="task-route">SHA-256 совпал</p>' : ""}
+      ${j.sha256 ? `<p class="task-route">SHA-256 ${j.sha256.verified === true ? "совпала" : j.sha256.verified === false ? "различается" : "без сверки"}${j.sha256.source ? " · " + esc(j.sha256.source) : ""}</p>` : ""}      ${j.state === "done" && j.verified ? '<p class="task-route">SHA-256 совпал</p>' : ""}
       ${j.error ? `<p class="error-message">${esc(j.error)}</p>` : ""}<div class="job-actions">${active ? button("pause", j.state === "paused" ? "Продолжить" : "Пауза", j.id, "secondary-action", j.state === "paused" && !online ? "disabled" : "") + button("cancel", "Отмена", j.id) : j.state === "error" ? button("retry", "Повторить", j.id, "secondary-action", online ? "" : "disabled") : ""}</div></div></article>`;
     })
     .join("");
@@ -468,8 +462,7 @@ function torrentsPage(s) {
   const u = s.ui,
     items = s.torrents.filter(
       (t) =>
-        (!u.host || t.hostId === u.host || diskOf(s, t)?.host === u.host) &&
-        (!u.status || t.state === u.status) &&
+        (!u.host || t.hostId === u.host || diskOf(s, t)?.host === u.host) &&        (!u.status || t.state === u.status) &&
         t.name.toLowerCase().includes(u.torrentQuery.trim().toLowerCase()),
     );
   const tabs = Object.entries({ "": "Все", ...torrentStates })
@@ -482,8 +475,7 @@ function torrentsPage(s) {
       const kindIcon = fileTypes[t.kind] ? fileTypes[t.kind][1] : "File";
       const hostName = t.hostName || hostOf(s, d).name;
       return `<tr class="torrent-row"><td>${button("torrent", `<span class="tile">${icon(kindIcon)}</span><span><strong>${esc(t.name)}</strong><small>${bytes(t.sizeBytes)}</small></span>`, t.id, "item")}</td>
-      <td class="host-cell">${esc(hostName)}</td><td><span class="pill ${t.state || ""}">${available(s, d) ? torrentStates[t.state] || "Состояние не сообщается" : "Не в сети"}</span></td><td><div class="progress">${t.progress == null ? "—" : t.progress + "%"}${t.progress == null ? "" : meter(t.progress, t.name)}</div></td>
-      <td class="rate-cell rate">${rate ? num(rate) + " МБ/с" : "—"}</td><td>${button("torrent", icon("ChevronRight"), t.id, "row-more", `aria-label="Подробности: ${esc(t.name)}"`)}</td></tr>`;
+      <td class="host-cell">${esc(hostName)}</td><td><span class="pill ${t.state || ""}">${available(s, d) ? torrentStates[t.state] || "Состояние не сообщается" : "Не в сети"}</span></td><td><div class="progress">${t.progress == null ? "—" : t.progress + "%"}${t.progress == null ? "" : meter(t.progress, t.name)}</div></td>      <td class="rate-cell rate">${rate ? num(rate) + " МБ/с" : "—"}</td><td>${button("torrent", icon("ChevronRight"), t.id, "row-more", `aria-label="Подробности: ${esc(t.name)}"`)}</td></tr>`;
     })
     .join("");
   return `<section id="transfers" class="card"><div class="card-heading"><h2>${icon("ArrowDownUp")}Раздачи <span class="count">${items.length}</span></h2>${search("query", "Поиск по имени", u.torrentQuery)}</div>
@@ -561,8 +553,7 @@ function gameShelf(s) {
       })
       .join("") || empty("Игр для этой платформы пока нет.")
   }</div>`;
-}
-const operationTitles = {
+}const operationTitles = {
   move: ["Файлы и раздачи", "Поставить в очередь"],
   integrity: ["Контрольные суммы", "Проверить SHA-256"],
   localsend: ["Передача LocalSend", "Поставить передачу в очередь"],
@@ -591,8 +582,7 @@ function operationModel(s) {
   const receive = form.direction === "Принять",
     recvDisks = writeable.filter((d) => d.id !== s.gamePool);
   const inbox = byId(recvDisks, form.inbox || s.sendSettings?.inbox) || recvDisks[0];
-  const peers = [...s.hosts, ...(s.devices || [])].filter((h) => h.id !== src.host && h.online);
-  const peer = byId(peers, form.peer) || peers[0];
+  const peers = [...s.hosts, ...(s.devices || [])].filter((h) => h.id !== src.host && h.online);  const peer = byId(peers, form.peer) || peers[0];
   const medium = form.medium || "DVD-5",
     opt = form.opt || "Собрать ISO",
     art = opt === "Рисунок на поверхности";
@@ -786,6 +776,7 @@ function modalView(s) {
   if (s.ui.modal.kind === "compactDisk") {
     return `<div class="dialog-inner"><div class="dialog-head"><h2 id="dialog-title">Сжать каталог</h2></div><label class="field">Путь на диске<input id="compressPath" value="${esc(s.ui.form.compressPath || "")}"></label><div class="confirm-actions">${button("close", "Отмена", "", "secondary-action")}${button("compactDisk", "Сжать каталог", s.ui.modal.id, "primary")}</div></div>`;
   }
+  if (typeof s.ui.modal.kind === "string" && s.ui.modal.kind.startsWith("win") && globalThis.GameLibrary) return GameLibrary.modal(s);
   if (s.ui.modal.kind === "confirm") {
     const m = s.ui.modal;
     return `<div class="dialog-inner"><div class="dialog-head"><h2 id="dialog-title">${esc(m.title)}</h2></div><p id="confirm-description">${esc(m.description)}</p><div class="confirm-actions">${button("close", "Отмена", "", "secondary-action", 'id="confirm-cancel"')}${button("confirmAction", esc(m.label), "", "danger-action")}</div></div>`;
@@ -860,13 +851,13 @@ function av1LiveCard(s) {
       })
       .join(""),
   );
-}
-function screen(s) {
+}function screen(s) {
   const page = s.ui.page;
   if (page === "overview") return dashboard(s);
   if (page === "details") return fileDetails(s);
   if (page === "devices") return devicesPage(s);
   if (page === "jobs") return queue(s) + av1LiveCard(s);
+  if (page === "games" && globalThis.GameLibrary) return GameLibrary.page(s);
   if (s.loading) return skeleton("Загрузка раздела", 4);
   if (page === "drives" || page === "index") return fileSearch(s);
   if (page === "torrents") return torrentsPage(s) + torrentTransfers(s);

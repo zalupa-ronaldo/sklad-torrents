@@ -32,6 +32,9 @@ it.skipIf(!handbrake)("encodes two videos on two workers with separate directori
   const hubUrl = `http://127.0.0.1:${port}`;
   spawnNode(workerA, ["encode", "worker", "--id", "worker-a", "--role", "pc"], token, { SKLAD_HUB: hubUrl, SKLAD_ENCODE_HOLD_MS: "1200" });
   spawnNode(workerB, ["encode", "worker", "--id", "worker-b", "--role", "mac"], token, { SKLAD_HUB: hubUrl, SKLAD_ENCODE_HOLD_MS: "1200" });
+  await waitReady(path.join(workerA, "worker-ready.json"));
+  await waitReady(path.join(workerB, "worker-ready.json"));
+  await delay(400);
   expect((await enqueueEncode({ source: red, destination: path.join(coord, "red-out.mp4"), codec: "av1", allowSoftware: true, directory: coord })).ok).toBe(true);
   expect((await enqueueEncode({ source: blue, destination: path.join(coord, "blue-out.mp4"), codec: "av1", allowSoftware: true, directory: coord })).ok).toBe(true);
   const done = await waitJobs(coord, 2);
@@ -192,6 +195,19 @@ async function clip(dir: string, color: string): Promise<string> {
   const result = spawnSync("ffmpeg", ["-y", "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", `color=c=${color}:s=64x64:r=8:d=1`, "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=44100:duration=1", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest", file], { encoding: "utf8" });
   if (result.status !== 0) throw new Error(result.stderr || "ffmpeg");
   return file;
+}
+
+async function waitReady(file: string): Promise<void> {
+  const started = Date.now();
+  while (Date.now() - started < 20_000) {
+    try {
+      await stat(file);
+      return;
+    } catch {
+      await delay(50);
+    }
+  }
+  throw new Error("Воркер не зарегистрировался до постановки заданий.");
 }
 
 async function waitJobs(dir: string, count: number): Promise<{ id: string; state: string; verified: boolean }[]> {

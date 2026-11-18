@@ -34,8 +34,12 @@ function createState(scenario, page = "overview") {
   };
 }
 const demoOn = globalThis.PanelAdapter && PanelAdapter.demoEnabled(location.search, globalThis.SKLAD_DEV === true);
-let state = demoOn ? createState("normal") : LiveWire.placeholder();
+let state = demoOn ? createState("normal", location.hash === "#games" ? "games" : "overview") : LiveWire.placeholder();
 state.demo = Boolean(demoOn);
+if (!state.demo) {
+  state.liveLibrary = true;
+  if (location.hash === "#games" && state.ui) state.ui.page = "games";
+}
 
 // Update only changed nodes. Ticks and filter changes must not replace a focused input,
 // dismiss a native select, reset a file picker or move the caret.
@@ -417,8 +421,14 @@ function advanceTasks(seconds) {
   Pipeline.tick(state, seconds);
   let changed = state.ui.page === "scheduler" && minute !== Math.floor(state.schedule.clock / 60000);
   // Snapshot the list: completing a copy can enqueue another job.
+  if (globalThis.GameLibrary && GameLibrary.tickCompression(state, seconds) && state.ui.page === "games") changed = true;
   for (const j of [...state.tasks]) {
     if (j.state !== "running") continue;
+    if (j.flow && globalThis.GameLibrary) {
+      GameLibrary.tickMove(state, j, seconds);
+      changed = true;
+      continue;
+    }
     changed = true;
     const milestone = Math.floor(j.progress / 25);
     j.progress = Math.min(100, j.progress + ((seconds * j.bytesPerSec) / Math.max(j.totalBytes, 1)) * 100);
@@ -433,6 +443,7 @@ function advanceTasks(seconds) {
 function taskAction(name, id) {
   const j = byId(state.tasks, id);
   if (!j) return;
+  if (j.flow && globalThis.GameLibrary) return GameLibrary.taskAction(state, j, name);
   if (name === "cancel") {
     j.state = "cancelled";
     j.bytesPerSec = 0;
@@ -588,6 +599,7 @@ function askConfirm(kind, id, title, description, label) {
   state.ui.modal = { kind: "confirm", action: kind, id, title, description, label };
 }
 async function act(name, value) {
+  if (name.startsWith("win") && globalThis.GameLibrary) return GameLibrary.act(state, name, value);
   if (name.startsWith("inv")) return Inventory.act(name, value);
   if (name.startsWith("pipe")) return Pipeline.act(name, value);
   if (name.startsWith("shop")) return Workshops.act(name, value);
@@ -599,7 +611,14 @@ async function act(name, value) {
     case "confirmAction": {
       const m = u.modal;
       if (m?.kind !== "confirm") break;
-      if (m.action === "pipeDelete") Pipeline.confirmed(m.action, m.id);
+      if (m.action === "winStop") {
+        const g = byId(state.gameLibrary, m.id);
+        if (g) g.running = false;
+      } else if (m.action === "winLiveMove" && typeof liveMoveConfirm === "function") {
+        await liveMoveConfirm(m);
+        return;
+      } else if (m.action === "winDelete" && globalThis.GameLibrary) GameLibrary.confirm(state, m.id);
+      else if (m.action === "pipeDelete") Pipeline.confirmed(m.action, m.id);
       else Inventory.confirmed(m.action, m.id);
       u.modal = null;
       message("Изменения сохранены.");
@@ -782,7 +801,7 @@ const simulatedRequests = new Set([
   "addTorrent",
 ]);
 async function dispatch(name, value) {
-  if (!state.demo && globalThis.LiveWire) {
+  if (!state.demo && globalThis.LiveWire && !String(name).startsWith("win")) {
     const outcome = await LiveWire.handle(name, value, state);
     if (outcome && outcome.stop) {
       if (outcome.message) message(outcome.message);
@@ -957,13 +976,46 @@ function addTorrent() {
   message("Раздача добавлена.");
   render(state);
 }
+const gameDragType = "application/x-sklad-game";
 document.addEventListener("dragstart", (e) => {
+  const tile = e.target.closest("[data-game-drag]");
+  if (tile && (matchMedia("(max-width:600px)").matches || matchMedia("(pointer:coarse)").matches)) {
+    e.preventDefault();
+    return;
+  }
+  if (tile?.draggable) {
+    e.dataTransfer.setData(gameDragType, tile.dataset.gameDrag);
+    e.dataTransfer.effectAllowed = "move";
+    return;
+  }
   if (e.target.id === "grab-file") e.dataTransfer.setData("text/plain", operationModel(state).file.id);
 });
 document.addEventListener("dragover", (e) => {
+  const zone = e.target.closest("[data-game-drop]");
+  if (zone && e.dataTransfer.types.includes(gameDragType)) {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+    zone.classList.add("wg-over");
+  }
   if (e.target.closest('[data-action="dest"]')) e.preventDefault();
 });
+function clearGameDrop() {
+  document.querySelectorAll(".wg-over").forEach((el) => el.classList.remove("wg-over"));
+}
+document.addEventListener("dragleave", (e) => {
+  const zone = e.target.closest("[data-game-drop]");
+  if (zone && !(e.relatedTarget instanceof Node && zone.contains(e.relatedTarget))) zone.classList.remove("wg-over");
+});
+document.addEventListener("dragend", clearGameDrop);
 document.addEventListener("drop", (e) => {
+  clearGameDrop();
+  const zone = e.target.closest("[data-game-drop]"),
+    game = e.dataTransfer.getData(gameDragType);
+  if (zone && game) {
+    e.preventDefault();
+    void dispatch(zone.dataset.gameDrop === "ssd" ? "winPlay" : "winArchive", game);
+    return;
+  }
   const dest = e.target.closest('[data-action="dest"]');
   if (dest) {
     e.preventDefault();

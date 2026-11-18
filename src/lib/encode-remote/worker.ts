@@ -26,6 +26,7 @@ export async function runEncodeWorker(input: { hub: string; token: string; id: s
   const platform = process.platform === "darwin" || process.platform === "win32" || process.platform === "linux" ? process.platform : null;
   if (!platform) throw new Error("Платформа воркера не Mac, Windows и не Linux.");
   await post(hub, "/v1/workers", headers, { id: input.id, role: input.role, platform, encoders: advertised, slots: 1, freeBytes: await freeBytes(directory) });
+  await writeFile(path.join(directory, "worker-ready.json"), JSON.stringify({ id: input.id, at: Date.now() }), "utf8");
   let stop = false;
   process.on("SIGTERM", () => { stop = true; });
   process.on("SIGINT", () => { stop = true; });
