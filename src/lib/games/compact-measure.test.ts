@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { expect, it } from "vitest";
 
-import { accountReadings, buildProbeReport, clipDiag, compressionProbeScript, decideCompact, decodeCompactOutput, encodePowerShellCommand, enumerateProbePaths, finishMeasurement, listOwnedFiles, measureDebugRequested, parseCompactListing, parseCompactSummary, parseSizeProbeOutput, powershellProbeArgs, readingsFromQuery, reconcileOwnedRoot, serializeProbePaths, stripPowerShellNoise, windowsPowershellCandidates, type OwnedFile, type WofState } from "@/lib/games/compact-measure";
+import { accountReadings, bindProbeRows, buildProbeReport, clipDiag, compressionProbeScript, decideCompact, decodeCompactOutput, encodePowerShellCommand, enumerateProbePaths, finishMeasurement, listOwnedFiles, measureDebugRequested, parseCompactListing, parseCompactSummary, parseSizeProbeOutput, powershellProbeArgs, readingsFromQuery, reconcileOwnedRoot, serializeProbePaths, stripPowerShellNoise, windowsPowershellCandidates, type OwnedFile, type WofState } from "@/lib/games/compact-measure";
 import { localJobHost, hostFacts } from "@/lib/jobs/local-host";
 
 const smoke = "    36864 :  1048576 = 28.4 to 1 XPRESS8K payload.bin";
@@ -180,7 +180,9 @@ it("finds powershell.exe under SystemRoot and does not read PATH", () => {
   expect(script).toMatch(/Write-Output/);
   expect(script).not.toMatch(/OpenStandardOutput/);
   expect(script).toMatch(/\$ProgressPreference = 'SilentlyContinue'/);
-  expect(script).not.toMatch(/\[Console\]::OutputEncoding/);
+  expect(script).toMatch(/try \{ \[Console\]::OutputEncoding = \$utf8 \} catch \{\}/);
+  expect(script).toMatch(/SKLAD_COMPACT_OUT/);
+  expect(script).toMatch(/"index":/);
   expect(script).toMatch(/GetFileInformationByHandleEx/);
   expect(script).toMatch(/0x90310/);
   expect(script).toMatch(/0x80000017/);
@@ -249,7 +251,7 @@ it("accepts the native PR25 compact /Q sample when the marker is 26 bytes and th
   const utf8 = Buffer.from('{"path":"C:\\\\pool\\\\game\\\\payload.bin","allocated":36864,"wof":36864,"algorithm":"XPRESS8K"}\n', "utf8");
   const utf16 = Buffer.from('{"path":"C:\\\\pool\\\\game\\\\payload.bin","allocated":36864,"wof":36864,"algorithm":"XPRESS8K"}\n', "utf16le");
   for (const buf of [utf8, utf16]) {
-    expect(parseSizeProbeOutput(buf).rows).toEqual([{ path: "C:\\pool\\game\\payload.bin", allocated: 36_864, wof: 36_864, algorithm: "XPRESS8K" }]);
+    expect(parseSizeProbeOutput(buf).rows).toEqual([{ index: null, path: "C:\\pool\\game\\payload.bin", allocated: 36_864, wof: 36_864, algorithm: "XPRESS8K" }]);
   }
   expect(parseSizeProbeOutput(Buffer.alloc(0)).ok).toBe(false);
 });
@@ -261,8 +263,8 @@ it("counts only WOF-backed files and drops a PowerShell progress record from the
   const parsed = parseSizeProbeOutput(Buffer.from(`${clixml}\n${payload}${json}`, "utf8"));
   expect(parsed.ok).toBe(true);
   expect(parsed.rows).toEqual([
-    { path: "C:\\pool\\game\\payload.bin", allocated: 36_864, wof: 36_864, algorithm: "XPRESS8K" },
-    { path: "C:\\pool\\game\\sklad-game.json", allocated: 97, wof: 0, algorithm: null },
+    { index: null, path: "C:\\pool\\game\\payload.bin", allocated: 36_864, wof: 36_864, algorithm: "XPRESS8K" },
+    { index: null, path: "C:\\pool\\game\\sklad-game.json", allocated: 97, wof: 0, algorithm: null },
   ]);
   const text = decodeCompactOutput(NATIVE_Q_CP866);
   const account = finishMeasurement({
@@ -302,8 +304,8 @@ it("parses a Windows PowerShell 5.1 stdout capture and ignores CLIXML on stderr"
   const utf16 = Buffer.from(lines, "utf16le");
   const utf8 = Buffer.from(lines, "utf8");
   const expected = [
-    { path: "C:\\pool\\game\\payload.bin", allocated: 36_864, wof: 36_864, algorithm: "XPRESS8K" },
-    { path: "C:\\pool\\game\\sklad-game.json", allocated: 97, wof: 0, algorithm: null },
+    { index: null, path: "C:\\pool\\game\\payload.bin", allocated: 36_864, wof: 36_864, algorithm: "XPRESS8K" },
+    { index: null, path: "C:\\pool\\game\\sklad-game.json", allocated: 97, wof: 0, algorithm: null },
   ];
   expect(parseSizeProbeOutput(utf16).rows).toEqual(expected);
   expect(parseSizeProbeOutput(utf8).rows).toEqual(expected);
@@ -352,6 +354,34 @@ it("passes each probe path separately, including spaces, quotes and Cyrillic", (
   expect(script).toMatch(/SKLAD_COMPACT_LIST/);
   expect(script).toMatch(/-is \[System\.Array\]/);
   expect(script).not.toMatch(/SKLAD_COMPACT_FILES \| ConvertFrom-Json/);
+});
+
+it("binds Cyrillic paths with spaces by index when stdout replaced them with U+FFFD", () => {
+  const files: OwnedFile[] = [
+    { relative: "данные 1.bin", full: "D:\\Тест пул\\данные 1.bin", logical: 1_048_576 },
+    { relative: "sklad-game.json", full: "D:\\Тест пул\\sklad-game.json", logical: 99 },
+  ];
+  const stdout = Buffer.from(
+    '{"index":0,"path":"???? ??\\\\????? 1.bin","allocated":36864,"wof":36864,"algorithm":"XPRESS8K"}\n{"index":1,"path":"???? ??\\\\sklad-game.json","allocated":99,"wof":0,"algorithm":null}\n',
+    "utf8",
+  );
+  const parsed = parseSizeProbeOutput(stdout);
+  expect(parsed.rows.map((row) => row.path).join(" ")).toMatch(/\uFFFD|\?/);
+  const bound = bindProbeRows(files.map((file) => file.full), parsed.rows);
+  const account = reconcileOwnedRoot({
+    files,
+    sizes: bound.values,
+    wofState: bound.states,
+    summary: { fileCount: 3, compressedCount: 1, logical: 1_048_701, stored: 36_989 },
+    perFile: new Map(),
+    markerBytes: 26,
+    markerFiles: 1,
+  });
+  expect(account).toMatchObject({ known: true, compressed: true, logical: 1_048_675, allocated: 36_963, wof: 36_864 });
+  expect(bound.values.get("D:\\Тест пул\\данные 1.bin")).toBe(36_864);
+  expect(bound.values.get("D:\\Тест пул\\sklad-game.json")).toBe(99);
+  expect(serializeProbePaths(files.map((file) => file.full))).toContain("данные 1.bin");
+  expect(serializeProbePaths(files.map((file) => file.full))).toContain("Тест пул");
 });
 
 it("stops at a symlink and at E: before reading a file", async () => {

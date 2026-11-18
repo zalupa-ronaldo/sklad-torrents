@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { constants } from "node:fs";
-import { access, lstat, mkdtemp, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { access, lstat, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -519,9 +519,6 @@ $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 $InformationPreference = 'SilentlyContinue'
 try { $OutputEncoding = New-Object System.Text.UTF8Encoding $false } catch {}
-function Emit([hashtable]$row) {
-  Write-Output ($row | ConvertTo-Json -Compress)
-}
 Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
@@ -614,6 +611,7 @@ $wofReady = $true
 }
 if ([string]::IsNullOrEmpty($env:SKLAD_COMPACT_LIST)) { [Console]::Error.WriteLine('SKLAD_COMPACT_LIST empty'); exit 1 }
 $utf8 = New-Object System.Text.UTF8Encoding $false
+try { [Console]::OutputEncoding = $utf8 } catch {}
 $raw = [System.IO.File]::ReadAllText($env:SKLAD_COMPACT_LIST, $utf8)
 $parsed = ConvertFrom-Json -InputObject $raw
 $paths = New-Object System.Collections.Generic.List[string]
@@ -622,6 +620,8 @@ if ($parsed -is [System.Array]) {
 } else {
   [void]$paths.Add([string]$parsed)
 }
+$index = 0
+$lines = New-Object System.Collections.Generic.List[string]
 foreach ($full in $paths) {
   $size = [SkladSize]::Of($full)
   $code = -1
@@ -639,7 +639,19 @@ foreach ($full in $paths) {
   } elseif ($size -ge 0 -and $code -eq 100) {
     $wof = $size
   }
-  Emit @{ path = $full; allocated = $alloc; wof = $wof; algorithm = $alg }
+  $allocJson = 'null'
+  if ($null -ne $alloc) { $allocJson = [string]$alloc }
+  $wofJson = 'null'
+  if ($null -ne $wof) { $wofJson = [string]$wof }
+  $algJson = 'null'
+  if ($null -ne $alg) { $algJson = '"' + $alg + '"' }
+  $line = '{"index":' + $index + ',"allocated":' + $allocJson + ',"wof":' + $wofJson + ',"algorithm":' + $algJson + '}'
+  [void]$lines.Add($line)
+  Write-Output $line
+  $index++
+}
+if (-not [string]::IsNullOrEmpty($env:SKLAD_COMPACT_OUT)) {
+  [System.IO.File]::WriteAllText($env:SKLAD_COMPACT_OUT, ('[' + ($lines -join ',') + ']'), $utf8)
 }
 `.trim();
 }
@@ -655,19 +667,24 @@ async function compressedSizes(files: readonly string[]): Promise<{ ok: boolean;
   }
   const listDir = await mkdtemp(path.join(tmpdir(), "sklad-compact-"));
   const listFile = path.join(listDir, "files.json");
+  const outFile = path.join(listDir, "result.json");
   let result: Awaited<ReturnType<typeof run>>;
+  let resultText = "";
   try {
     await writeFile(listFile, serializeProbePaths(files), "utf8");
-    result = await run(bin, argv, { SKLAD_COMPACT_LIST: listFile });
+    result = await run(bin, argv, { SKLAD_COMPACT_LIST: listFile, SKLAD_COMPACT_OUT: outFile });
+    try {
+      resultText = await readFile(outFile, "utf8");
+    } catch {
+      resultText = "";
+    }
   } finally {
     await rm(listDir, { recursive: true, force: true });
   }
-  const parsed = parseSizeProbeOutput(result.stdoutBuf);
-  const values = new Map<string, number | null>();
-  for (const row of parsed.rows) {
-    values.set(row.path, row.allocated);
-    states.set(row.path, { wof: row.wof, algorithm: row.algorithm });
-  }
+  const parsed = parseSizeProbeOutput(resultText ? Buffer.from(resultText, "utf8") : result.stdoutBuf);
+  const bound = bindProbeRows(files, parsed.rows);
+  const values = bound.values;
+  for (const [file, state] of bound.states) states.set(file, state);
   const numbers = files.map((file) => values.get(file) ?? null);
   const complete = numbers.every((value) => value != null);
   const total = complete ? numbers.reduce<number>((sum, value) => sum + (value ?? 0), 0) : null;
@@ -685,17 +702,40 @@ async function compressedSizes(files: readonly string[]): Promise<{ ok: boolean;
   return { ok: false, values, states, total, code: result.code, note: "GetCompressedFileSizeW не вернул размер каждого файла корня.", probe };
 }
 
-export function parseSizeProbeOutput(buf: Buffer): { ok: boolean; note: string; rows: Array<{ path: string; allocated: number | null; wof: number | null; algorithm: WofAlgorithm | null }> } {
-  const rows: Array<{ path: string; allocated: number | null; wof: number | null; algorithm: WofAlgorithm | null }> = [];
+export interface ProbeRow {
+  index: number | null;
+  path: string;
+  allocated: number | null;
+  wof: number | null;
+  algorithm: WofAlgorithm | null;
+}
+
+/** Index wins. A mojibake path from the console code page is not used for lookup. */
+export function bindProbeRows(files: readonly string[], rows: readonly ProbeRow[]): { values: Map<string, number | null>; states: Map<string, WofState> } {
+  const values = new Map<string, number | null>();
+  const states = new Map<string, WofState>();
+  for (const row of rows) {
+    const file = row.index != null ? files[row.index] : row.path;
+    if (!file) continue;
+    values.set(file, row.allocated);
+    states.set(file, { wof: row.wof, algorithm: row.algorithm });
+  }
+  return { values, states };
+}
+
+export function parseSizeProbeOutput(buf: Buffer): { ok: boolean; note: string; rows: ProbeRow[] } {
+  const rows: ProbeRow[] = [];
   const text = probeText(buf);
   for (const chunk of parsedRows(text)) {
     try {
-      const parsed = JSON.parse(chunk) as { path?: string; allocated?: number | null; wof?: number | null; algorithm?: string | null };
-      if (!parsed.path || typeof parsed.path !== "string") continue;
+      const parsed = JSON.parse(chunk) as { index?: number; path?: string; allocated?: number | null; wof?: number | null; algorithm?: string | null };
+      const index = typeof parsed.index === "number" && Number.isInteger(parsed.index) && parsed.index >= 0 ? parsed.index : null;
+      const pathText = typeof parsed.path === "string" ? parsed.path : "";
+      if (index == null && !pathText) continue;
       const allocated = typeof parsed.allocated === "number" && Number.isSafeInteger(parsed.allocated) && parsed.allocated >= 0 ? parsed.allocated : null;
       const wof = typeof parsed.wof === "number" && Number.isSafeInteger(parsed.wof) && parsed.wof >= 0 ? parsed.wof : null;
       const algorithm = typeof parsed.algorithm === "string" && WOF_ALGORITHM.test(parsed.algorithm) ? parsed.algorithm.toUpperCase() as WofAlgorithm : null;
-      rows.push({ path: parsed.path, allocated, wof, algorithm });
+      rows.push({ index, path: pathText, allocated, wof, algorithm });
     } catch {
       continue;
     }
@@ -715,8 +755,9 @@ function probeText(buf: Buffer): string {
 function parsedRows(text: string): string[] {
   return jsonObjects(text).filter((chunk) => {
     try {
-      const parsed = JSON.parse(chunk) as { path?: unknown };
-      return typeof parsed.path === "string" && parsed.path.length > 0;
+      const parsed = JSON.parse(chunk) as { path?: unknown; index?: unknown };
+      const hasIndex = typeof parsed.index === "number" && Number.isInteger(parsed.index) && parsed.index >= 0;
+      return hasIndex || (typeof parsed.path === "string" && parsed.path.length > 0);
     } catch {
       return false;
     }
