@@ -3,6 +3,7 @@ import { gzipSync } from "node:zlib";
 import os from "node:os";
 import path from "node:path";
 import { once } from "node:events";
+import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterEach, expect, it, vi } from "vitest";
 import { startAgent } from "../../../agents/lib/agent.mts";
@@ -25,6 +26,36 @@ afterEach(() => {
 });
 const volume = { serial: "test", volumeUuid: "abc", filesystem: "NTFS", volumeName: "test", mountPaths: ["C:\\"], totalBytes: 100, freeBytes: 10, busy: false, letter: "C" };
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+async function stopAgent(server: Server) {
+  if (server.listening) {
+    await new Promise<void>((resolve, reject) => {
+      server.close((error) => (error ? reject(error) : resolve()));
+    });
+  }
+  await vi.waitFor(() => expect(server.listening).toBe(false));
+}
+
+async function removeAgentDir(directory: string) {
+  let last: unknown;
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    try {
+      await rm(directory, { recursive: true, force: true });
+      return;
+    } catch (error) {
+      last = error;
+      const code = error && typeof error === "object" && "code" in error ? error.code : "";
+      if (code !== "ENOTEMPTY") throw error;
+      await sleep(20);
+    }
+  }
+  throw last;
+}
+
+async function stopAndRemove(server: Server, directory: string) {
+  await stopAgent(server);
+  await removeAgentDir(directory);
+}
 
 it("retains an in-flight volume across collection ticks, publishes pages, and never expires a ready tree", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "sklad-agent-test-"));
@@ -49,7 +80,7 @@ it("retains an in-flight volume across collection ticks, publishes pages, and ne
     const page = await (await fetch(`${base}/v1/files?serial=test&uuid=abc&revision=${index.revision}&offset=0&limit=1`)).json();
     expect(page.files[0].name).toBe("a.txt");
     expect((await fetch(`${base}/v1/files?serial=test&uuid=abc&revision=old`)).status).toBe(409);
-  } finally { await new Promise<void>((resolve) => server.close(() => resolve())); await sleep(30); await rm(directory, { recursive: true, force: true }); }
+  } finally { await stopAndRemove(server, directory); }
 });
 
 it("rebuilds a saved NTFS snapshot once when every file size is zero", async () => {
@@ -93,9 +124,7 @@ it("rebuilds a saved NTFS snapshot once when every file size is zero", async () 
     expect(metadata.volumes[0].index.recordCount).toBe(1);
     expect(metadata.volumes[0].index.state).toBe("complete");
   } finally {
-    await new Promise<void>((resolve) => server.close(() => resolve()));
-    await sleep(30);
-    await rm(directory, { recursive: true, force: true });
+    await stopAndRemove(server, directory);
   }
 });
 
@@ -124,9 +153,7 @@ it("does not list or index Z even when config calls it manual-only", async () =>
     expect(rescan.status).toBe(404);
     expect(executeIndexPlan).toHaveBeenCalledOnce();
   } finally {
-    await new Promise<void>((resolve) => server.close(() => resolve()));
-    await sleep(30);
-    await rm(directory, { recursive: true, force: true });
+    await stopAndRemove(server, directory);
   }
 });
 
@@ -178,9 +205,7 @@ it("pauses a running index on restart and resumes from the MFT cursor", async ()
     expect(plan?.cursor?.recordsDone).toBe(3);
     expect(plan?.cursor?.nextUsn).toBe("15");
   } finally {
-    await new Promise<void>((resolve) => server.close(() => resolve()));
-    await sleep(30);
-    await rm(directory, { recursive: true, force: true });
+    await stopAndRemove(server, directory);
   }
 });
 
@@ -260,9 +285,7 @@ it("drops excluded Z before resume and does not index C/D/E/F/S again when their
     expect(files.status).toBe(404);
     expect(executeIndexPlan).not.toHaveBeenCalled();
   } finally {
-    await new Promise<void>((resolve) => server.close(() => resolve()));
-    await sleep(30);
-    await rm(directory, { recursive: true, force: true });
+    await stopAndRemove(server, directory);
   }
 });
 
@@ -313,9 +336,7 @@ it("keeps manual-only D listed and rescannable while Z stays excluded", async ()
     expect(blocked.status).toBe(404);
     expect(executeIndexPlan).toHaveBeenCalledTimes(2);
   } finally {
-    await new Promise<void>((resolve) => server.close(() => resolve()));
-    await sleep(30);
-    await rm(directory, { recursive: true, force: true });
+    await stopAndRemove(server, directory);
   }
 });
 
@@ -339,9 +360,7 @@ it("does not launch compact.exe when the process is not Windows", async () => {
     expect(await response.json()).toMatchObject({ error: expect.stringMatching(/Сжатие Windows/) });
     expect(vi.mocked(executeIndexPlan).mock.calls.length).toBe(calls);
   } finally {
-    await new Promise<void>((resolve) => server.close(() => resolve()));
-    await sleep(30);
-    await rm(directory, { recursive: true, force: true });
+    await stopAndRemove(server, directory);
   }
 });
 
