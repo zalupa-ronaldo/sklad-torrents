@@ -38,14 +38,20 @@ function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function devtoolsPort(directory: string): Promise<number> {
-  for (let attempt = 0; attempt < 50; attempt += 1) {
+async function devtoolsPort(directory: string, chrome: ChildProcess): Promise<number> {
+  let stderr = "";
+  chrome.stderr?.on("data", (chunk) => {
+    stderr = `${stderr}${chunk.toString()}`.slice(-2000);
+  });
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    if (chrome.exitCode !== null) break;
     const text = await readFile(path.join(directory, "DevToolsActivePort"), "utf8").catch(() => "");
     const port = Number(text.split("\n")[0]);
     if (port) return port;
     await sleep(100);
   }
-  throw new Error("chrome did not open a debugging port");
+  chrome.kill();
+  throw new Error(stderr.trim() || "chrome did not open a debugging port");
 }
 
 describe("live home page", () => {
@@ -108,13 +114,14 @@ describe("live home page", () => {
         "--disable-gpu",
         "--no-sandbox",
         "--disable-dev-shm-usage",
+        "--no-first-run",
         "--remote-debugging-port=0",
         `--user-data-dir=${profile}`,
         "about:blank",
       ],
-      { stdio: "ignore" },
+      { stdio: ["ignore", "ignore", "pipe"] },
     );
-    const debug = await devtoolsPort(profile);
+    const debug = await devtoolsPort(profile, chrome);
     const target = (await (await fetch(`http://127.0.0.1:${debug}/json/new?${encodeURIComponent(`http://127.0.0.1:${port}/`)}`, { method: "PUT" })).json()) as {
       webSocketDebuggerUrl?: string;
     };
@@ -147,5 +154,5 @@ describe("live home page", () => {
     page.close();
     expect(hits.some((item) => item.startsWith("/api/"))).toBe(true);
     expect(text).toMatch(/Mac Live|Vault Live/);
-  }, 30_000);
+  }, 40_000);
 });
