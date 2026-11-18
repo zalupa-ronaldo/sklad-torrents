@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 
+import { measureDebugRequested } from "../src/lib/games/compact-measure.ts";
 import { createJobStore } from "../src/lib/jobs/engine.ts";
 import { dataDir } from "../src/lib/qbittorrent/store.ts";
 import { ingestSnapshot, parseSnapshotFixture, verifySnapshotJob } from "../src/lib/service/snapshot-pipeline.ts";
@@ -276,7 +277,7 @@ async function main(): Promise<void> {
     if (sub === "measure") {
       const id = flag("--id");
       if (!id) emit(2, { ok: false, command, error: "Нужен --id." });
-      const result = await games.measureGame(id);
+      const result = await games.measureGame(id, undefined, { debugProbe: measureDebugRequested(args) });
       emit(result.ok ? 0 : 3, { command, action: "measure", ...result, ok: result.ok === true });
     }
     if (sub === "launch") {
