@@ -23,6 +23,7 @@ function createState(scenario, page = "overview") {
       period: "60",
       sample: null,
       platform: "Все",
+      taskKind: "",
       category: Object.keys(data.rules)[0],
       form: {},
     },
@@ -189,7 +190,7 @@ function onArrival(f) {
     rule = state.rules["Фильмы"],
     dest = placement(rule, size);
   if (dest)
-    enqueue("copy", "Подготовка видео · " + f.name, "mac", f.sizeBytes, {
+    enqueue("av1", "AV1 · " + f.name, "mac", f.sizeBytes, {
       type: "encode",
       fileId: f.id,
       content,
@@ -321,6 +322,7 @@ function taskAction(name, id) {
     return;
   }
   if ((name === "pause" && j.state === "paused") || (name === "retry" && j.state === "error")) {
+    if (!taskAvailable(state,j)) { message("Для продолжения подключите носитель и его хост."); return; }
     if (name === "retry") j.progress = 0;
     j.state = "running";
     j.error = null;
@@ -519,6 +521,9 @@ async function act(name, value) {
     case "moveTorrent":
       navigate("move");
       u.form.source = state.files.find((f) => f.torrentId === value).id;
+      break;
+    case "taskKind":
+      u.taskKind=value;
       break;
     case "platform":
       u.platform = value;

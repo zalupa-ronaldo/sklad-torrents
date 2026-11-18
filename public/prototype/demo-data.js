@@ -134,6 +134,12 @@ const DemoData = (() => {
     operation: { type: "copy", fileId: "film-usb", target: "vault" },
   };
 
+  const av1 = {
+    id: "encode-spring", kind: "av1", title: "AV1 · Spring.mkv", host: "mac",
+    progress: 26, bytesPerSec: 4e6, etaSec: 204, state: "running", error: null, totalBytes: 1.1e9,
+    operation: { type: "encode", fileId: "trailer", content: "av1:trailer", size: 737e6, target: "media", dir: "Фильмы/" }
+  };
+
   function snapshot(scenario = "normal") {
     const data = structuredClone({
       hosts,
@@ -157,6 +163,7 @@ const DemoData = (() => {
       for (const key of ["disks", "files", "torrents", "history"]) data[key] = [];
     } else if (scenario === "offline") {
       data.hosts.find((h) => h.id === "pc").online = false;
+      data.tasks.push({...structuredClone(av1), state:"paused", bytesPerSec:0, resumeRate:av1.bytesPerSec, etaSec:null});
     } else if (scenario === "copying" || scenario === "error") {
       const task = structuredClone(example);
       if (scenario === "error")
@@ -166,7 +173,9 @@ const DemoData = (() => {
           etaSec: null,
           error: "Диск назначения отключился во время копирования.",
         });
-      data.tasks.push(task);
+      const encode = structuredClone(av1);
+      if (scenario === "error") Object.assign(encode, {state:"error", bytesPerSec:0, etaSec:null, error:"Выходной контейнер не прошёл проверку дорожек."});
+      data.tasks.push(task, encode);
       if (scenario === "error") data.tasks.push({
         id: "scan-usb", kind: "index", title: "Индексация · Флешка 01", host: "mac",
         totalBytes: disks.find(d => d.id === "usb").sizeBytes, progress: 14, bytesPerSec: 0, etaSec: null,

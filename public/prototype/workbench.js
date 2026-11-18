@@ -7,7 +7,7 @@ const pages = {
   drives: ["Все файлы", "HardDrive", "Поиск по снимкам всех носителей, включая отключённые."],
   torrents: ["Торренты", "ArrowDownUp", "Раздачи qBittorrent на ваших хостах."],
   scheduler: ["Планировщик", "Clock3", "Одна активная загрузка на физический диск."],
-  jobs: ["Задания", "ListChecks", "Ход операций на ваших хостах."],
+  jobs: ["Очередь задач", "ListChecks", "Ход операций на ваших хостах."],
   games: ["Игровая полка", "Gamepad2", "Библиотека игр и подготовка копий на SSD."],
   move: ["Перенос и копирование", "ArrowDownUp", "Выберите файл и носитель назначения."],
   integrity: ["Проверка SHA-256", "Check", "Манифесты файлов и сверка копий."],
@@ -218,8 +218,15 @@ function devicesPage(s) {
     return `<section class="device-host"><h2>${icon(host.id==="pc"?"Monitor":"Laptop")}${esc(host.name)} <span class="count">${devices.length}</span></h2><div class="device-grid">${rows}</div></section>`;
   }).join("");
 }
+function taskAvailable(s,j) {
+  const op = j.operation;
+  const source = op?.fileId && byId(s.files, op.fileId);
+  return Boolean(byId(s.hosts,j.host)?.online && (!op?.fileId || (source && available(s,diskOf(s,source)))) &&
+    (!op?.target || available(s,byId(s.disks,op.target))));
+}
 function queue(s, compact = false) {
-  const rows = (compact ? s.tasks.slice(0, 2) : s.tasks)
+  const tasks = compact ? s.tasks.slice(0,2) : s.tasks.filter(j=>!s.ui.taskKind || j.kind===s.ui.taskKind);
+  const rows = tasks
     .map((j) => {
       const label = { running: "Выполняется", paused: "На паузе", error: "Ошибка", done: "Готово" }[j.state];
       const active = ["running", "paused"].includes(j.state);
@@ -227,12 +234,22 @@ function queue(s, compact = false) {
         j.state === "running"
           ? `<span>${bytes(j.bytesPerSec)}/с · осталось ${j.etaSec == null ? "—" : Math.ceil(j.etaSec) + " с"}</span>`
           : "";
-      return `<article class="job-row ${j.state}" data-job="${esc(j.id)}"><div class="job-body"><b>${esc(j.title)}</b><small>${esc(byId(s.hosts, j.host)?.name)} · <strong>${label}</strong></small>
-      ${active ? meter(j.progress, j.title) : ""}<div class="job-metrics">${active ? num(j.progress) + "%" : ""} ${metrics}</div>
-      ${j.error ? `<p class="error-message">${esc(j.error)}</p>` : ""}<div class="job-actions">${active ? button("pause", j.state === "paused" ? "Продолжить" : "Пауза", j.id) + button("cancel", "Отмена", j.id) : j.state === "error" ? button("retry", "Повторить", j.id) : ""}</div></div></article>`;
+      const op=j.operation;
+      const source=op?.fileId && byId(s.files,op.fileId);
+      const target=op?.target && byId(s.disks,op.target);
+      const online=taskAvailable(s,j);
+      const route=source && target ? esc(diskOf(s,source).label)+" → "+esc(target.label) : "";
+      return `<article class="job-row ${j.state}" data-job="${esc(j.id)}"><div class="job-body"><b>${esc(j.title)}</b>${!compact && route?`<p class="task-route">${route}</p>`:""}<small>${esc(byId(s.hosts, j.host)?.name)} · <strong>${label}</strong></small>
+      ${j.state !== "done" ? meter(j.progress, j.title) : ""}<div class="job-metrics">${j.state !== "done" ? num(j.progress) + "%" : ""} ${metrics}</div>
+      ${!online && active ? empty("Для продолжения подключите носитель и его хост.") : ""}
+      ${j.state==="done" && j.verified ? '<p class="task-route">SHA-256 совпал</p>' : ""}
+      ${j.error ? `<p class="error-message">${esc(j.error)}</p>` : ""}<div class="job-actions">${active ? button("pause", j.state === "paused" ? "Продолжить" : "Пауза", j.id, "secondary-action", j.state==="paused" && !online?"disabled":"") + button("cancel", "Отмена", j.id) : j.state === "error" ? button("retry", "Повторить", j.id,"secondary-action",online?"":"disabled") : ""}</div></div></article>`;
     })
     .join("");
-  return `<section class="card queue-card"><div class="card-heading"><h2>${icon("ListChecks")}Очередь задач</h2>${compact ? button("page", "Все задания", "jobs") : ""}</div>${s.loading ? skeleton("Загрузка очереди", 2) : rows || empty("В очереди нет задач.")}</section>`;
+  const filters = compact || s.loading ? "" : `<div class="queue-filters">${[["","Все задачи"],["copy","Копирование"],["av1","AV1"]].map(([kind,label])=>
+    button("taskKind",label,kind,"secondary-action",`aria-pressed="${s.ui.taskKind===kind}"`)).join("")}</div>`;
+  return `<section class="card queue-card"><div class="card-heading"><h2>${icon("ListChecks")}${compact?"Очередь задач":"Операции"} ${s.loading?"":`<span class="count">${tasks.length}</span>`}</h2>${compact?button("page","Все задания","jobs"):""}</div>${filters}${s.loading?skeleton("Загрузка очереди",2):rows||empty(s.tasks.length && !compact?"Задач выбранного типа нет.":"В очереди нет задач.")}</section>`;
+
 }
 function network(s) {
   const u = s.ui,

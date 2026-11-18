@@ -290,3 +290,6 @@ input::placeholder{color:#aab2a9;opacity:1}
 .device-actions { margin-top:12px;gap:6px }.device-actions button { min-height:40px }
 @media(min-width:760px){.device-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media(min-width:1380px){.device-grid{grid-template-columns:repeat(3,minmax(0,1fr))}}
+.queue-filters { display:flex;flex-wrap:wrap;gap:6px;margin:12px 0 }
+.queue-filters button[aria-pressed=true] { background:#2b3525;color:var(--lime);border-color:#70845d }
+.task-route { color:var(--muted);font-size:12px;margin-top:3px;overflow-wrap:anywhere }
