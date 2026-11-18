@@ -121,6 +121,16 @@ const DemoData = (() => {
     ["fedora", "Fedora Workstation", "image", "archive", "wait", 0, 2.4, 0, 0],
     ["mint", "Linux Mint Cinnamon", "image", "archive", "wait", 0, 2.9, 0, 0],
   ];
+  const torrentHashes = {
+    ubuntu: "840731a210cf1306ad67cb5a6d8b1ce9c8f288e6",
+    bunny: "826646224f7a23b504ad5a39df895529b71deabc",
+    osm: "421d9ebe4a4205cdfa8337144a3aa8a6549e39d3",
+    blend: "139594feb134d2ae0ede2fbc032933bdc7952359",
+    music: "5dbfc679e31252b118e4a2f8a166343fa85e966c",
+    debian: "0e8f5cc253ff5533145f881f26f60e9f9e5843c8",
+    fedora: "34a68505bbf65e1211e8b42eb8c7ac5e1d085013",
+    mint: "e9a629b932213a6c5c612c03bd06dd6bbf2403b0",
+  };
   const torrents = torrentRows.map(([id, name, kind, diskId, state, progress, gb, down, up], rank) => ({
     id,
     name,
@@ -265,6 +275,145 @@ const DemoData = (() => {
           error: null,
         },
       );
+    }
+    const blank = scenario === "empty" || data.loading;
+    if (blank) {
+      data.hosts = [];
+      data.devices = [];
+      data.rules = {};
+    }
+    for (const h of data.hosts) {
+      Object.assign(
+        h,
+        h.id === "mac"
+          ? { os: "macOS", address: "http://mac-mini.local:8080", folder: "/Volumes/vault/Downloads" }
+          : { os: "Windows", address: "http://storage-pc.local:8080", folder: "D:/Downloads" },
+      );
+      h.defaults = { name: h.name, os: h.os, address: h.address, folder: h.folder };
+    }
+    for (const t of data.torrents) t.infoHash = torrentHashes[t.id];
+    data.cancelled = [];
+    data.reclaimedBytes = 0;
+    data.compressionRatios = { XPRESS4K: 0.12, XPRESS8K: 0.18, XPRESS16K: 0.22, LZX: 0.25 };
+    data.schedule = {
+      enabled: !blank,
+      start: "01:00",
+      end: "07:00",
+      days: "Ежедневно",
+      lastRun: null,
+      clock: Date.parse("2026-11-18T14:30:00Z"),
+    };
+    data.toolPaths = Object.fromEntries(
+      data.hosts.map((h) => [
+        h.id,
+        h.os === "Windows"
+          ? {
+              encoder: "C:/Program Files/HandBrake/HandBrakeCLI.exe",
+              agent: "http://storage-pc.local:4730",
+              compact: "C:/Windows/System32/compact.exe",
+            }
+          : { encoder: "/opt/homebrew/bin/HandBrakeCLI", agent: "", compact: "" },
+      ]),
+    );
+    data.toolSettings = { preset: "AV1 1080p", fps: 24, algorithm: "XPRESS8K", saveRatio: 0.33 };
+    data.sendSettings = { alias: "Склад", port: 53317, discovery: true, inbox: "vault" };
+    data.opticalDrive = blank
+      ? null
+      : { host: "pc", name: "DVD-RW · Windows PC", open: false, medium: "DVD-5", writable: true };
+    data.opticalImages = blank
+      ? []
+      : [{ id: "debian", name: "Debian 13 · netinst.iso", diskId: "media", fileId: "debian", sizeBytes: 784e6 }];
+    data.faults =
+      scenario === "error"
+        ? {
+            hosts: "Агент не ответил на последний запрос.",
+            devices: "Не удалось прочитать каталог флешки.",
+            torrents: "qBittorrent не подтвердил операцию.",
+            task: "Последняя операция завершилась ошибкой.",
+            scheduler: "Предыдущий запуск конвейера был прерван.",
+            localsend: "Устройство отклонило передачу.",
+            optical: "Привод сообщил об ошибке записи.",
+            policies: "Назначение правила было недоступно.",
+            games: "Не удалось подготовить игровую копию.",
+            media: "Кодировщик прервал обработку файла.",
+            move: "Копирование было прервано до сверки.",
+            integrity: "Не удалось считать контрольную сумму.",
+            index: "Индексатор прервал чтение.",
+            drives: "Не удалось обновить снимок каталога.",
+            details: "Предыдущая операция с файлом прервана.",
+          }
+        : {};
+    data.failNext = { ...data.faults };
+    if (["copying", "error", "offline"].includes(scenario)) {
+      const jobs = [
+        ["demo-send", "send", "LocalSend · Каталог.pdf", "mac", 24e6, { type: "send", fileId: "book", peer: "pc" }],
+        [
+          "demo-image",
+          "image",
+          "Образ · Debian 13.iso",
+          "pc",
+          784e6,
+          { type: "image", fileId: "debian", target: "media", name: "Debian 13.iso" },
+        ],
+        [
+          "demo-game",
+          "game",
+          "Подготовка игры · Gothic II",
+          "pc",
+          3.6e9,
+          { type: "game", fileId: "gothic", target: "pool", dir: "Games/" },
+        ],
+        [
+          "demo-rule",
+          "placement",
+          "Раскладка · Blender Demo Files",
+          "mac",
+          8.4e9,
+          { type: "place", fileId: "blend", target: "archive", torrentId: "blend", dir: "Прочее/" },
+        ],
+        [
+          "demo-migrate",
+          "copy",
+          "Перенос раздачи · OpenStreetMap",
+          "pc",
+          31.6e9,
+          { type: "copy", fileId: "osm", target: "vault", torrentId: "osm", moveSource: true },
+        ],
+      ];
+      for (const [id, kind, title, host, totalBytes, operation] of jobs) {
+        const running = scenario === "copying",
+          speed = Math.ceil(totalBytes / 120);
+        data.tasks.push({
+          id,
+          kind,
+          title,
+          host,
+          totalBytes,
+          operation,
+          progress: 25,
+          bytesPerSec: running ? speed : 0,
+          resumeRate: speed,
+          etaSec: running ? 90 : null,
+          state: running ? "running" : scenario === "offline" ? "paused" : "error",
+          error: scenario === "error" ? "Агент не подтвердил завершение. Можно повторить задачу." : null,
+        });
+      }
+    }
+    for (const j of data.tasks) {
+      j.events = [
+        { time: "2026-11-18T14:20:00Z", text: "Задача создана" },
+        {
+          time: "2026-11-18T14:25:00Z",
+          text:
+            j.error ||
+            { done: "Операция завершена", running: "Обработка началась", paused: "Ожидание подключения" }[j.state],
+        },
+      ];
+      if (j.id === "copied-to-usb") {
+        j.copyId = "film-usb";
+        j.checksum = data.checksums.film;
+        data.manifests[j.copyId] = j.checksum;
+      }
     }
     return data;
   }

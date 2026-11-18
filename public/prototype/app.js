@@ -9,6 +9,9 @@ function createState(scenario, page = "overview") {
     ui: {
       page,
       menu: false,
+      navMore: false,
+      taskId: data.tasks[0]?.id,
+      pending: null,
       modal: null,
       notice: "",
       query: "",
@@ -81,16 +84,33 @@ function render(s) {
       )
       .join(""),
   );
+  const pageFault = s.faults[s.ui.page];
+  const feedback = pageFault ? `<p class="action-fault" role="alert">${icon("Activity")}${esc(pageFault)}</p>` : "";
+  const busy = s.ui.pending ? '<p class="busy-line" role="status">Выполняется операция…</p>' : "";
+  region("action-status", s.ui.modal || s.loading ? "" : feedback + busy);
   region("screen", screen(s));
   region("notice", esc(s.ui.notice));
   const dialog = $("dialog");
+  const modalKey = s.ui.modal?.kind;
+  const changedDialog = dialog.dataset.view !== modalKey;
   if (s.ui.modal) {
-    region("dialog", modalView(s));
+    region("dialog", modalView(s) + (s.ui.modal && s.ui.pending ? busy : "") + (s.ui.modal && pageFault ? feedback : ""));
     if (!dialog.open) {
       dialog.showModal();
       if (s.ui.modal.kind === "add") $("magnet")?.focus();
     }
-  } else if (dialog.open) dialog.close();
+    dialog.dataset.view = modalKey;
+    if (modalKey === "confirm") {
+      dialog.setAttribute("aria-describedby", "confirm-description");
+      if (changedDialog) $("confirm-cancel")?.focus();
+    } else {
+      dialog.removeAttribute("aria-describedby");
+      if (changedDialog && modalKey.startsWith("inv")) dialog.querySelector("input,select,button")?.focus();
+    }
+  } else if (dialog.open) {
+    dialog.close();
+    delete dialog.dataset.view;
+  }
   document.title = pages[s.ui.page][0] + " — Склад";
   document.body.classList.toggle("menu-open", s.ui.menu);
   $("backdrop").hidden = !s.ui.menu;
@@ -113,6 +133,8 @@ function resetForm() {
 }
 function navigate(page) {
   resetForm();
+  if (["media", "index", "integrity", "policies", "hosts", "scheduler", "localsend", "optical"].includes(page))
+    state.ui.navMore = true;
   if (page === "jobs") state.ui.taskKind = "";
   Object.assign(state.ui, { page, menu: false, modal: null });
   window.scrollTo(0, 0);
@@ -165,10 +187,11 @@ function enqueue(kind, title, host, totalBytes, operation) {
     progress: 0,
     error: null,
   });
+  recordEvent(state.tasks[0], "Задача поставлена в очередь.");
   return true;
 }
 function onArrival(f) {
-  if (!state.automation || !state.previewFresh) return;
+  if (!state.schedule.enabled || !state.automation || !state.previewFresh) return;
   const d = diskOf(state, f);
   if (!available(state, d)) return;
   if (
@@ -177,11 +200,11 @@ function onArrival(f) {
     d.fs === "NTFS" &&
     f.expectedSaving >= 0.1 &&
     !f.allocatedBytes &&
-    state.rules["Игры"].after === "Сжатие NTFS"
+    state.rules["Игры"]?.after === "Сжатие NTFS"
   ) {
     enqueue("copy", "Подготовка игры · " + f.name, d.host, f.sizeBytes, { type: "compress", fileId: f.id });
   }
-  if (f.type !== "Видео" || f.optimized || state.rules["Фильмы"].after !== "HandBrake") return;
+  if (f.type !== "Видео" || f.optimized || state.rules["Фильмы"]?.after !== "HandBrake") return;
   const content = "av1:" + f.contentId;
   if (
     state.files.some((c) => c.contentId === content) ||
@@ -192,7 +215,7 @@ function onArrival(f) {
     rule = state.rules["Фильмы"],
     dest = placement(rule, size);
   if (dest)
-    enqueue("av1", "AV1 · " + f.name, "mac", f.sizeBytes, {
+    enqueue("av1", "AV1 · " + f.name, d.host, f.sizeBytes, {
       type: "encode",
       fileId: f.id,
       content,
@@ -229,11 +252,22 @@ function completeTask(task) {
         );
       }
       break;
+    case "place":
     case "copy": {
-      const reason = copyReason(state, f, target);
+      if (op.torrentId && (!byId(state.torrents, op.torrentId) || f.torrentId !== op.torrentId))
+        throw Error("Раздача изменилась во время переноса.");
+      const reason = copyReason(state, f, target, op.dir ?? f.dir);
       if (reason) throw new Error(reason);
       const copy = writeCopy(f, target, op.dir ?? f.dir, { allocatedBytes: f.sizeBytes });
       state.manifests[copy.id] = task.checksum;
+      task.copyId = copy.id;
+      task.sourcePath = pathOf(state, f);
+      if (op.torrentId) {
+        const torrent = byId(state.torrents, op.torrentId);
+        torrent.diskId = target.id;
+        copy.torrentId = torrent.id;
+        delete f.torrentId;
+      }
       task.verified = true;
       onArrival(copy);
       break;
@@ -244,23 +278,25 @@ function completeTask(task) {
       onArrival(copy);
       break;
     }
-    case "move": {
-      const allocated = f.allocatedBytes ?? f.sizeBytes;
-      if (target.id !== f.diskId && target.freeBytes < allocated) throw new Error("Недостаточно свободного места.");
-      diskOf(state, f).freeBytes += allocated;
-      target.freeBytes -= allocated;
-      f.diskId = target.id;
-      f.dir = op.dir ?? f.dir;
-      const torrent = byId(state.torrents, f.torrentId);
-      if (torrent) torrent.diskId = target.id;
-      onArrival(f);
+    case "folderCompress": {
+      let saved = 0;
+      for (const file of state.files.filter((c) => c.diskId === target.id && c.dir === op.dir && !c.allocatedBytes)) {
+        file.allocatedBytes = Math.round(file.sizeBytes * (1 - state.compressionRatios[op.algorithm]));
+        saved += file.sizeBytes - file.allocatedBytes;
+      }
+      target.freeBytes += saved;
+      state.reclaimedBytes += saved;
+      task.savedBytes = saved;
+      recordEvent(task, "Освобождено " + bytes(saved));
       break;
     }
     case "compress":
       f.allocatedBytes = Math.round(f.sizeBytes * (1 - f.expectedSaving));
       diskOf(state, f).freeBytes += f.sizeBytes - f.allocatedBytes;
+      state.reclaimedBytes += f.sizeBytes - f.allocatedBytes;
       break;
     case "encode":
+      if (state.files.some((c) => c.contentId === op.content)) throw Error("AV1-копия уже существует.");
       writeCopy(f, target, op.dir, {
         contentId: op.content,
         optimized: true,
@@ -269,8 +305,11 @@ function completeTask(task) {
         sizeBytes: op.size,
         allocatedBytes: op.size,
       });
+      task.savedBytes = f.sizeBytes - op.size;
       break;
     case "burn": {
+      if (!state.opticalDrive?.writable || state.opticalDrive.open || state.opticalDrive.medium !== op.medium)
+        throw Error("Установите чистый носитель выбранного типа.");
       const d = {
         id: crypto.randomUUID(),
         label: "Запись " + op.medium + " · " + f.name,
@@ -286,12 +325,30 @@ function completeTask(task) {
       };
       writeCopy(f, d, f.dir);
       state.disks.push(d);
+      state.opticalDrive.writable = false;
       break;
     }
-    case "image":
-      writeCopy(f, target, "Images/", { contentId: task.id, name: op.name, type: "Образ", platform: null, tracks: [] });
+    case "image": {
+      const image = writeCopy(f, target, "Images/", {
+        contentId: task.id,
+        name: op.name,
+        type: "Образ",
+        platform: null,
+        tracks: [],
+      });
+      state.opticalImages.push({
+        id: image.id,
+        fileId: image.id,
+        diskId: target.id,
+        name: image.name,
+        sizeBytes: image.sizeBytes,
+      });
       break;
+    }
     case "send":
+      if (![...state.hosts, ...state.devices].some((p) => p.id === op.peer && p.online))
+        throw Error("Устройство больше не в сети.");
+      recordEvent(task, "Получатель подтвердил передачу.");
       break;
   }
 }
@@ -304,10 +361,11 @@ async function finishTask(j, snapshot) {
   if (finishing.has(j)) return;
   finishing.add(j);
   try {
-    if (j.operation?.type === "copy") {
+    if (["copy", "place"].includes(j.operation?.type)) {
       const f = byId(snapshot.files, j.operation.fileId);
       const expected = snapshot.manifests[f.id] || snapshot.checksums[f.contentId] || (await fixtureDigest(f.contentId));
       const actual = await fixtureDigest(f.contentId);
+      j.sourceChecksum = expected;
       if (actual !== expected) throw new Error("SHA-256 не совпал. Копия не добавлена в каталог.");
       j.checksum = actual;
     }
@@ -316,25 +374,31 @@ async function finishTask(j, snapshot) {
     j.bytesPerSec = 0;
     j.etaSec = 0;
     completeTask(j);
+    recordEvent(j, j.verified ? "SHA-256 совпал. Копия зарегистрирована." : "Операция завершена.");
   } catch (error) {
     if (snapshot !== state || !state.tasks.includes(j) || j.state === "paused") return;
     j.state = "error";
     j.bytesPerSec = 0;
     j.etaSec = null;
     j.error = error.message;
+    recordEvent(j, error.message);
   } finally {
     finishing.delete(j);
     if (state === snapshot) render(state);
   }
 }
 function advanceTasks(seconds) {
+  Pipeline.tick(state, seconds);
   let changed = false;
   // Snapshot the list: completing a copy can enqueue another job.
   for (const j of [...state.tasks]) {
     if (j.state !== "running") continue;
     changed = true;
+    const milestone = Math.floor(j.progress / 25);
     j.progress = Math.min(100, j.progress + ((seconds * j.bytesPerSec) / Math.max(j.totalBytes, 1)) * 100);
     j.etaSec = Math.max(0, Math.ceil((((100 - j.progress) / 100) * j.totalBytes) / j.bytesPerSec));
+    if (j.progress < 100 && Math.floor(j.progress / 25) > milestone)
+      recordEvent(j, "Выполнено " + Math.floor(j.progress) + "%.");
     if (j.progress < 100) continue;
     void finishTask(j, state);
   }
@@ -344,11 +408,17 @@ function taskAction(name, id) {
   const j = byId(state.tasks, id);
   if (!j) return;
   if (name === "cancel") {
+    j.state = "cancelled";
+    j.bytesPerSec = 0;
+    j.etaSec = null;
+    recordEvent(j, "Операция отменена.");
+    state.cancelled.push(j);
     state.tasks = state.tasks.filter((t) => t !== j);
     message("Задание отменено.");
     return;
   }
   if (name === "pause" && j.state === "running") {
+    recordEvent(j, "Поставлено на паузу.");
     j.state = "paused";
     j.resumeRate = j.bytesPerSec;
     j.bytesPerSec = 0;
@@ -360,6 +430,7 @@ function taskAction(name, id) {
       message("Для продолжения подключите носитель и его хост.");
       return;
     }
+    recordEvent(j, name === "retry" ? "Запущено повторно." : "Выполнение продолжено.");
     if (name === "retry") j.progress = 0;
     j.state = "running";
     j.error = null;
@@ -380,7 +451,7 @@ async function runOperation() {
     op;
   if (page === "move") {
     title = m.mode + " · " + f.name;
-    op = { type: m.mode === "Копирование" ? "copy" : "move", fileId: f.id, target: m.target.id };
+    op = { type: "copy", moveSource: m.mode !== "Копирование", fileId: f.id, target: m.target.id };
   } else if (page === "integrity") {
     kind = "sha256";
     title = "SHA-256 · " + f.name;
@@ -408,7 +479,7 @@ async function runOperation() {
       op.name = (m.art ? u.form.artName || "Склад" : f.name) + "." + (m.art && m.medium === "CD-R" ? "wav" : "iso");
     }
   }
-  if (enqueue(kind, title, host, f.sizeBytes, op)) navigate("jobs");
+  if (enqueue(kind, title, host, f.sizeBytes, op)) openJob(s.tasks[0].id);
 }
 function rebalance() {
   for (const d of state.disks) {
@@ -447,10 +518,11 @@ function finishTorrent(id) {
     state.files.push(f);
     d.freeBytes = Math.max(0, d.freeBytes - f.sizeBytes);
     const rule = state.rules[{ image: "Софт", video: "Фильмы", audio: "Музыка" }[t.kind] || "Прочее"];
-    const target = state.automation ? placement(rule, f.sizeBytes, d.host) : null;
+    const target = state.schedule.enabled && state.automation ? placement(rule, f.sizeBytes, d.host) : null;
     if (target)
       enqueue("copy", "Раскладка · " + f.name, d.host, f.sizeBytes, {
-        type: "move",
+        type: "place",
+        torrentId: t.id,
         fileId: f.id,
         target: target.id,
         dir: rule.folder + "/",
@@ -486,11 +558,29 @@ function gameAction(id) {
     navigate("jobs");
 }
 
+function askConfirm(kind, id, title, description, label) {
+  state.ui.modal = { kind: "confirm", action: kind, id, title, description, label };
+}
 async function act(name, value) {
+  if (name.startsWith("inv")) return Inventory.act(name, value);
+  if (name.startsWith("pipe")) return Pipeline.act(name, value);
+  if (name.startsWith("shop")) return Workshops.act(name, value);
   const u = state.ui;
   switch (name) {
     case "page":
       navigate(value);
+      break;
+    case "confirmAction": {
+      const m = u.modal;
+      if (m?.kind !== "confirm") break;
+      if (m.action === "pipeDelete") Pipeline.confirmed(m.action, m.id);
+      else Inventory.confirmed(m.action, m.id);
+      u.modal = null;
+      message("Изменения сохранены.");
+      break;
+    }
+    case "navMore":
+      u.navMore = !u.navMore;
       break;
     case "menu":
       u.menu = true;
@@ -562,6 +652,9 @@ async function act(name, value) {
       u.form.source = id;
       break;
     }
+    case "addTorrent":
+      addTorrent();
+      break;
     case "add":
       resetForm();
       u.form.addHost = u.host;
@@ -629,13 +722,63 @@ async function act(name, value) {
   }
 }
 async function dispatch(name, value) {
-  const wasPage = state.ui.page;
+  const snapshot = state,
+    wasPage = state.ui.page,
+    modal = state.ui.modal;
+  const writes = new Set([
+    "invSaveHost",
+    "invProbe",
+    "invCompress",
+    "invDownload",
+    "invManifest",
+    "invMigrate",
+    "confirmAction",
+    "pipeSchedule",
+    "pipeAuto",
+    "pipeSettings",
+    "pipeSSD",
+    "pipeCompress",
+    "pipeEncode",
+    "shopDiscover",
+    "shopTray",
+    "shopBlank",
+    "shopSendSettings",
+    "shopApply",
+    "run",
+    "reindex",
+    "copyDetail",
+    "game",
+    "toggleTorrent",
+    "dry",
+    "auto",
+    "finish",
+    "next",
+    "retry",
+    "addTorrent",
+  ]);
+  if (state.ui.pending && writes.has(name)) return;
+  let pending = null;
   try {
+    if (writes.has(name)) {
+      pending = { name, value };
+      state.ui.pending = pending;
+      render(state);
+      await new Promise((resolve) => setTimeout(resolve, 240));
+      if (state !== snapshot || state.ui.page !== wasPage || modal !== state.ui.modal) return;
+      if (state.failNext[wasPage]) {
+        const reason = state.failNext[wasPage];
+        delete state.failNext[wasPage];
+        throw Error(reason + " Повторите действие.");
+      }
+      delete state.faults[wasPage];
+    }
     await act(name, value);
   } catch (e) {
-    message(e.message);
+    if (snapshot === state) state.faults[wasPage] = e.message;
+  } finally {
+    if (snapshot.ui.pending === pending) snapshot.ui.pending = null;
+    if (snapshot === state) render(state);
   }
-  render(state);
   if (name === "find") $("catalog-q")?.focus();
   else if (name === "menu") $("sidebar").querySelector("button")?.focus();
   else if (name === "closeMenu") $("menu").focus();
@@ -670,6 +813,8 @@ function updateControl(el) {
     clearTimeout(toastTimer);
     state = createState(v, u.page);
     state.ui.fileId = u.fileId;
+    state.ui.navMore = u.navMore;
+    if (u.page === "task") state.ui.taskId = byId(state.tasks, u.taskId)?.id || state.tasks[0]?.id;
   } else if (id in textFields) {
     u[textFields[id]] = v;
     if (id === "shelf-query") u.limit = 6;
@@ -698,6 +843,14 @@ function updateControl(el) {
     u.form.artURL = image ? URL.createObjectURL(image) : "";
     u.form.artName = image?.name;
   } else if (id) {
+    if (id === "moveDisk") {
+      delete u.form.source;
+      delete u.form.dest;
+    }
+    if (id === "toolDisk") {
+      delete u.form.toolDir;
+      delete u.form.toolFile;
+    }
     if (id === "source") {
       delete u.form.mode;
       delete u.form.dest;
@@ -716,8 +869,12 @@ document.addEventListener("change", (e) => {
   if (e.target instanceof HTMLSelectElement || e.target.type === "file") updateControl(e.target);
 });
 document.addEventListener("submit", (e) => {
-  if (e.target.id !== "add-form") return;
-  e.preventDefault();
+  if (e.target.id === "add-form") {
+    e.preventDefault();
+    void dispatch("addTorrent", "");
+  }
+});
+function addTorrent() {
   const magnet = $("magnet"),
     link = magnet.value.trim(),
     params = new URLSearchParams(link.slice(link.indexOf("?") + 1));
@@ -733,6 +890,7 @@ document.addEventListener("submit", (e) => {
     id: crypto.randomUUID(),
     name: params.get("dn") || hash.slice(9, 21) + "…",
     kind: "archive",
+    infoHash: hash.slice(9),
     diskId: d.id,
     sizeBytes: null,
     progress: 0,
@@ -745,7 +903,7 @@ document.addEventListener("submit", (e) => {
   rebalance();
   message("Раздача добавлена.");
   render(state);
-});
+}
 document.addEventListener("dragstart", (e) => {
   if (e.target.id === "grab-file") e.dataTransfer.setData("text/plain", operationModel(state).file.id);
 });

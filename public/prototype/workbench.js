@@ -3,6 +3,9 @@
 // View helpers take a snapshot; they never query or mutate the document.
 const pages = {
   overview: ["Диспетчер", "LayoutDashboard", "Диски, файлы и обработка в локальной сети."],
+  hosts: ["Хосты", "Network", "Подключения к компьютерам и агентам хранения."],
+  media: ["Медиа-инструменты", "Film", "Индекс, SSD, сжатие и обработка видео."],
+  task: ["Детали задачи", "Activity", "Ход операции, проверка и журнал событий."],
   devices: ["Устройства", "Server", "Носители, свободное место и последние снимки каталога."],
   drives: ["Все файлы", "HardDrive", "Поиск по снимкам всех носителей, включая отключённые."],
   details: ["Детали файла", "File", "Сведения из индекса и размещение копий."],
@@ -94,23 +97,29 @@ function meter(n, label) {
   return `<div class="track" role="progressbar" aria-label="${esc(label)}" aria-valuenow="${pct}" aria-valuemin="0" aria-valuemax="100"><span style="width:${pct}%"></span></div>`;
 }
 function sidebar(s) {
-  const groups = { overview: "Рабочее пространство", games: "Библиотека и инструменты", localsend: "Сеть и автоматика" };
-  const nav = Object.entries(pages)
-    .filter(([key]) => key !== "details")
-    .map(([key, [label, symbol]]) => {
-      const active = s.ui.page === key || (key === "drives" && s.ui.page === "details");
-      return (
-        (groups[key] ? `<p class="caption">${groups[key]}</p>` : "") +
-        button(
-          "page",
-          icon(symbol) + label + (key === "torrents" ? `<span class="count">${s.torrents.length}</span>` : ""),
-          key,
-          active ? "active" : "",
-          active ? 'aria-current="page"' : "",
-        )
-      );
-    })
-    .join("");
+  const current = { details: "drives", task: "jobs" }[s.ui.page] || s.ui.page;
+  const item = (key) => {
+    const [label, symbol] = pages[key];
+    return button(
+      "page",
+      icon(symbol) + esc(label) + (key === "torrents" ? `<span class="count">${s.torrents.length}</span>` : ""),
+      key,
+      current === key ? "active" : "",
+      current === key ? 'aria-current="page"' : "",
+    );
+  };
+  const group = (label, keys) => `<p class="caption">${label}</p>${keys.map(item).join("")}`;
+  const nav =
+    group("Хранилище", ["overview", "devices", "drives", "jobs"]) +
+    group("Библиотека", ["torrents", "games", "move"]) +
+    button(
+      "navMore",
+      icon("ChevronRight") + "Ещё",
+      "",
+      "nav-disclosure",
+      `aria-expanded="${s.ui.navMore}" aria-controls="extra-nav"`,
+    ) +
+    `<div id="extra-nav" ${s.ui.navMore ? "" : "hidden"}>${group("Обработка", ["media", "index", "integrity", "policies"])}${group("Сеть и оборудование", ["hosts", "scheduler", "localsend", "optical"])}</div>`;
   return `<div class="brand"><span class="brand-icon">${icon("Layers3")}</span>Склад<span class="brand-period">.</span></div><div class="side-inner"><nav id="module-nav" aria-label="Разделы">${nav}</nav>
     <div class="host-head"><p class="caption">Хосты</p><span class="count">${s.hosts.length}</span></div><nav aria-label="Хосты">${s.hosts.map((h) => button("host", icon(h.id === "mac" ? "Laptop" : "Monitor") + esc(h.name) + `<small class="host-state">${h.online ? "В сети" : "Нет связи"}</small>`, h.id, "")).join("")}</nav></div>
     <div class="side-foot">${icon("Network")}<div>Локальная сеть<small>Деморежим</small></div></div>`;
@@ -222,7 +231,7 @@ function devicesPage(s) {
         ${busy ? `<p class="scan-time">${scan.state === "paused" ? "Сканирование на паузе" : "Идёт сканирование"} · ${num(scan.progress)}%</p>` : ""}
         ${transfers.map((j) => `<p class="scan-time">${esc(j.title)} · ${num(j.progress)}%</p>`).join("")}
         ${retry ? `<p class="error-message">${esc(scan.error)}</p>` : ""}
-        <div class="device-actions">${button("disk", "Открыть в каталоге", d.id)}${button(retry ? "retry" : "reindex", retry ? "Повторить сканирование" : "Пересканировать", retry ? scan.id : d.id, "secondary-action", !online || busy ? "disabled" : "")}</div>
+        <div class="device-actions">${Inventory.diskActions(s, d)}${button("disk", "Открыть в каталоге", d.id)}${button(retry ? "retry" : "reindex", retry ? "Повторить сканирование" : "Пересканировать", retry ? scan.id : d.id, "secondary-action", !online || busy ? "disabled" : "")}</div>
       </article>`;
         })
         .join("");
@@ -236,7 +245,22 @@ function taskAvailable(s, j) {
   return Boolean(
     byId(s.hosts, j.host)?.online &&
     (!op?.fileId || (source && available(s, diskOf(s, source)))) &&
-    (!op?.target || available(s, byId(s.disks, op.target))),
+    (!op?.target || available(s, byId(s.disks, op.target))) &&
+    (!op?.peer || [...s.hosts, ...s.devices].some((h) => h.id === op.peer && h.online)),
+  );
+}
+function taskHistory(s, types, title) {
+  const rows = s.tasks.filter((j) => types.includes(j.operation?.type));
+  return card(
+    title,
+    rows.length
+      ? rows
+          .map(
+            (j) =>
+              `<div class="history-row">${button("pipeTask", esc(j.title), j.id, "task-link")}<span>${taskLabel(j)} · ${num(j.progress)}%</span>${j.state === "running" ? meter(j.progress, j.title) : ""}</div>`,
+          )
+          .join("")
+      : empty("Задач пока нет."),
   );
 }
 function queue(s, compact = false) {
@@ -254,7 +278,7 @@ function queue(s, compact = false) {
       const target = op?.target && byId(s.disks, op.target);
       const online = taskAvailable(s, j);
       const route = source && target ? esc(diskOf(s, source).label) + " → " + esc(target.label) : "";
-      return `<article class="job-row ${j.state}" data-job="${esc(j.id)}"><div class="job-body"><b>${esc(j.title)}</b>${!compact && route ? `<p class="task-route">${route}</p>` : ""}<small>${esc(byId(s.hosts, j.host)?.name)} · <strong>${label}</strong></small>
+      return `<article class="job-row ${j.state}" data-job="${esc(j.id)}"><div class="job-body">${button("pipeTask", esc(j.title), j.id, "task-link", `aria-label="Детали задачи · ${esc(j.title)}"`)}${!compact && route ? `<p class="task-route">${route}</p>` : ""}<small>${esc(byId(s.hosts, j.host)?.name)} · <strong>${label}</strong></small>
       ${j.state !== "done" ? meter(j.progress, j.title) : ""}<div class="job-metrics">${j.state !== "done" ? num(j.progress) + "%" : ""} ${metrics}</div>
       ${!online && active ? empty("Для продолжения подключите носитель и его хост.") : ""}
       ${j.state === "done" && j.verified ? '<p class="task-route">SHA-256 совпал</p>' : ""}
@@ -352,14 +376,15 @@ function fileSearch(s) {
     ${s.loading ? skeleton("Загрузка индекса", 4) : rows || empty("Ничего не найдено в каталоге.")}`,
   );
 }
-function copyReason(s, file, target) {
+function copyReason(s, file, target, dir = file.dir) {
   const source = diskOf(s, file);
   if (!available(s, source)) return "Исходный носитель не в сети. Выберите подключённую копию.";
   if (!target) return "Выберите устройство назначения.";
   if (!available(s, target)) return "Устройство назначения не в сети.";
-  if (target.id === source.id || target.kind === "optical") return "Выберите другой носитель с возможностью записи.";
+  if ((target.id === source.id && dir === file.dir) || target.kind === "optical")
+    return "Выберите другой носитель с возможностью записи.";
   if (target.id === s.gamePool && !file.platform) return "Игровой SSD предназначен для игр.";
-  if (s.files.some((f) => f.diskId === target.id && f.dir === file.dir && f.name === file.name))
+  if (s.files.some((f) => f.diskId === target.id && f.dir === dir && f.name === file.name))
     return "В этой папке уже есть файл с таким именем.";
   if (target.freeBytes < file.sizeBytes)
     return "Недостаточно места. Требуется " + bytes(file.sizeBytes) + ", свободно " + bytes(target.freeBytes) + ".";
@@ -399,7 +424,7 @@ function fileDetails(s) {
     esc(f.name),
     `<dl class="file-facts"><div><dt>Путь</dt><dd>${esc(pathOf(s, f))}</dd></div><div><dt>Размер</dt><dd>${bytes(f.sizeBytes)}</dd></div><div><dt>Носитель</dt><dd>${esc(d.label)} · ${online ? "В сети" : "Не в сети"}</dd></div></dl>
     <h3>Контрольная сумма SHA-256</h3>${sum ? `<code class="checksum">${esc(sum)}</code>` : empty("Для этого файла ещё нет манифеста.")}
-    <div class="file-actions">${button("fileOp", "Перенос и копирование", "move", "secondary-action", online ? "" : "disabled")}${button("fileOp", "Проверить SHA-256", "integrity", "secondary-action", online ? "" : "disabled")}${button("fileOp", "Отправить через LocalSend", "localsend", "secondary-action", online ? "" : "disabled")}</div>`,
+    <div class="file-actions">${Inventory.fileActions(s, f)}${button("fileOp", "Перенос и копирование", "move", "secondary-action", online ? "" : "disabled")}${button("fileOp", "Проверить SHA-256", "integrity", "secondary-action", online ? "" : "disabled")}${button("fileOp", "Отправить через LocalSend", "localsend", "secondary-action", online ? "" : "disabled")}</div>`,
   )}
     ${card("Дорожки", tracks || empty(["Видео", "Музыка"].includes(f.type) ? "Дорожки ещё не проиндексированы." : "У этого типа файла нет медиадорожек."))}</div>
     <div>${card(
@@ -451,6 +476,21 @@ function torrentsPage(s) {
     <div class="filters"><div class="tabs">${tabs}</div>${select("host", [["", "Все хосты"], ...s.hosts.map((h) => [h.id, h.name])], u.host, "Хост раздачи")}</div>
     ${s.loading ? skeleton("Загрузка раздач", 4) : rows ? `<div class="table-scroll"><table><thead><tr>${["Название", "Хост", "Статус", "Прогресс", "Скорость", ""].map((t) => `<th>${t}</th>`).join("")}</tr></thead><tbody>${rows}</tbody></table></div>` : empty("Раздач по этим условиям нет. " + button("resetTorrents", "Сбросить фильтры"))}</section>`;
 }
+function torrentTransfers(s) {
+  const jobs = s.tasks.filter((j) => j.operation?.torrentId && j.operation.type === "copy");
+  return jobs.length
+    ? card(
+        "Между хостами",
+        jobs
+          .map(
+            (j) =>
+              button("pipeTask", esc(j.title) + " · " + taskLabel(j) + " · " + num(j.progress) + "%", j.id, "task-link") +
+              meter(j.progress, j.title),
+          )
+          .join(""),
+      )
+    : "";
+}
 function scheduler(s) {
   return (
     s.disks
@@ -478,15 +518,18 @@ function gameShelf(s) {
   const tabs = platforms
     .map((p) => button("platform", p, p, "secondary-action", `aria-pressed="${s.ui.platform === p}"`))
     .join("");
-  const games = s.files.filter(
-    (f) => f.platform && f.id === f.contentId && (s.ui.platform === "Все" || s.ui.platform === f.platform),
-  );
+  const library = new Map();
+  for (const f of s.files.filter((f) => f.platform && (s.ui.platform === "Все" || s.ui.platform === f.platform))) {
+    const current = library.get(f.contentId);
+    if (!current || (!available(s, diskOf(s, current)) && available(s, diskOf(s, f)))) library.set(f.contentId, f);
+  }
+  const games = [...library.values()];
   return `<div class="platforms">${tabs}</div><div class="game-grid">${
     games
       .map((f) => {
         const copy = s.files.find((c) => c.original === f.id),
           disk = diskOf(s, copy || f);
-        return `<article class="card game-card"><div class="game-cover cover-${esc(f.id)}">${icon("Gamepad2")}<b>${esc(f.name)}</b></div><div class="game-meta"><small>${esc(f.platform)} · ${bytes(f.sizeBytes)}</small><p>${esc(disk.label)} · ${available(s, disk) ? "В сети" : "Не в сети"}</p>${button("game", copy ? "Запустить" : f.platform === "macOS" ? "Открыть карточку" : "Подготовить на SSD", f.id, "secondary-action", available(s, disk) ? "" : "disabled")}</div></article>`;
+        return `<article class="card game-card"><div class="game-cover cover-${esc(f.contentId)}">${icon("Gamepad2")}<b>${esc(f.name)}</b></div><div class="game-meta"><small>${esc(f.platform)} · ${bytes(f.sizeBytes)}</small><p>${esc(disk.label)} · ${available(s, disk) ? "В сети" : "Не в сети"}</p>${button("game", copy ? "Запустить" : f.platform === "macOS" ? "Открыть карточку" : "Подготовить на SSD", f.id, "secondary-action", available(s, disk) ? "" : "disabled")}</div></article>`;
       })
       .join("") || empty("Игр для этой платформы пока нет.")
   }</div>`;
@@ -502,17 +545,24 @@ function operationModel(s) {
   const u = s.ui,
     form = u.form,
     page = u.page;
-  const files = s.files.filter((f) => available(s, diskOf(s, f)));
-  const file = byId(files, form.source) || files[0];
-  if (!file) return { files, reason: "Нет доступных файлов на подключённых носителях." };
-  const src = diskOf(s, file),
-    writeable = s.disks.filter((d) => available(s, d) && d.kind !== "optical");
-  const targets = writeable.filter((d) => d.id !== src.id);
-  const target = byId(targets, form.dest) || targets.find((d) => d.host === src.host && d.id !== s.gamePool) || targets[0];
-  const mode = form.mode || (file.torrentId ? "Перенос раздачи" : "Копирование");
+  const move = page === "move";
+  const files = move
+    ? s.files.filter((f) => !form.moveDisk || f.diskId === form.moveDisk)
+    : s.files.filter((f) => available(s, diskOf(s, f)));
+  const file = byId(files, form.source) || files.find((f) => available(s, diskOf(s, f))) || files[0];
+  if (!file) return { files, reason: "В выбранном источнике пока нет файлов." };
+  const src = diskOf(s, file);
+  const writeable = s.disks.filter((d) => available(s, d) && d.kind !== "optical");
+  const targets = (move ? s.disks.filter((d) => d.kind !== "optical") : writeable).filter((d) => d.id !== src.id);
+  const target =
+    byId(targets, form.dest) ||
+    targets.find((d) => available(s, d) && d.host === src.host && !copyReason(s, file, d)) ||
+    targets.find((d) => available(s, d) && !copyReason(s, file, d)) ||
+    targets[0];
+  const mode = form.mode || "Копирование";
   const receive = form.direction === "Принять",
     recvDisks = writeable.filter((d) => d.id !== s.gamePool);
-  const inbox = byId(recvDisks, form.inbox) || recvDisks[0];
+  const inbox = byId(recvDisks, form.inbox || s.sendSettings.inbox) || recvDisks[0];
   const peers = [...s.hosts, ...s.devices].filter((h) => h.id !== src.host && h.online);
   const peer = byId(peers, form.peer) || peers[0];
   const medium = form.medium || "DVD-5",
@@ -522,12 +572,8 @@ function operationModel(s) {
   let reason = "",
     plan = "";
   if (page === "move") {
-    if (!target) reason = "Нет подключённого диска назначения.";
-    else if (mode === "Копирование") reason = copyReason(s, file, target);
-    else if (mode === "Перенос раздачи" && src.host !== target.host) reason = "Выберите диск на том же хосте.";
-    else if (target.id === s.gamePool && !file.platform) reason = "Игровой SSD предназначен для игр.";
-    else if (target.freeBytes < (file.allocatedBytes ?? file.sizeBytes)) reason = "Недостаточно свободного места.";
-    if (!reason) plan = src.label + " → " + target.label + " · " + bytes(file.sizeBytes);
+    reason = copyReason(s, file, target);
+    if (!reason) plan = "После копирования останется " + bytes(target.freeBytes - file.sizeBytes) + ".";
   } else if (page === "integrity") plan = other ? file.name + " ↔ " + other.name : "Манифест · " + file.name;
   else if (page === "localsend") {
     if (!peer || (receive && !inbox)) reason = "Устройство назначения недоступно.";
@@ -535,6 +581,11 @@ function operationModel(s) {
     else plan = receive ? peer.name + " → " + inbox.label + " / Inbox" : hostOf(s, src).name + " → " + peer.name;
   } else if (page === "optical") {
     if (!available(s, byId(s.disks, s.imageDisk))) reason = "Нет связи с узлом оптического привода.";
+    else if (
+      opt === "Записать и проверить" &&
+      (!s.opticalDrive?.writable || s.opticalDrive.open || medium !== s.opticalDrive.medium)
+    )
+      reason = "Установите чистый носитель выбранного типа и закройте лоток.";
     else if (art && medium === "DVD-DL") reason = "Для рисунка нужен однослойный носитель.";
     else if (!art && file.sizeBytes > mediaCapacity[medium]) reason = "Набор больше ёмкости " + medium + ".";
     else plan = (art ? "DiscImageStudio" : file.name) + " · " + medium + " · " + bytes(mediaCapacity[medium]);
@@ -559,27 +610,74 @@ function operationModel(s) {
     plan,
   };
 }
+function transferForm(s, m) {
+  const driveNames = s.disks.map((d) => [d.id, d.label + " · " + hostOf(s, d).name]);
+  const sourceFields = field(
+    "moveDisk",
+    "Носитель источника",
+    [["", "Все носители"], ...driveNames],
+    s.ui.form.moveDisk || "",
+  );
+  if (!m.file) return card("Источник", sourceFields + empty(m.reason));
+  const f = m.file,
+    t = m.target;
+  const routeFacts = (rows) =>
+    `<dl class="transfer-facts">${rows.map(([label, value]) => `<div><dt>${esc(label)}</dt><dd>${esc(value)}</dd></div>`).join("")}</dl>`;
+  const src = card(
+    "Источник",
+    sourceFields +
+      field(
+        "source",
+        "Файл",
+        m.files.map((row) => [row.id, row.name + " · " + diskOf(s, row).label]),
+        f.id,
+      ) +
+      routeFacts([
+        ["Путь", pathOf(s, f)],
+        ["Размер", bytes(f.sizeBytes)],
+        ["Доступность", available(s, m.src) ? "В сети" : "Не в сети"],
+      ]),
+  );
+  const dest = card(
+    "Назначение",
+    field(
+      "dest",
+      "Записать на носитель",
+      m.targets.map((d) => [d.id, d.label + " · " + (available(s, d) ? hostOf(s, d).name : "Не в сети")]),
+      t?.id,
+    ) +
+      (t
+        ? routeFacts([
+            ["Каталог", (t.mount || t.label + " / ") + f.dir],
+            ["Свободно", bytes(t.freeBytes)],
+            ["Требуется", bytes(f.sizeBytes)],
+          ])
+        : empty("Подключите другой носитель для записи.")),
+  );
+  const controls = card(
+    "Операция",
+    field("mode", "Действие", ["Копирование", "Перенос файла"], m.mode) +
+      `<p class="route-preview ${m.reason ? "blocked" : ""}" role="status">${esc(m.reason || m.plan)}</p><p class="transfer-note">${m.mode === "Копирование" ? "Копия появится в каталоге после сверки SHA-256." : "После сверки SHA-256 вы сможете подтвердить удаление исходника в деталях задачи."}</p>` +
+      button(
+        "run",
+        icon("Play") + (m.mode === "Копирование" ? "Скопировать" : "Начать перенос"),
+        "",
+        "primary",
+        m.reason ? "disabled" : "",
+      ),
+  );
+  return `<div class="transfer-grid">${src}${dest}</div>${controls}`;
+}
 function operationPage(s) {
   const page = s.ui.page,
     m = operationModel(s),
     form = s.ui.form;
   const [title, submit] = operationTitles[page];
   const fileOptions = (fs) => fs.map((f) => [f.id, f.name + " · " + diskOf(s, f).label]);
+  if (page === "move") return transferForm(s, m);
   if (!m.file) return card(title, empty(m.reason));
-  let fields = "",
-    placement = "";
-  if (page === "move") {
-    const modes = m.file.torrentId ? ["Перенос раздачи", "Копирование"] : ["Копирование", "Перенос файла"];
-    fields =
-      field("mode", "Операция", modes, m.mode) +
-      field(
-        "dest",
-        "Диск назначения",
-        m.targets.map((d) => [d.id, d.label]),
-        m.target?.id,
-      );
-    placement = `<div class="drop-source" draggable="true" id="grab-file">${icon("FileArchive")}${esc(m.file.name)}<small>Перетащите на диск или выберите его нажатием</small></div><div class="drop-grid">${m.targets.map((d) => button("dest", icon("HardDrive") + esc(d.label) + `<small>${bytes(d.freeBytes)} свободно</small>`, d.id, "drop-target", `aria-pressed="${d === m.target}"`)).join("")}</div>`;
-  } else if (page === "integrity") {
+  let fields = "";
+  if (page === "integrity") {
     fields = field(
       "compare",
       "Сверить с копией",
@@ -611,7 +709,7 @@ function operationPage(s) {
   }
   let result = card(
     title,
-    `<div class="form-grid">${m.art && page === "optical" ? "" : field("source", "Источник из каталога", fileOptions(m.files), m.file.id)}${fields}</div>${placement}<div class="route-preview ${m.reason ? "blocked" : ""}">${esc(m.reason || m.plan)}</div>${button("run", icon("Play") + submit, "", "primary", m.reason ? "disabled" : "")}`,
+    `<div class="form-grid">${m.art && page === "optical" ? "" : field("source", "Источник из каталога", fileOptions(m.files), m.file.id)}${fields}</div><div class="route-preview ${m.reason ? "blocked" : ""}">${esc(m.reason || m.plan)}</div>${button("run", icon("Play") + submit, "", "primary", m.reason ? "disabled" : "")}`,
   );
   if (page === "integrity")
     result +=
@@ -654,6 +752,11 @@ function policyPage(s) {
   );
 }
 function modalView(s) {
+  if (s.ui.modal.kind === "confirm") {
+    const m = s.ui.modal;
+    return `<div class="dialog-inner"><div class="dialog-head"><h2 id="dialog-title">${esc(m.title)}</h2></div><p id="confirm-description">${esc(m.description)}</p><div class="confirm-actions">${button("close", "Отмена", "", "secondary-action", 'id="confirm-cancel"')}${button("confirmAction", esc(m.label), "", "danger-action")}</div></div>`;
+  }
+  if (s.ui.modal.kind.startsWith("inv")) return Inventory.modal(s);
   const { kind, id } = s.ui.modal;
   let title = "",
     content = "";
@@ -682,8 +785,7 @@ function modalView(s) {
         "primary",
         available(s, d) ? "" : "disabled",
       );
-    if (available(s, d) && s.files.some((f) => f.torrentId === id))
-      content += button("moveTorrent", "Перенести раздачу", id);
+    content += Inventory.torrentTools(s, t);
   } else if (kind === "add") {
     title = "Добавить торрент";
     const hosts = s.hosts.filter(
@@ -716,9 +818,14 @@ function screen(s) {
   if (page === "jobs") return queue(s);
   if (s.loading) return skeleton("Загрузка раздела", 4);
   if (page === "drives" || page === "index") return fileSearch(s);
-  if (page === "torrents") return torrentsPage(s);
-  if (page === "games") return gameShelf(s);
-  if (page === "scheduler") return scheduler(s);
-  if (page === "policies") return policyPage(s);
+  if (page === "torrents") return torrentsPage(s) + torrentTransfers(s);
+  if (page === "games") return Workshops.games(s) + taskHistory(s, ["game"], "Подготовка игр");
+  if (page === "localsend") return Workshops.local(s) + taskHistory(s, ["send", "receive"], "Передачи LocalSend");
+  if (page === "optical") return Workshops.optical(s) + taskHistory(s, ["burn", "image"], "Задания привода");
+  if (page === "hosts") return Inventory.hosts(s);
+  if (page === "media") return Pipeline.media(s);
+  if (page === "task") return Pipeline.taskPage(s);
+  if (page === "scheduler") return Pipeline.scheduler(s);
+  if (page === "policies") return Workshops.rules(s) + taskHistory(s, ["place"], "Задания раскладки");
   return operationPage(s);
 }

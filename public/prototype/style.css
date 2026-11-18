@@ -302,3 +302,47 @@ input::placeholder{color:#aab2a9;opacity:1}
 .track-detail span { display:flex;align-items:center;gap:7px }.track-detail small { grid-column:1/-1;color:var(--muted) }
 .detail-grid .copy-list { max-height:none }.detail-grid .primary { margin-right:6px }
 @media(min-width:880px){.detail-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+
+/* Legacy workflows share the carrier cards, controls and type scale. */
+#extra-nav:not([hidden]) { display:grid; gap:2px }
+#module-nav .nav-disclosure { margin-top:9px; border-top:1px solid var(--line); border-radius:0; padding-top:10px }
+.nav-disclosure[aria-expanded=true] svg { transform:rotate(90deg) }
+.transfer-grid { display:grid; gap:0 14px; grid-template-columns:minmax(0,1fr) }
+.transfer-facts { display:grid; gap:6px; margin-top:14px }
+.transfer-facts>div { display:flex; flex-wrap:wrap; justify-content:space-between; gap:4px 10px }
+.transfer-facts dd { margin:0; overflow-wrap:anywhere; font-weight:600 }
+.transfer-facts dt,.transfer-note,.collection-count { color:var(--muted) }
+.transfer-note,.collection-count { margin:10px 0 14px; font-size:13px }
+.work-card>.field,.dialog-inner>.field { margin-bottom:12px }
+.confirm-actions { display:flex; flex-wrap:wrap; gap:8px; margin-top:18px }
+.danger-action { background:#3a2523; color:#ffc1b9; border:1px solid #935951; border-radius:6px; padding:8px 12px; min-height:40px }
+.action-fault,.busy-line { display:flex; align-items:center; gap:9px; padding:12px; border-radius:8px; margin:10px 0; font-size:13px }
+.action-fault { background:#392522; border:1px solid #84564b; color:#ffcdc2 }
+.busy-line { background:#263022; color:var(--lime) }
+.busy-line::before { content:""; width:12px; height:12px; border:2px solid currentColor; border-right-color:transparent; border-radius:50%; animation:spin .8s linear infinite }
+@keyframes spin { to {transform:rotate(360deg)} }
+@media(prefers-reduced-motion:reduce){ .busy-line::before{animation:none} }
+.task-link { color:var(--text); font-weight:650; text-align:left; text-decoration:underline; text-decoration-color:#75836e; text-underline-offset:3px; padding:6px 0; overflow-wrap:anywhere }
+.task-link:hover {color:var(--lime)}
+.record-list,.event-list { padding:0; margin:0 0 12px; list-style:none }
+.record-list li,.event-list li { display:flex; align-items:baseline; flex-wrap:wrap; gap:6px 12px; padding:10px 0; border-bottom:1px solid var(--line); overflow-wrap:anywhere }
+.record-list li { justify-content:space-between }
+.record-list small,.event-list time { display:block; font-size:12px; color:var(--muted) }
+.event-list time { font-family:var(--mono) }
+#screen>.secondary-action { margin-bottom:10px }
+.work-card h3,.dialog-inner h3 { font-size:14px; margin:12px 0 6px }
+.dialog-inner .form-grid { margin-bottom:14px }
+.dialog-inner .file-actions { margin-top:12px }
+.dialog-inner { overflow-wrap:anywhere }
+@media(min-width:760px){ .transfer-grid {grid-template-columns:repeat(2,minmax(0,1fr))} }
+/* Original shelf illustrations for the handheld editions in the demo catalog. */
+.cover-zelda,.cover-gow { position:relative;isolation:isolate;overflow:hidden }
+.cover-zelda { background:radial-gradient(circle at 72% 30%,#f9ebaf 0 8%,transparent 8.5%),linear-gradient(#447b8e,#a6cfc0 67%,#dfc786) }
+.cover-zelda::before,.cover-zelda::after,.cover-gow::before,.cover-gow::after { content:"";position:absolute;inset:0;z-index:-1 }
+.cover-zelda::before {background:#517d6d;clip-path:polygon(0 82%,19% 50%,29% 62%,45% 29%,61% 65%,80% 40%,100% 72%,100% 100%,0 100%)}
+.cover-zelda::after {background:#234b46;clip-path:polygon(0 71%,11% 62%,24% 76%,35% 70%,54% 91%,70% 78%,82% 65%,100% 75%,100% 100%,0 100%)}
+.cover-gow { background:radial-gradient(circle at 68% 30%,#ffcf91 0 9%,transparent 9.5%),linear-gradient(#814443,#e18954 69%,#50352e) }
+.cover-gow::before {inset:24% 7% 0 30%;background:#49302b;clip-path:polygon(0 26%,48% 0,100% 23%,100% 29%,0 33%)}
+.cover-gow::after {inset:46% 12% 0 35%;background:repeating-linear-gradient(90deg,#382825 0 11%,transparent 11% 22%);border-bottom:7px solid #382825}
+.history-row { display:grid; grid-template-columns:minmax(0,1fr) auto; align-items:center; gap:5px 12px; padding:7px 0; border-top:1px solid var(--line) }
+.history-row span { font-size:12px;color:var(--muted) }.history-row .track { grid-column:1/-1 }
