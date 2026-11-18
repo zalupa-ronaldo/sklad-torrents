@@ -1,7 +1,8 @@
 /**
  * Read-only per-letter inventory.
- * Letters come from MountedDevices names. Excluded letters are removed before any
- * Get-Volume, Get-Partition, or CIM call. A stale or inaccessible letter is recorded
+ * Letters come from MountedDevices names. E: and Z: are removed before any
+ * Get-Volume, Get-Partition, or CIM call. F: may be queried so it can be labeled
+ * as the virtual Alcohol drive; it is not indexed. A stale or inaccessible letter is recorded
  * and skipped; it does not discard the other letters or the administrator token.
  * The token is WindowsIdentity, measured before those probes.
  * This does not claim Windows itself never touches a mounted volume.
@@ -22,6 +23,7 @@ export const WINDOWS_VOLUME_SCRIPT = `
 $ErrorActionPreference = 'Continue'
 $ProgressPreference = 'SilentlyContinue'
 $exclude = New-Object 'System.Collections.Generic.HashSet[string]'
+[void]$exclude.Add('E')
 [void]$exclude.Add('Z')
 foreach ($item in ([string]$env:SKLAD_EXCLUDE_LETTERS).ToUpper().Split(',')) {
   $token = $item.Trim().TrimEnd(':')

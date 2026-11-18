@@ -2,9 +2,27 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 
 import { normalizeSerial, normalizeUuid } from "@/addons/drives/identity";
-import { IGNORED_WINDOWS_LETTER, isIgnoredLetter, isIgnoredVolume, letterKey } from "@/addons/drives/volume-letters";
+import {
+  IGNORED_WINDOWS_LETTERS,
+  isIgnoredLetter,
+  isIgnoredVolume,
+  isVirtualAlcoholLetter,
+  letterKey,
+} from "@/addons/drives/volume-letters";
 
-export { IGNORED_WINDOWS_LETTER, isIgnoredLetter, isIgnoredMount, isIgnoredVolume, letterKey } from "@/addons/drives/volume-letters";
+export {
+  IGNORED_WINDOWS_LETTER,
+  IGNORED_WINDOWS_LETTERS,
+  VIRTUAL_ALCOHOL_LABEL,
+  isIgnoredLetter,
+  isIgnoredMount,
+  isIgnoredVolume,
+  isOfflineSnapshot,
+  isVirtualAlcoholLetter,
+  isVirtualAlcoholVolume,
+  excludedFromCatalog,
+  letterKey,
+} from "@/addons/drives/volume-letters";
 
 export interface VolumeGuard {
   /** Listed, no automatic index. Manual rescan is still allowed. */
@@ -25,8 +43,10 @@ export function emptyVolumeGuard(): VolumeGuard {
 }
 
 function sealVolumeGuard(guard: VolumeGuard): VolumeGuard {
-  guard.excludeLetters.add(IGNORED_WINDOWS_LETTER);
-  guard.manualOnly.delete(IGNORED_WINDOWS_LETTER);
+  for (const letter of IGNORED_WINDOWS_LETTERS) {
+    guard.excludeLetters.add(letter);
+    guard.manualOnly.delete(letter);
+  }
   return guard;
 }
 
@@ -75,14 +95,14 @@ export function parseVolumeGuard(input: unknown): VolumeGuard {
 export function excludedLettersFromEnv(env: NodeJS.ProcessEnv = process.env): Set<string> {
   const guard = emptyVolumeGuard();
   for (const item of String(env.SKLAD_EXCLUDE_LETTERS ?? "").split(",")) addToken(item, guard);
-  guard.excludeLetters.add(IGNORED_WINDOWS_LETTER);
-  return guard.excludeLetters;
+  return sealVolumeGuard(guard).excludeLetters;
 }
 
 export function assertLetterAllowed(letter: string, excludeLetters: ReadonlySet<string> = excludedLettersFromEnv()): void {
   const key = letterKey(letter);
   if (!key) throw new Error("Некорректная буква тома.");
   if (isIgnoredLetter(key) || excludeLetters.has(key)) throw new Error("Том исключён до открытия устройства.");
+  if (isVirtualAlcoholLetter(key)) throw new Error("F — виртуальный диск Alcohol. Том не открывается.");
 }
 
 /** Letters that may be passed to Get-Volume / Get-Partition / CIM. Excluded letters are removed first. */

@@ -1,7 +1,8 @@
 import { uniqueDisks } from "@/addons/drives/disk-table";
 import { applyIndexUpdate, emptyScan } from "@/addons/drives/index-apply";
 import { anonymousDiskId, formatUuid, identityKey, normalizeSerial, normalizeUuid, stableDiskId } from "@/addons/drives/identity";
-import { isIgnoredVolume } from "@/addons/drives/volume-letters";
+import { excludedFromCatalog, isIgnoredVolume, isVirtualAlcoholVolume } from "@/addons/drives/volume-letters";
+import { VIRTUAL_ALCOHOL_LABEL } from "@/lib/policies/storage-roles";
 import type {
   ConnectedHost,
   DiskRecord,
@@ -212,6 +213,20 @@ export function reconcileCatalog(
       if (Number.isFinite(volume.freeBytes) && volume.freeBytes >= 0) disk.freeBytes = volume.freeBytes;
       disk.lastSeenAt = at;
       connect(disk, observation, mountPaths);
+      if (isVirtualAlcoholVolume({ mountPaths })) {
+        disk.volumeName = VIRTUAL_ALCOHOL_LABEL;
+        if (!disk.namedByUser) disk.label = VIRTUAL_ALCOHOL_LABEL;
+        disk.files = [];
+        disk.scan = {
+          status: "idle",
+          strategy: "walk",
+          progress: 0,
+          message: "Виртуальный диск Alcohol. Индекс не строится.",
+          elevated: observation.elevated,
+        };
+        seenIds.add(disk.id);
+        continue;
+      }
       const applied = applyIndexUpdate({
         previous: disk.files,
         previousScan: disk.scan,
@@ -251,7 +266,7 @@ export function reconcileCatalog(
   }
   const merged = uniqueDisks(mergeVolumeRecords(uniqueDisks(disks)));
   refreshClones(merged);
-  return merged.filter((disk) => !isIgnoredVolume(disk));
+  return merged.filter((disk) => !excludedFromCatalog(disk));
 }
 
 export function diskRichness(disk: DiskRecord): number {

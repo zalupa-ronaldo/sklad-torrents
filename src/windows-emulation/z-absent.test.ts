@@ -40,6 +40,7 @@ describe("emulated Windows without Z:", () => {
       excludeSerials: [...guard.excludeSerials],
     });
     expect(present.volumes.map((volume) => volume.letter)).toEqual([...PRESENT_LETTERS]);
+    expect(present.volumes.find((volume) => volume.letter === "F")?.volumeName).toBe("виртуальный диск Alcohol");
     expect(JSON.stringify(present.volumes)).not.toContain(Z_CONTENT_MARKER);
     expect(JSON.stringify(present.volumes)).not.toContain(Z_SERIAL);
 

@@ -68,15 +68,59 @@ describe("disk identity", () => {
     const id = disks[0].id;
     disks = reconcileCatalog(
       disks,
-      [host({ os: "win32", volumes: [volume({ serial: "wd 1", volumeUuid: "{AAAAAAAA-BBBB-4CCC-8DDD-EEEEEEEEEEEE}", filesystem: "NTFS", mountPaths: ["E:\\"] })] })],
+      [host({ os: "win32", volumes: [volume({ serial: "wd 1", volumeUuid: "{AAAAAAAA-BBBB-4CCC-8DDD-EEEEEEEEEEEE}", filesystem: "NTFS", mountPaths: ["S:\\"] })] })],
       libs,
       "2026-02-01T00:00:00.000Z",
     );
     expect(disks).toHaveLength(1);
     expect(disks[0].id).toBe(id);
-    expect(disks[0].lastMountPath).toBe("E:\\");
+    expect(disks[0].lastMountPath).toBe("S:\\");
     expect(disks[0].priorMountPath).toBe("D:\\");
     expect(online(disks[0])).toBe(true);
+  });
+
+  it("does not adopt a live E: or index F:, and keeps an offline snapshot of E and Z", () => {
+    const live = reconcileCatalog(
+      [],
+      [host({
+        os: "win32",
+        volumes: [
+          volume({ serial: "E-SERIAL", volumeUuid: "33333333-3333-4333-8333-333333333333", filesystem: "NTFS", mountPaths: ["E:\\"], index: { state: "complete", progress: 1, files: [{ relativePath: "secret.txt", name: "secret.txt", kind: "file", size: 4, mtimeMs: 1 }] } }),
+          volume({ serial: "F-SERIAL", volumeUuid: "44444444-4444-4444-8444-444444444444", filesystem: "NTFS", volumeName: "disc", mountPaths: ["F:\\"], index: { state: "complete", progress: 1, files: [{ relativePath: "track.iso", name: "track.iso", kind: "file", size: 9, mtimeMs: 1 }] } }),
+        ],
+      })],
+      libs,
+      "2026-11-18T00:00:00.000Z",
+    );
+    expect(live.map((disk) => disk.lastMountPath)).toEqual(["F:\\"]);
+    expect(live[0]?.label).toBe("виртуальный диск Alcohol");
+    expect(live[0]?.volumeName).toBe("виртуальный диск Alcohol");
+    expect(live[0]?.files).toEqual([]);
+    expect(live[0]?.scan.message).toMatch(/Alcohol/);
+
+    const offline = {
+      ...live[0],
+      id: "disk-offline-e",
+      serial: "E-SERIAL",
+      serialNorm: "e-serial",
+      volumeUuid: "33333333-3333-4333-8333-333333333333",
+      uuidNorm: "33333333333343338333333333333333",
+      label: "E",
+      volumeName: "E",
+      lastMountPath: "E:\\",
+      lastHostId: "offline-snapshot",
+      snapshotOnly: true,
+      files: [],
+      connectedHosts: [],
+    } as DiskRecord;
+    const kept = reconcileCatalog(
+      [offline],
+      [host({ os: "win32", volumes: [volume({ serial: "D-SERIAL", volumeUuid: "22222222-2222-4222-8222-222222222222", filesystem: "NTFS", mountPaths: ["D:\\"] })] })],
+      libs,
+      "2026-11-18T01:00:00.000Z",
+    );
+    expect(kept.some((disk) => disk.id === "disk-offline-e" && disk.snapshotOnly)).toBe(true);
+    expect(kept.some((disk) => disk.lastMountPath === "E:\\" && !disk.snapshotOnly)).toBe(false);
   });
 
   it("keeps one catalog when the Mac mount path gains a suffix", () => {
@@ -303,8 +347,11 @@ describe("read-only indexer", () => {
     expect(() => assertSpawnAllowed({ bin: "powershell.exe", args: ["-NoProfile", "-NonInteractive", "-Command", "Clear-Disk"] })).toThrow();
     expect(() => assertSpawnAllowed({ bin: "diskutil", args: ["info", "-all"] })).toThrow();
     expect(() => assertSpawnAllowed({ bin: "diskutil", args: ["info", "/Volumes/vault"] })).not.toThrow();
-    expect(() => assertSpawnAllowed({ bin: "fsutil", args: ["usn", "queryJournal", "E:"] })).not.toThrow();
-    expect(() => assertSpawnAllowed({ bin: "fsutil", args: ["usn", "readJournal", "E:", "120"] })).not.toThrow();
+    expect(() => assertSpawnAllowed({ bin: "fsutil", args: ["usn", "queryJournal", "D:"] })).not.toThrow();
+    expect(() => assertSpawnAllowed({ bin: "fsutil", args: ["usn", "readJournal", "D:", "120"] })).not.toThrow();
+    expect(() => assertSpawnAllowed({ bin: "fsutil", args: ["usn", "queryJournal", "E:"] })).toThrow(/исключён/);
+    expect(() => assertSpawnAllowed({ bin: "fsutil", args: ["usn", "queryJournal", "Z:"] })).toThrow(/исключён/);
+    expect(() => assertSpawnAllowed({ bin: "fsutil", args: ["usn", "queryJournal", "F:"] })).toThrow(/исключён/);
     expect(() =>
       assertSpawnAllowed({ bin: "powershell.exe", args: ["-NoProfile", "-NonInteractive", "-Command", WINDOWS_VOLUME_SCRIPT] }),
     ).not.toThrow();
@@ -442,10 +489,10 @@ Volume Free Space:         1.2 TB (1200000000000 Bytes)
     const parsed = parseWindowsVolumes({
       admin: false,
       disks: [{ Index: 1, SerialNumber: "ST4000DM-ARCH2019" }],
-      parts: [{ DiskNumber: 1, DriveLetter: "E" }],
+      parts: [{ DiskNumber: 1, DriveLetter: "D" }],
       vols: [
         {
-          DriveLetter: "E",
+          DriveLetter: "D",
           FileSystem: "NTFS",
           FileSystemLabel: "ARCHIVE",
           Size: 4000,
@@ -453,12 +500,12 @@ Volume Free Space:         1.2 TB (1200000000000 Bytes)
           UniqueId: "\\\\?\\Volume{b2c3d4e5-2222-4bbb-8ccc-222222222222}\\",
         },
       ],
-      perf: [{ Name: "E:", PercentDiskTime: 91 }],
+      perf: [{ Name: "D:", PercentDiskTime: 91 }],
     });
     expect(parsed.elevated).toBe(false);
     expect(parsed.volumes[0].serial).toBe("ST4000DM-ARCH2019");
     expect(parsed.volumes[0].busy).toBe(true);
-    expect(parsed.volumes[0].mountPaths).toEqual(["E:\\"]);
+    expect(parsed.volumes[0].mountPaths).toEqual(["D:\\"]);
     expect(normalizeUuid(parsed.volumes[0].volumeUuid)).toBe("b2c3d4e522224bbb8ccc222222222222");
   });
 

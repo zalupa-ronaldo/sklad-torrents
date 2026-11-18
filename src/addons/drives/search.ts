@@ -2,7 +2,7 @@ import { isServiceVolume } from "@/addons/drives/inventory";
 import { joinDisplay } from "@/addons/drives/paths";
 import { mountPathsOf, online } from "@/addons/drives/reconcile";
 import type { DiskRecord, SearchHit } from "@/addons/drives/types";
-import { isIgnoredVolume } from "@/addons/drives/volume-letters";
+import { excludedFromCatalog } from "@/addons/drives/volume-letters";
 
 export function connectHint(label: string, isOnline: boolean): string | null {
   if (isOnline) return null;
@@ -20,7 +20,7 @@ export function searchDisks(disks: readonly DiskRecord[], query: string, limit =
   const categoryFilters = categoryNeedles.get(needle) ?? [];
   const hits: SearchHit[] = [];
   for (const disk of disks) {
-    if (isIgnoredVolume(disk) || isServiceVolume(disk)) continue;
+    if (excludedFromCatalog(disk) || isServiceVolume(disk)) continue;
     const isOnline = online(disk);
     const mount = (isOnline ? mountPathsOf(disk)[0] : disk.lastMountPath) || disk.lastMountPath;
     for (const file of disk.files) {

@@ -67,7 +67,9 @@ describe("WSL and Windows path families", () => {
     expect(wslPathToWindows("/mnt/d/Games/Pack")).toBe("D:\\Games\\Pack");
     expect(windowsPathToWsl("D:\\Foo\\\\Bar")).toBe("/mnt/d/Foo/Bar");
     expect(windowsPathToWsl("D:\\")).toBe("/mnt/d");
-    expect(wslPathToWindows("/mnt/e")).toBe("E:\\");
+    expect(wslPathToWindows("/mnt/h")).toBe("H:\\");
+    expect(wslPathToWindows("/mnt/e")).toBeNull();
+    expect(wslPathToWindows("/mnt/f")).toBeNull();
     expect(isForbiddenTorrentVolume("D:\\")).toBe(false);
     expect(isForbiddenTorrentVolume("/mnt/d")).toBe(false);
     expect(isForbiddenTorrentVolume("D:\\Games\\puzzle")).toBe(false);
@@ -110,5 +112,7 @@ describe("WSL and Windows path families", () => {
     expect(assertSavePath("darwin", undefined, "/Volumes/vault/Downloads")).toBe("/Volumes/vault/Downloads");
     expect(() => assertSavePath("win32", "wsl", "Z:\\Games")).toThrow(/Диск Z:/);
     expect(() => assertSavePath("win32", "windows", "Z:\\Games")).toThrow(/Диск Z:/);
+    expect(() => assertSavePath("win32", "windows", "E:\\Archive")).toThrow(/Диск E:/);
+    expect(() => assertSavePath("win32", "windows", "F:\\")).toThrow(/виртуальный диск Alcohol/);
   });
 });

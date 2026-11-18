@@ -100,9 +100,9 @@ describe("qBittorrent HTTP adapter", () => {
     await client.add({ urls: MAGNET, savePath: "D:\\Downloads", paused: true });
     const add = fake.calls.find((call) => call.path === "/api/v2/torrents/add");
     expect(multipartField(add?.body || "", "paused")).toBe("true");
-    await client.setLocation([HASH], "E:\\Cinema");
+    await client.setLocation([HASH], "H:\\Cinema");
     const move = fake.calls.find((call) => call.path === "/api/v2/torrents/setLocation");
-    expect(new URLSearchParams(move?.body || "").get("location")).toBe("E:\\Cinema");
+    expect(new URLSearchParams(move?.body || "").get("location")).toBe("H:\\Cinema");
     expect(new URLSearchParams(move?.body || "").get("hashes")).toBe(HASH);
     await client.setFilePriority(HASH, [0, 1], 0);
     const prio = fake.calls.find((call) => call.path === "/api/v2/torrents/filePrio");
@@ -119,6 +119,8 @@ describe("qBittorrent HTTP adapter", () => {
     const client = new HttpQbittorrentClient(fake.url, "admin", "secret");
     await expect(client.setLocation([HASH], "Z:\\Archive")).rejects.toThrow(/Диск Z:/);
     await expect(client.setLocation([HASH], "/mnt/z/Archive")).rejects.toThrow(/Диск Z:/);
+    await expect(client.setLocation([HASH], "E:\\Archive")).rejects.toThrow(/Диск E:/);
+    await expect(client.setLocation([HASH], "F:\\")).rejects.toThrow(/виртуальный диск Alcohol/);
     expect(fake.calls.some((call) => call.path === "/api/v2/torrents/setLocation")).toBe(false);
   });
 

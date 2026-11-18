@@ -11,7 +11,7 @@ import { promisify } from "node:util";
 
 import { appDataDir } from "@/lib/app-data";
 import { joinCatalogPath, sanitizeRelative, type FilesystemKind, type OsKind } from "@/lib/drive/filesystem";
-import { isProtectedVolume } from "@/lib/localsend/paths";
+import { isProtectedVolume, protectedVolumeMessage } from "@/lib/localsend/paths";
 import {
   PROTOCOL_VERSION,
   protocolStatusMessage,
@@ -344,7 +344,8 @@ async function upload(
   const destination = options.destination ? await options.destination() : null;
   if (destination && (isProtectedVolume(destination.writeRoot) || isProtectedVolume(destination.catalogRoot))) {
     file.failed = true;
-    await options.onSessionFailed?.(sessionId, "Диск Z: не используется.");
+    const closed = isProtectedVolume(destination.writeRoot) ? destination.writeRoot : destination.catalogRoot;
+    await options.onSessionFailed?.(sessionId, protectedVolumeMessage(closed));
     respondJson(res, 403, { message: "Rejected" });
     return;
   }
@@ -452,7 +453,7 @@ async function upload(
       const relative = sanitizeRelative(file.meta.fileName);
       catalogPath = joinCatalogPath(destination.os, destination.catalogRoot, relative);
       savedPath = localTarget(destination.writeRoot, relative);
-      if (isProtectedVolume(savedPath)) throw new Error("Диск Z: не используется.");
+      if (isProtectedVolume(savedPath)) throw new Error(protectedVolumeMessage(savedPath));
       await publishStaged(staged, savedPath);
       staged = null;
       incoming = {

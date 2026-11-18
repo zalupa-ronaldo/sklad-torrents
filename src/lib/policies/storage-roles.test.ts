@@ -31,6 +31,7 @@ describe("disk roles", () => {
     expect(storageRole({ os: "win32", letter: "E" })).toBe("forbidden")
     expect(storageRole({ os: "win32", letter: "Z" })).toBe("forbidden")
     expect(storageRole({ os: "win32", letter: "F" })).toBe("virtual")
+    expect(storageRole({ os: "win32", letter: "F:" })).toBe("virtual")
     expect(storageRole({ os: "win32" })).toBe("unconfigured")
   })
 

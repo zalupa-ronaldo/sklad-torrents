@@ -43,8 +43,11 @@ describe("panel disk caption", () => {
 
   it("hides Z: and does not repeat a letter that is already the label", () => {
     expect(isHiddenPanelVolume({ lastMountPath: "Z:\\", mountPaths: ["Z:\\"], label: "Data" })).toBe(true);
+    expect(isHiddenPanelVolume({ lastMountPath: "E:\\", mountPaths: ["E:\\"], label: "archive" })).toBe(true);
     expect(isHiddenPanelVolume({ lastMountPath: "/mnt/z", label: "Data" })).toBe(true);
+    expect(isHiddenPanelVolume({ lastMountPath: "Z:\\", snapshotOnly: true, label: "Data" })).toBe(false);
     expect(isHiddenPanelVolume({ lastMountPath: "D:\\", label: "vault" })).toBe(false);
+    expect(isHiddenPanelVolume({ lastMountPath: "F:\\", label: "виртуальный диск Alcohol" })).toBe(false);
     expect(
       panelDiskCaption({
         label: "C:",

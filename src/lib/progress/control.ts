@@ -5,7 +5,7 @@ import { localJobHost } from "@/lib/jobs/local-host";
 import type { JobHost } from "@/lib/jobs/model";
 
 import { isChannelDetail, parseLinkStatus, type LinkStatus } from "@/lib/progress/channel";
-import { isIgnoredVolume } from "@/lib/progress/paths";
+import { ignoredVolumeDetail, isIgnoredVolume } from "@/lib/progress/paths";
 
 export type ProcessPriority = "idle" | "below-normal" | "normal";
 export type QueueScope = "all" | "mac-local" | "pc-agent";
@@ -221,7 +221,7 @@ export async function decideAdmission(host: JobHost, job: AdmissionJob, running:
   const control = await readControl();
   const source = job.payload?.source ?? "";
   const destination = job.payload?.destination ?? "";
-  if (isIgnoredVolume(source) || isIgnoredVolume(destination)) return { ok: false, detail: "Диск Z: не используется." };
+  if (isIgnoredVolume(source) || isIgnoredVolume(destination)) return { ok: false, detail: ignoredVolumeDetail(isIgnoredVolume(source) ? source : destination) };
   if (control.paused) return { ok: false, detail: "Очередь на паузе." };
   if (control.hosts[host]?.paused) return { ok: false, detail: "Эта машина на паузе." };
   if (isChannelDetail(job.lastError) && !(await channelAllows(host))) {

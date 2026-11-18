@@ -10,6 +10,7 @@ import { TorrentDock } from "@/components/torrent-dock";
 import {
   copyGroup,
   folderFileCountLabel,
+  isEPath,
   isHiddenPanelVolume,
   isQueueJob,
   isZPath,
@@ -468,8 +469,9 @@ export function Dashboard() {
       return hits
         .filter((hit) => {
           const disk = shelf?.disks.find((item) => item.id === hit.diskId);
+          if (disk?.snapshotOnly) return true;
           if (disk && isHiddenPanelVolume(disk)) return false;
-          return !isZPath(hit.label) && !isZPath(hit.path);
+          return !isZPath(hit.label) && !isZPath(hit.path) && !isEPath(hit.label) && !isEPath(hit.path);
         })
         .filter((hit) => libFilter === "all" || hit.categories.includes(libFilter))
         .map((hit) => ({
@@ -888,7 +890,11 @@ export function Dashboard() {
         <aside data-testid="file-tree" className="flex w-[220px] shrink-0 flex-col border-r bg-card/20">
           <div className="border-b px-2 py-1.5 text-[11px] font-semibold tracking-wide text-muted-foreground uppercase">Диски</div>
           <div className="min-h-0 flex-1 overflow-auto p-1">
-            {(browse?.roots ? browse.entries : treeDisks).filter((entry) => !isZPath(entry.name) && !isZPath(entry.displayPath)).map((entry) => {
+            {(browse?.roots ? browse.entries : treeDisks).filter((entry) => {
+              const face = stripDisks.find((disk) => disk.id === entry.diskId);
+              if (face?.snapshotOnly) return true;
+              return !isZPath(entry.name) && !isZPath(entry.displayPath) && !isEPath(entry.name) && !isEPath(entry.displayPath);
+            }).map((entry) => {
               const diskActive = diskId === entry.diskId;
               const open = treeOpen[entry.diskId] ?? diskActive;
               const childDirs =

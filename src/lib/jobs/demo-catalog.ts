@@ -23,8 +23,8 @@ export const DEMO_DISKS: DemoDisk[] = [
   { id: "downloads-mac", host: "mac-local", label: "Загрузки Mac", path: "/Volumes/vault/Downloads" },
   { id: "d-games", host: "pc-agent", label: "D: Games", path: "D:\\Games" },
   { id: "d-downloads", host: "pc-agent", label: "D: Downloads", path: "D:\\Downloads" },
-  { id: "e-archive", host: "pc-agent", label: "E: Archive", path: "E:\\Archive" },
-  { id: "e-cinema", host: "pc-agent", label: "E: Cinema", path: "E:\\Cinema" },
+  { id: "h-archive", host: "pc-agent", label: "H: Archive", path: "H:\\Archive" },
+  { id: "h-cinema", host: "pc-agent", label: "H: Cinema", path: "H:\\Cinema" },
 ];
 
 const MAC_NAMES = [

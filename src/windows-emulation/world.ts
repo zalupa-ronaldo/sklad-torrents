@@ -11,7 +11,7 @@ export const Z_UUID = "d5625324-d816-4af6-9504-66b4639e2309";
 /** A name that must never appear in a parsed inventory or a reconcile note. */
 export const Z_CONTENT_MARKER = "z-secret-ledger.txt";
 
-export const PRESENT_LETTERS = ["C", "D", "E", "F", "S"] as const;
+export const PRESENT_LETTERS = ["C", "D", "F", "S"] as const;
 
 const TB = 1024 ** 4;
 const GB = 1024 ** 3;
@@ -29,7 +29,6 @@ interface VolumeSpec {
 const PRESENT_VOLUMES: VolumeSpec[] = [
   { letter: "C", label: "Windows", serial: "C-SERIAL", uuid: "11111111-1111-4111-8111-111111111111", bytes: 512 * GB, free: 180 * GB },
   { letter: "D", label: "vault", serial: "D-SERIAL", uuid: "22222222-2222-4222-8222-222222222222", bytes: TB, free: 400 * GB },
-  { letter: "E", label: "archive", serial: "E-SERIAL", uuid: "33333333-3333-4333-8333-333333333333", bytes: 2 * TB, free: 900 * GB },
   { letter: "F", label: "virtual", serial: "F-SERIAL", uuid: "44444444-4444-4444-8444-444444444444", bytes: 64 * GB, free: 64 * GB },
   { letter: "S", label: "games", serial: "S-SERIAL", uuid: "55555555-5555-4555-8555-555555555555", bytes: 8 * TB, free: TB },
 ];

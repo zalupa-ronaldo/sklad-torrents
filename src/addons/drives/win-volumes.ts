@@ -1,6 +1,7 @@
 import type { CollectedVolume } from "@/addons/drives/types";
 import { normalizeSerial, normalizeUuid } from "@/addons/drives/identity";
 import { isIgnoredLetter, letterKey } from "@/addons/drives/volume-guard";
+import { VIRTUAL_ALCOHOL_LABEL } from "@/lib/policies/storage-roles";
 
 interface WinDisk {
   Index?: number | string;
@@ -93,11 +94,12 @@ export function parseWindowsVolumes(
     const diskNumber = letter ? diskByLetter.get(letter) : undefined;
     const serial = diskNumber === undefined ? "" : (serialByDisk.get(diskNumber) ?? "");
     if (serial && excludedSerials.has(normalizeSerial(serial))) continue;
+    const virtual = letter === "F";
     volumes.push({
       serial,
       volumeUuid: String(volume.UniqueId ?? ""),
       filesystem: String(volume.FileSystem ?? "").trim() || "unknown",
-      volumeName: String(volume.FileSystemLabel ?? "").trim(),
+      volumeName: virtual ? VIRTUAL_ALCOHOL_LABEL : String(volume.FileSystemLabel ?? "").trim(),
       mountPaths: letter ? [`${letter}:\\`] : [],
       totalBytes: asNumber(volume.Size),
       freeBytes: asNumber(volume.SizeRemaining),

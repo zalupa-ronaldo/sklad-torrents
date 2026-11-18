@@ -106,6 +106,9 @@ describe("index load and pause", () => {
       scan: { status: "idle", strategy: "mft-usn", progress: 0, message: "", elevated: true },
     } as DiskRecord;
     expect(disksToIndexJobs([disk])).toEqual([]);
+    const unhealthy = { ...disk, id: "e", lastMountPath: "E:\\" };
+    const alcohol = { ...disk, id: "f", lastMountPath: "F:\\", volumeName: "виртуальный диск Alcohol" };
+    expect(disksToIndexJobs([unhealthy, alcohol])).toEqual([]);
   });
 
   it("pauses and cancels the whole queue without dropping cursors", () => {

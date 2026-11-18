@@ -4,31 +4,51 @@ import type { HostOs, PathStyle, TorrentLocation } from "@/lib/qbittorrent/types
 export type { PathStyle } from "@/lib/qbittorrent/types";
 
 export const FORBIDDEN_VOLUME_MESSAGE = "Диск Z: не используется. Выберите другой каталог.";
+export const FORBIDDEN_E_MESSAGE = "Диск E: не используется. Выберите другой каталог.";
+export const VIRTUAL_ALCOHOL_PATH_MESSAGE = "F — виртуальный диск Alcohol. Выберите другой каталог.";
 
-const CLOSED_DRIVE = /^(?:\\\\\?\\)?[Zz]:(?:[\\/]|$)/;
-const CLOSED_MOUNT = /^\/mnt\/z(?:\/|$)/i;
+const CLOSED_DRIVE = /^(?:\\\\\?\\)?[EeZz]:(?:[\\/]|$)/;
+const CLOSED_MOUNT = /^\/mnt\/[ez](?:\/|$)/i;
+const VIRTUAL_DRIVE = /^(?:\\\\\?\\)?[Ff]:(?:[\\/]|$)/;
+const VIRTUAL_MOUNT = /^\/mnt\/f(?:\/|$)/i;
 
-/** Drive Z: and its WSL mount are never accepted, listed, or logged. */
+function driveLetterOf(input: string): string {
+  const text = input.trim().replace(/\\/g, "/");
+  const windows = /^(?:\/\/\?\/)?([A-Za-z]):/.exec(text);
+  if (windows) return windows[1]!.toUpperCase();
+  const wsl = /^\/mnt\/([A-Za-z])(?:\/|$)/.exec(text);
+  return wsl ? wsl[1]!.toUpperCase() : "";
+}
+
+/** E: and Z: are never a torrent path. F: is the virtual Alcohol drive and is not a save path. */
 export function isClosedDrive(input: string): boolean {
   const trimmed = input.trim();
   if (!trimmed) return false;
-  if (CLOSED_DRIVE.test(trimmed)) return true;
-  return CLOSED_MOUNT.test(trimmed.replace(/\\/g, "/"));
+  if (CLOSED_DRIVE.test(trimmed) || VIRTUAL_DRIVE.test(trimmed)) return true;
+  const slashed = trimmed.replace(/\\/g, "/");
+  return CLOSED_MOUNT.test(slashed) || VIRTUAL_MOUNT.test(slashed);
+}
+
+export function closedDriveMessage(input: string): string {
+  const letter = driveLetterOf(input);
+  if (letter === "E") return FORBIDDEN_E_MESSAGE;
+  if (letter === "F") return VIRTUAL_ALCOHOL_PATH_MESSAGE;
+  return FORBIDDEN_VOLUME_MESSAGE;
 }
 
 export function rejectClosedDrive(input: string): void {
   if (isForbiddenTorrentVolume(input)) {
-    throw new QbittorrentError("validation", FORBIDDEN_VOLUME_MESSAGE);
+    throw new QbittorrentError("validation", closedDriveMessage(input));
   }
 }
 
 /**
  * `/mnt/d/Downloads` is the path qbittorrent-nox sees. The panel stores `D:\\Downloads`.
- * Returns null when the string is not a WSL drive mount. Letter Z never converts.
+ * Returns null when the string is not a WSL drive mount. Letters E, F and Z never convert.
  */
 export function windowsPathFromWsl(input: string): string | null {
   const slash = input.trim().replace(/\\/g, "/");
-  const match = /^\/mnt\/([a-yA-Y])(?:\/(.*))?$/.exec(slash);
+  const match = /^\/mnt\/([a-dA-Dg-yG-Y])(?:\/(.*))?$/.exec(slash);
   if (!match) return null;
   const rest = (match[2] ?? "").replace(/\/+$/, "").replace(/\//g, "\\");
   return rest ? `${match[1].toUpperCase()}:\\${rest}` : `${match[1].toUpperCase()}:\\`;
@@ -115,7 +135,7 @@ export function isForbiddenTorrentVolume(input: string): boolean {
 
 export function assertAllowedTorrentPath(input: string): void {
   if (isForbiddenTorrentVolume(input)) {
-    throw new QbittorrentError("validation", FORBIDDEN_VOLUME_MESSAGE);
+    throw new QbittorrentError("validation", closedDriveMessage(input));
   }
 }
 
@@ -125,7 +145,7 @@ export function windowsPathToWsl(input: string): string | null {
   const match = raw.match(/^([A-Za-z]):(?:[\\/](.*))?$/);
   if (!match) return null;
   const letter = match[1].toLowerCase();
-  if (letter === "z") return null;
+  if (letter === "e" || letter === "f" || letter === "z") return null;
   const rest = (match[2] ?? "").replace(/[\\/]+/g, "/").replace(/^\/+|\/+$/g, "");
   return rest ? `/mnt/${letter}/${rest}` : `/mnt/${letter}`;
 }
@@ -133,7 +153,7 @@ export function windowsPathToWsl(input: string): string | null {
 export function wslPathToWindows(input: string): string | null {
   if (isForbiddenTorrentVolume(input)) return null;
   const raw = input.trim().replace(/\\/g, "/").replace(/\/{2,}/g, "/");
-  const match = raw.match(/^\/mnt\/([a-y])(?:\/(.*))?$/i);
+  const match = raw.match(/^\/mnt\/([a-dg-y])(?:\/(.*))?$/i);
   if (!match) return null;
   const letter = match[1].toUpperCase();
   const rest = (match[2] ?? "").replace(/^\/+|\/+$/g, "");

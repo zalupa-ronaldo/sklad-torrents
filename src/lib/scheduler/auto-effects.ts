@@ -13,7 +13,7 @@ import { clientFor, requireHost } from "@/lib/qbittorrent/service";
 import { enqueueEncode } from "@/lib/transcode/encode-worker";
 
 import type { PipelineEffects } from "@/lib/scheduler/auto-queue";
-import { isSkippedVolume } from "@/lib/scheduler/skipped-volume";
+import { isSkippedVolume, skippedVolumeNote } from "@/lib/scheduler/skipped-volume";
 
 export const pipelineBudget = { chunkBytes: 256 * 1024 };
 
@@ -46,7 +46,7 @@ async function requestIndex(diskId: string | null): Promise<string> {
     return result.message;
   } catch (error) {
     const message = error instanceof Error ? error.message : "Индекс не запущен.";
-    return isSkippedVolume(message) ? "Диск Z: пропущен." : message;
+    return isSkippedVolume(message) ? skippedVolumeNote(message) : message;
   }
 }
 
@@ -69,7 +69,7 @@ async function kindOf(filePath: string): Promise<"file" | "dir" | "missing"> {
 }
 
 async function copyChunk(source: string, dest: string, offset: number): Promise<{ offset: number; done: boolean; total: number }> {
-  if (isSkippedVolume(source) || isSkippedVolume(dest)) throw new Error("Диск Z: пропущен.");
+  if (isSkippedVolume(source) || isSkippedVolume(dest)) throw new Error(skippedVolumeNote(isSkippedVolume(source) ? source : dest));
   const info = await stat(source);
   if (!info.isFile()) throw new Error("В копию попадает только файл.");
   if (offset === 0) {
@@ -93,7 +93,7 @@ async function copyChunk(source: string, dest: string, offset: number): Promise<
 }
 
 async function hashChunk(token: string, filePath: string, offset: number): Promise<{ offset: number; done: boolean; total: number; hex: string | null }> {
-  if (isSkippedVolume(filePath)) throw new Error("Диск Z: пропущен.");
+  if (isSkippedVolume(filePath)) throw new Error(skippedVolumeNote(filePath));
   const info = await stat(filePath);
   let entry = hashers.get(token);
   if (!entry || (offset === 0 && entry.offset !== 0)) {
@@ -160,7 +160,8 @@ async function enqueueCompress(input: {
   videoFile: string | null;
 }): Promise<string> {
   if (isSkippedVolume(input.source) || isSkippedVolume(input.output) || isSkippedVolume(input.videoFile)) {
-    return "Диск Z: пропущен.";
+    const hit = [input.source, input.output, input.videoFile ?? ""].find((item) => isSkippedVolume(item)) ?? "";
+    return skippedVolumeNote(hit);
   }
   await enqueuePolicyJob({
     kind: input.action === "handbrake" ? "handbrake" : "compact",

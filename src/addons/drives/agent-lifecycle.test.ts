@@ -277,7 +277,15 @@ it("drops excluded Z before resume and does not index C/D/E/F/S again when their
     await sleep(80);
     expect(executeIndexPlan).not.toHaveBeenCalled();
     const body = await (await fetch(`${base}/v1/volumes?metadata=1`)).json();
-    expect(body.volumes.map((item: { letter?: string }) => item.letter).sort()).toEqual(["C", "D", "E", "F", "S"]);
+    expect(body.volumes.map((item: { letter?: string }) => item.letter).sort()).toEqual(["C", "D", "F", "S"]);
+    expect(body.volumes.find((item: { letter?: string }) => item.letter === "F")).toMatchObject({
+      volumeName: "виртуальный диск Alcohol",
+      virtualAlcohol: true,
+      index: null,
+    });
+    const alcohol = body.volumes.find((item: { letter?: string; serial?: string; volumeUuid?: string }) => item.letter === "F");
+    const blockedF = await fetch(`${base}/v1/rescan?serial=${alcohol.serial}&uuid=${alcohol.volumeUuid}`, { method: "POST" });
+    expect(blockedF.status).toBe(403);
     const rescan = await fetch(`${base}/v1/rescan?serial=WRA04CK7&uuid=d5625324-d816-4af6-9504-66b4639e2309`, { method: "POST" });
     expect(rescan.status).toBe(404);
     const stat = await fetch(`${base}/v1/file/stat?serial=WRA04CK7&uuid=d5625324-d816-4af6-9504-66b4639e2309&path=keep/a.txt`);

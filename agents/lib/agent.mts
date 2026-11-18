@@ -18,7 +18,7 @@ import { selectIndexStrategy } from "../../src/addons/drives/strategy.ts";
 import { normalizeSerial, normalizeUuid } from "../../src/addons/drives/identity.ts";
 import { isServiceVolume } from "../../src/addons/drives/inventory.ts";
 import { chunkGapMs, defaultIndexPolicy, emptyCheckpoint, mergeIndexFiles, normalizeIndexPolicy, type IndexLoadPolicy } from "../../src/addons/drives/index-session.ts";
-import { loadVolumeGuard, matchesExcluded, isIgnoredVolume, type VolumeGuard } from "../../src/addons/drives/volume-guard.ts";
+import { loadVolumeGuard, matchesExcluded, isIgnoredVolume, isVirtualAlcoholVolume, VIRTUAL_ALCOHOL_LABEL, type VolumeGuard } from "../../src/addons/drives/volume-guard.ts";
 import type { CollectedVolume, HostOs, IndexPayload, IndexPauseReason, RawIndexedFile } from "../../src/addons/drives/types.ts";
 import { readNtfsLetter, readUsn, type DirStub } from "./indexers.mts";
 import { walkTree } from "./walk.mts";
@@ -199,6 +199,17 @@ export function startAgent(options: {
     const letter = letterKey(volume.letter) || letterKey((volume.mountPaths?.[0] || "").slice(0, 2));
     return Boolean(letter && guard.manualOnly.has(letter));
   }
+  function isVirtualVolume(volume: { letter?: string | null; mountPaths?: string[] }): boolean {
+    return isVirtualAlcoholVolume(volume);
+  }
+  function labelVirtual(volume: TrackedVolume): TrackedVolume {
+    if (!isVirtualVolume(volume)) return volume;
+    volume.volumeName = VIRTUAL_ALCOHOL_LABEL;
+    volume.index = null;
+    volume.partialFiles = [];
+    volume.dirStubs = [];
+    return volume;
+  }
   const snapshotPath = process.env.SKLAD_AGENT_SNAPSHOT || path.join(process.cwd(), "data", "drive-agent-snapshot.json.gz");
   let persistChain: Promise<unknown> = Promise.resolve();
   function persist() {
@@ -230,6 +241,12 @@ export function startAgent(options: {
             dirStubs: volume.dirStubs ?? [],
             signal: { pause: false, cancel: false, reason: null },
           };
+          if (isVirtualVolume(next)) {
+            next.volumeName = VIRTUAL_ALCOHOL_LABEL;
+            next.index = null;
+            next.partialFiles = [];
+            next.dirStubs = [];
+          }
           if (next.index?.state === "running") {
             next.index = {
               ...next.index,
@@ -251,7 +268,7 @@ export function startAgent(options: {
 
   async function indexVolume(volume: TrackedVolume, sizeRebuild = false, manual = false, fresh = manual || sizeRebuild, mode: "catalog" | "usn" | "fsevents" = "catalog") {
     const key = volumeKey(volume);
-    if (running.has(key) || isExcludedVolume(volume) || isIgnoredVolume(volume)) return;
+    if (running.has(key) || isExcludedVolume(volume) || isIgnoredVolume(volume) || isVirtualVolume(volume)) return;
     if (!manual && isManualVolume(volume)) return;
     if (sizeRebuild) rebuiltEmptySizes.add(key);
     if (fresh) {
@@ -425,6 +442,7 @@ export function startAgent(options: {
       // Keep object identity while an asynchronous index job owns this volume.
       const tracked = prior ?? { ...volume, index: options.mockIndex ?? null, indexedAt: 0, usnStart: null, lastEventId: null, freeAtIndex: -1 };
       Object.assign(tracked, volume);
+      labelVirtual(tracked);
       next.push(tracked);
       previous.delete(key);
     }
@@ -446,7 +464,7 @@ export function startAgent(options: {
       const rebuildSizes = snapshotHasNoSizes(volume.index) && !rebuiltEmptySizes.has(key);
       const reason = volume.index?.pauseReason;
       const held = reason === "user" || reason === "restart";
-      if (isExcludedVolume(volume) || isIgnoredVolume(volume) || held || signaled(volume.signal, "pause")) continue;
+      if (isExcludedVolume(volume) || isIgnoredVolume(volume) || isVirtualVolume(volume) || held || signaled(volume.signal, "pause")) continue;
       if (quiet || volume.busy) {
         if (volume.index?.state === "running" && volume.signal) {
           volume.signal.pause = true;
@@ -539,6 +557,7 @@ export function startAgent(options: {
     const resolved = resolveVolumeFile(volumes, serial, uuid, relative, options.os);
     if ("error" in resolved) return resolved;
     if (isExcludedVolume(resolved.volume)) return { error: "Том исключён в конфиге агента.", status: 403 as const };
+    if (isVirtualVolume(resolved.volume)) return { error: "F — виртуальный диск Alcohol. Файл не открывается.", status: 403 as const };
     return resolved;
   }
 
@@ -610,7 +629,7 @@ export function startAgent(options: {
       return;
     }
     if (request.method === "GET" && url.pathname === "/v1/index/progress") {
-      const jobs = volumes.filter((volume) => !isExcludedVolume(volume) && !isIgnoredVolume(volume)).map((volume) => ({
+      const jobs = volumes.filter((volume) => !isExcludedVolume(volume) && !isIgnoredVolume(volume) && !isVirtualVolume(volume)).map((volume) => ({
         id: volumeKey(volume),
         serial: volume.serial,
         volumeUuid: volume.volumeUuid,
@@ -655,8 +674,8 @@ export function startAgent(options: {
           const action = String(body.action || "");
           const all = action === "pause-all" || action === "resume-all" || action === "cancel-all";
           const targets = all
-            ? volumes.filter((volume) => !isExcludedVolume(volume) && !isIgnoredVolume(volume))
-            : volumes.filter((volume) => volume.serial === String(body.serial || "") && volume.volumeUuid === String(body.uuid || "") && !isExcludedVolume(volume) && !isIgnoredVolume(volume));
+            ? volumes.filter((volume) => !isExcludedVolume(volume) && !isIgnoredVolume(volume) && !isVirtualVolume(volume))
+            : volumes.filter((volume) => volume.serial === String(body.serial || "") && volume.volumeUuid === String(body.uuid || "") && !isExcludedVolume(volume) && !isIgnoredVolume(volume) && !isVirtualVolume(volume));
           if (!all && targets.length === 0) { send(response, 404, { error: "Том исключён или не найден. Индексация не менялась." }); return; }
           for (const volume of targets) {
             if (action === "pause" || action === "pause-all") {
@@ -695,6 +714,7 @@ export function startAgent(options: {
     if (request.method === "POST" && url.pathname === "/v1/rescan") {
       const volume = volumes.find((v) => v.serial === url.searchParams.get("serial") && v.volumeUuid === url.searchParams.get("uuid"));
       if (!volume || isExcludedVolume(volume)) { send(response, 404, { error: "Том исключён в конфиге агента." }); return; }
+      if (isVirtualVolume(volume)) { send(response, 403, { error: "F — виртуальный диск Alcohol. Индексация не запускается." }); return; }
       if (running.has(volumeKey(volume)) || volume.busy) { send(response, 409, { error: "Том занят." }); return; }
       void indexVolume(volume, false, true);
       send(response, 202, { accepted: true });
@@ -703,6 +723,7 @@ export function startAgent(options: {
     if (request.method === "GET" && url.pathname === "/v1/files") {
       const volume = volumes.find((v) => v.serial === url.searchParams.get("serial") && v.volumeUuid === url.searchParams.get("uuid"));
       if (!volume || isExcludedVolume(volume)) { send(response, 404, { error: "Том исключён в конфиге агента." }); return; }
+      if (isVirtualVolume(volume)) { send(response, 403, { error: "F — виртуальный диск Alcohol. Индекс не читается." }); return; }
       const index = volume.index;
       if (!index?.files || index.revision !== url.searchParams.get("revision")) { send(response, 409, { error: "Снимок изменился." }); return; }
       const offset = Math.max(0, Math.floor(Number(url.searchParams.get("offset")) || 0));
@@ -719,6 +740,7 @@ export function startAgent(options: {
         note,
         volumes: volumes.filter((volume) => !isExcludedVolume(volume)).map((volume) => ({
           manualOnly: isManualVolume(volume),
+          virtualAlcohol: isVirtualVolume(volume),
           serial: volume.serial,
           volumeUuid: volume.volumeUuid,
           filesystem: volume.filesystem,

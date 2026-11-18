@@ -1,11 +1,16 @@
 import { sanitizeRelative, type OsKind } from "@/lib/drive/filesystem";
 
-/** Windows volume Z: is never read, scanned, indexed, or used as a destination. */
+/** Windows volumes E: and Z: are never read, scanned, indexed, or used as a destination. */
 export function isProtectedVolume(value: string): boolean {
   const text = value.trim();
   if (!text) return false;
-  if (text.toUpperCase() === "Z:") return true;
-  return /^z:[\\/]/i.test(text);
+  if (text.toUpperCase() === "Z:" || text.toUpperCase() === "E:") return true;
+  return /^[ez]:[\\/]/i.test(text);
+}
+
+export function protectedVolumeMessage(value: string): string {
+  if (/^e:/i.test(value.trim())) return "Диск E: не используется.";
+  return "Диск Z: не используется.";
 }
 
 export function machineLabel(input: {

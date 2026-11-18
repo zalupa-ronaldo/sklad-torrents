@@ -17,6 +17,10 @@ describe("transfer paths", () => {
     expect(isForbiddenMount("\\\\.\\Z:")).toBe(true);
     expect(isForbiddenMount("/mnt/z")).toBe(true);
     expect(isForbiddenMount("/mnt/z/folder")).toBe(true);
+    expect(isForbiddenMount("E:\\")).toBe(true);
+    expect(isForbiddenMount("e:\\secret")).toBe(true);
+    expect(isForbiddenMount("/mnt/e")).toBe(true);
+    expect(isForbiddenMount("F:\\")).toBe(true);
     expect(isForbiddenMount("S:\\")).toBe(false);
     expect(isForbiddenMount("/mnt/zoo")).toBe(false);
     expect(diskTouchesForbiddenZ({ lastMountPath: "Z:\\", mountPaths: ["S:\\"] })).toBe(true);

@@ -1,5 +1,5 @@
 import { diskStrip, isServiceVolume } from "@/addons/drives/inventory";
-import { isIgnoredVolume } from "@/addons/drives/volume-letters";
+import { excludedFromCatalog } from "@/addons/drives/volume-letters";
 import { summarizeIndexed } from "@/addons/drives/disk-summary";
 import { pollAgents } from "@/addons/drives/agent-client";
 import { scheduleIndexIngest } from "@/addons/drives/shelf-ingest";
@@ -93,12 +93,13 @@ export function toView(disks: readonly DiskRecord[]): DiskView[] {
       sizesKnown: sizesKnown && !partial,
       ingest: disk.ingest,
       strip: diskStrip(disk),
+      snapshotOnly: disk.snapshotOnly === true,
     };
   });
 }
 
 export function visibleCatalogDisks(disks: readonly DiskRecord[]): DiskRecord[] {
-  return disks.filter((disk) => !isIgnoredVolume(disk) && !isServiceVolume(disk));
+  return disks.filter((disk) => !excludedFromCatalog(disk) && !isServiceVolume(disk));
 }
 
 function present(disks: DiskRecord[], mode: DriveMode, agentErrors: ShelfResponse["agentErrors"]): ShelfResponse {

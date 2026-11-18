@@ -1,6 +1,6 @@
 import { diskStrip, isServiceVolume } from "@/addons/drives/inventory";
 import type { DiskRecord, IndexCheckpoint, IndexPauseReason, IndexProcessPriority, IndexStrategy } from "@/addons/drives/types";
-import { isIgnoredVolume } from "@/addons/drives/volume-letters";
+import { isIgnoredVolume, isOfflineSnapshot, isVirtualAlcoholVolume } from "@/addons/drives/volume-letters";
 
 export type IndexJobStatus = "queued" | "running" | "paused" | "complete" | "cancelled" | "error";
 
@@ -277,7 +277,7 @@ export function mergeIndexFiles<T>(
 }
 
 export function disksToIndexJobs(disks: readonly DiskRecord[]): IndexJob[] {
-  return disks.filter((disk) => !isIgnoredVolume(disk) && !isServiceVolume(disk)).map((disk) => {
+  return disks.filter((disk) => !isIgnoredVolume(disk) && !isVirtualAlcoholVolume(disk) && !isOfflineSnapshot(disk) && !isServiceVolume(disk)).map((disk) => {
     const status = disk.scan.status === "idle"
       ? "queued"
       : disk.scan.status === "error"

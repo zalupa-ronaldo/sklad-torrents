@@ -252,6 +252,8 @@ export interface DiskView {
   ingest?: IngestProgress;
   /** Compact strip name: capacity, label, free space, filesystem, letter. */
   strip: DiskStrip;
+  /** Offline WizTree/known snapshot. Live E: and Z: are never this. */
+  snapshotOnly?: boolean;
 }
 
 export interface ShelfResponse {

@@ -1,7 +1,7 @@
 import { readAgentConfig, readCatalog } from "@/addons/drives/store";
 import type { DiskRecord } from "@/addons/drives/types";
 import { DriveError } from "@/addons/drives/types";
-import { isIgnoredVolume } from "@/addons/drives/volume-letters";
+import { isIgnoredVolume, isVirtualAlcoholVolume } from "@/addons/drives/volume-letters";
 
 function agentFor(disk: DiskRecord, agents: { id: string; os: "darwin" | "win32"; url: string }[]) {
   const host = disk.connectedHosts[0];
@@ -21,6 +21,7 @@ export async function requestDiskRescan(diskId: string, fetchImpl: typeof fetch 
   }
   if (!disk) throw new DriveError(404, "Диск в каталоге не найден. Сканирование не запускалось.");
   if (isIgnoredVolume(disk)) throw new DriveError(403, "Диск исключён. Сканирование не запускалось.");
+  if (isVirtualAlcoholVolume(disk)) throw new DriveError(403, "F — виртуальный диск Alcohol. Индексация не запускается.");
   if (disk.connectedHosts.length === 0) throw new DriveError(409, "Диск не подключён. Сканирование не запускалось.");
   const agent = agentFor(disk, config.agents);
   if (!agent) throw new DriveError(503, "Нет адреса drive-agent для этого диска. Сканирование не запускалось.");

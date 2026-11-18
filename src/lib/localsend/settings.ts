@@ -6,7 +6,7 @@ import { appDataDir } from "@/lib/app-data";
 import { AppError } from "@/lib/app-error";
 import { getDisk } from "@/lib/drive/catalog";
 import { joinCatalogPath, resolveFilesystem, sanitizeRelative, type OsKind } from "@/lib/drive/filesystem";
-import { isProtectedVolume } from "@/lib/localsend/paths";
+import { isProtectedVolume, protectedVolumeMessage } from "@/lib/localsend/paths";
 import type { ReceiveDestination } from "@/lib/localsend/server";
 
 export interface LocalSendSettings {
@@ -113,7 +113,7 @@ async function lookupDisk(id: string): Promise<{ id: string; os: OsKind; filesys
 
 function assertNotProtected(target: string): void {
   if (isProtectedVolume(target)) {
-    throw new AppError(400, "Диск Z: не используется. Выберите другой каталог приёма.");
+    throw new AppError(400, `${protectedVolumeMessage(target)} Выберите другой каталог приёма.`);
   }
 }
 
@@ -134,7 +134,7 @@ function normalizeSettings(input: Partial<LocalSendSettings>): LocalSendSettings
     if (!diskId) throw new AppError(400, "Выберите диск из каталога.");
     const folder = String(destination.folder || "").trim();
     if (folder) sanitizeRelative(folder);
-    if (isProtectedVolume(folder)) throw new AppError(400, "Диск Z: не используется. Выберите другой каталог приёма.");
+    if (isProtectedVolume(folder)) throw new AppError(400, `${protectedVolumeMessage(folder)} Выберите другой каталог приёма.`);
     return { alias, receivePin, destination: { mode: "disk", diskId, folder } };
   }
   const os = destination.os;
@@ -149,7 +149,7 @@ function normalizeSettings(input: Partial<LocalSendSettings>): LocalSendSettings
     throw new AppError(400, "На macOS и Linux путь начинается с /.");
   }
   if (isProtectedVolume(destinationPath)) {
-    throw new AppError(400, "Диск Z: не используется. Выберите другой каталог приёма.");
+    throw new AppError(400, `${protectedVolumeMessage(destinationPath)} Выберите другой каталог приёма.`);
   }
   return { alias, receivePin, destination: { mode: "path", os, path: destinationPath } };
 }

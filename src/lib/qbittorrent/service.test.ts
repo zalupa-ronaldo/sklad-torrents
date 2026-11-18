@@ -59,7 +59,7 @@ describe("torrent service", () => {
       "D:\\Games\\Control Ultimate Edition\\data\\pack0.pack",
     );
     const archive = await getTorrentDetail(DEMO_PC_ID, DEMO_HASH.archive);
-    expect(archive.files[1].absolutePath).toBe("E:\\Archive\\Семейный архив 2019\\видео\\день рождения.mp4");
+    expect(archive.files[1].absolutePath).toBe("H:\\Archive\\Семейный архив 2019\\видео\\день рождения.mp4");
   });
 
   it("names a missing hosts file when the catalog has no qBittorrent hosts", async () => {
@@ -233,11 +233,12 @@ describe("torrent service", () => {
     await expect(markForMove(DEMO_PC_ID, DEMO_HASH.blender, "Z:\\Games")).rejects.toThrow(/Диск Z:/);
     expect((await getDashboard()).torrents.map((torrent) => [torrent.hash, torrent.savePath, torrent.state, torrent.rawState])).toEqual(before);
 
-    await expect(startTorrentTransfer(DEMO_PC_ID, DEMO_HASH.control, "E:\\Moved")).rejects.toThrow(
+    await expect(startTorrentTransfer(DEMO_PC_ID, DEMO_HASH.control, "E:\\Moved")).rejects.toThrow(/Диск E:/);
+    await expect(startTorrentTransfer(DEMO_PC_ID, DEMO_HASH.control, "H:\\Moved")).rejects.toThrow(
       "Раздача ещё качается. Перенос начнётся после полной загрузки.",
     );
     const finished = await getTorrentDetail(DEMO_PC_ID, DEMO_HASH.blender);
-    const job = await startTorrentTransfer(DEMO_PC_ID, DEMO_HASH.blender, "E:\\Moved");
+    const job = await startTorrentTransfer(DEMO_PC_ID, DEMO_HASH.blender, "H:\\Moved");
     await stepTorrentTransfers(dir, Date.now());
     const still = await getTorrentDetail(DEMO_PC_ID, DEMO_HASH.blender);
     expect(still.torrent.state).toBe(finished.torrent.state);
