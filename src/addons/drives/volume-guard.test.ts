@@ -28,11 +28,11 @@ describe("volume guard", () => {
       exclude: ["Z"],
       known: [{ letter: "Z", serial: "WRA04CK7", volumeUuid: Z_UUID }],
     });
-    expect([...guard.excludeLetters]).toEqual(["Z"]);
+    expect([...guard.excludeLetters].sort()).toEqual(["E", "Z"]);
     expect([...guard.manualOnly]).toEqual(["D"]);
     expect(guard.excludeSerials.has("WRA04CK7")).toBe(true);
     expect([...guard.excludeUuids]).toEqual([normalizeUuid(Z_UUID)]);
-    expect(lettersToProbe(["C", "D", "E", "F", "S", "Z", "z:"], [...guard.excludeLetters])).toEqual(["C", "D", "E", "F", "S"]);
+    expect(lettersToProbe(["C", "D", "E", "F", "S", "Z", "z:"], [...guard.excludeLetters])).toEqual(["C", "D", "F", "S"]);
     expect(matchesExcluded(guard, { letter: "Z", serial: "other", volumeUuid: "11111111-1111-4111-8111-111111111111" })).toBe(true);
     expect(matchesExcluded(guard, { letter: "C", serial: "WRA04CK7", volumeUuid: "11111111-1111-4111-8111-111111111111" })).toBe(true);
     expect(matchesExcluded(guard, { letter: "C", serial: "C-SERIAL", volumeUuid: Z_UUID })).toBe(true);
@@ -42,11 +42,16 @@ describe("volume guard", () => {
   it("keeps manualOnly separate from exclude and never opens Z", () => {
     const guard = parseVolumeGuard({ letters: ["D"], exclude: [] });
     expect([...guard.manualOnly]).toEqual(["D"]);
+    expect(guard.excludeLetters.has("E")).toBe(true);
     expect(guard.excludeLetters.has("Z")).toBe(true);
-    expect(lettersToProbe(["C", "D", "Z"], [])).toEqual(["C", "D"]);
-    const forced = parseVolumeGuard({ letters: ["Z"], exclude: [] });
+    expect(lettersToProbe(["C", "D", "E", "F", "Z"], [])).toEqual(["C", "D", "F"]);
+    const forced = parseVolumeGuard({ letters: ["Z", "E", "F"], exclude: [] });
     expect(forced.manualOnly.has("Z")).toBe(false);
+    expect(forced.manualOnly.has("E")).toBe(false);
+    expect(forced.manualOnly.has("F")).toBe(true);
+    expect(forced.excludeLetters.has("E")).toBe(true);
     expect(forced.excludeLetters.has("Z")).toBe(true);
+    expect(forced.excludeLetters.has("F")).toBe(false);
   });
 
   it("puts the letter gate before every volume, partition, and CIM query", () => {
@@ -70,7 +75,9 @@ describe("volume guard", () => {
     expect(script).not.toMatch(/Win32_DiskDrive(?! -Filter)/);
     expect(script).not.toMatch(/LogicalDisk(?! -Filter)/);
     expect(script).not.toMatch(/Z:/);
+    expect(script).toContain("Add('E')");
     expect(script).toContain("Add('Z')");
+    expect(script.indexOf("Add('E')")).toBeLessThan(script.indexOf("Get-Volume"));
     expect(script).toContain("SKLAD_EXCLUDE_LETTERS");
     expect(script).toContain("'HKLM:\\SYSTEM\\MountedDevices'");
     expect(script).toContain("'\\\\DosDevices\\\\([A-Z]):$'");
@@ -95,7 +102,9 @@ describe("volume guard", () => {
     const collect = readFileSync(path.join(process.cwd(), "agents/pc-agent/collect.mts"), "utf8");
     expect(usn.indexOf("SKLAD_EXCLUDE_LETTERS")).toBeGreaterThan(0);
     expect(usn.indexOf("SKLAD_EXCLUDE_LETTERS")).toBeLessThan(usn.indexOf("CreateFileW("));
-    expect(usn).not.toMatch(/\\\\\.\\Z:/);
+    expect(usn).not.toMatch(/\\\\\.\\[EZF]:/);
+    expect(usn.indexOf("$letter -eq 'E'")).toBeLessThan(usn.indexOf("CreateFileW("));
+    expect(usn.indexOf("$letter -eq 'F'")).toBeLessThan(usn.indexOf("CreateFileW("));
     expect(ntfs.indexOf("assertLetterAllowed")).toBeLessThan(ntfs.indexOf("spawn("));
     expect(indexers.indexOf("assertLetterAllowed")).toBeLessThan(indexers.indexOf("open("));
     expect(indexers.indexOf("assertLetterAllowed")).toBeLessThan(indexers.indexOf("fsutil"));
@@ -107,7 +116,10 @@ describe("volume guard", () => {
   it("does not open an excluded letter from the NTFS readers", async () => {
     process.env.SKLAD_EXCLUDE_LETTERS = "Z";
     await expect(readNtfsLetter("Z")).rejects.toThrow(/Том исключён до открытия устройства/);
+    await expect(readNtfsLetter("E")).rejects.toThrow(/Том исключён до открытия устройства/);
+    await expect(readNtfsLetter("F")).rejects.toThrow(/виртуальный диск Alcohol/);
     await expect(readUsn("Z", null)).rejects.toThrow(/Том исключён до открытия устройства/);
+    await expect(readUsn("E", null)).rejects.toThrow(/Том исключён до открытия устройства/);
     let allowed = "";
     try {
       await readNtfsLetter("C");
@@ -118,7 +130,7 @@ describe("volume guard", () => {
     expect(allowed.length).toBeGreaterThan(0);
   });
 
-  it("drops a leaked Z record and still parses C/D/E/F/S", () => {
+  it("drops leaked E and Z records, labels F as Alcohol, and still parses C/D/F/S", () => {
     const report = {
       admin: true,
       disks: [
@@ -145,7 +157,8 @@ describe("volume guard", () => {
       excludeUuids: [Z_UUID],
       excludeSerials: ["WRA04CK7"],
     });
-    expect(parsed.volumes.map((volume) => volume.letter)).toEqual(["C", "D", "E", "F", "S"]);
+    expect(parsed.volumes.map((volume) => volume.letter)).toEqual(["C", "D", "F", "S"]);
+    expect(parsed.volumes.find((volume) => volume.letter === "F")?.volumeName).toBe("виртуальный диск Alcohol");
     expect(JSON.stringify(parsed.volumes)).not.toContain("WRA04CK7");
     expect(JSON.stringify(parsed.volumes)).not.toContain(Z_UUID);
   });

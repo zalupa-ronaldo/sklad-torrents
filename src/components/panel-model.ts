@@ -91,18 +91,25 @@ export function isZPath(value: string): boolean {
   return /^z:/i.test(text) || /^\/mnt\/z(\/|$)/i.test(text);
 }
 
-export function isHiddenPanelVolume(disk: { lastMountPath?: string; mountPaths?: readonly string[]; label?: string; name?: string }): boolean {
-  const mounts = [...(disk.mountPaths ?? []), disk.lastMountPath ?? "", disk.label ?? "", disk.name ?? ""];
-  return mounts.some((mount) => isZPath(mount));
+export function isEPath(value: string): boolean {
+  const text = value.trim().replace(/\\/g, "/");
+  return /^e:/i.test(text) || /^\/mnt\/e(\/|$)/i.test(text);
 }
 
-export function driveLetter(disk: { lastMountPath: string; mountPaths?: readonly string[] }): string | null {
+/** Live E: and Z: stay off the strip. An offline snapshot of those letters may stay. */
+export function isHiddenPanelVolume(disk: { lastMountPath?: string; mountPaths?: readonly string[]; label?: string; name?: string; snapshotOnly?: boolean }): boolean {
+  if (disk.snapshotOnly) return false;
+  const mounts = [...(disk.mountPaths ?? []), disk.lastMountPath ?? "", disk.label ?? "", disk.name ?? ""];
+  return mounts.some((mount) => isZPath(mount) || isEPath(mount));
+}
+
+export function driveLetter(disk: { lastMountPath: string; mountPaths?: readonly string[]; snapshotOnly?: boolean }): string | null {
   const mounts = [...(disk.mountPaths ?? []), disk.lastMountPath];
   for (const mount of mounts) {
     const match = mount.match(/^([A-Za-z]):/);
     if (!match) continue;
     const letter = `${match[1].toUpperCase()}:`;
-    if (letter === "Z:") continue;
+    if (!disk.snapshotOnly && (letter === "Z:" || letter === "E:")) continue;
     return letter;
   }
   return null;

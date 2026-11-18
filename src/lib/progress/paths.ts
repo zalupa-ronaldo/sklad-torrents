@@ -1,9 +1,16 @@
-/** Volume Z: is never read, scanned, indexed, or logged. */
+/** Volumes E: and Z: are never read, scanned, indexed, or logged. F: is not a copy path. */
 export function isIgnoredVolume(value: string): boolean {
   const text = value.trim();
-  if (/^(?:\\\\\?\\)?[zZ]:[\\/]/.test(text)) return true;
-  if (/^\/mnt\/[zZ](?:\/|$)/.test(text)) return true;
+  if (/^(?:\\\\\?\\)?[eEfFzZ]:[\\/]/.test(text)) return true;
+  if (/^\/mnt\/[eEfFzZ](?:\/|$)/.test(text)) return true;
   return false;
+}
+
+export function ignoredVolumeDetail(value: string): string {
+  const text = value.trim();
+  if (/^(?:\\\\\?\\)?[eE]:[\\/]/.test(text) || /^\/mnt\/[eE](?:\/|$)/.test(text)) return "Диск E: не используется.";
+  if (/^(?:\\\\\?\\)?[fF]:[\\/]/.test(text) || /^\/mnt\/[fF](?:\/|$)/.test(text)) return "F — виртуальный диск Alcohol.";
+  return "Диск Z: не используется.";
 }
 
 /**
@@ -13,9 +20,9 @@ export function isIgnoredVolume(value: string): boolean {
 export function machineOfPath(value: string): "mac-local" | "pc-agent" | null {
   const text = value.trim();
   if (!text || isIgnoredVolume(text)) return null;
-  if (/^[a-yA-Y]:[\\/]/.test(text)) return "pc-agent";
+  if (/^[a-dA-Dg-yG-Y]:[\\/]/.test(text)) return "pc-agent";
   if (/^\\\\[^\\]/.test(text)) return "pc-agent";
-  if (/^\/mnt\/[a-yA-Y](?:\/|$)/.test(text)) return "pc-agent";
+  if (/^\/mnt\/[a-dA-Dg-yG-Y](?:\/|$)/.test(text)) return "pc-agent";
   if (text.startsWith("/Volumes/") || text.startsWith("/Users/")) return "mac-local";
   return null;
 }

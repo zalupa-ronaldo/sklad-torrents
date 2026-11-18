@@ -104,7 +104,7 @@ export function mockSteps(): MockStep[] {
     },
     {
       at: "2026-08-19T15:00:00.000Z",
-      observations: [windows([volume(MOCK_ARCHIVE, ["E:\\"], { index: done(archiveFiles()) })])],
+      observations: [windows([volume(MOCK_ARCHIVE, ["H:\\"], { index: done(archiveFiles()) })])],
     },
     { at: "2026-08-20T09:00:00.000Z", observations: [windows([])] },
     {

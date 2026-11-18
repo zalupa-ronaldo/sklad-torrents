@@ -25,7 +25,17 @@ export interface VolumeRef {
   volumeUuid?: string | null
 }
 
-const FORBIDDEN = new Set(["E", "Z"])
+/**
+ * Live Windows letters. E: is an unhealthy disk (WizTree crashes on it) and Z: is closed.
+ * Both are removed before Get-Volume, Get-Partition, CIM, or any file open.
+ * F: is a virtual Alcohol optical drive: it may be listed, it is not indexed.
+ * An offline WizTree snapshot may still name E or Z; that file is not a live open.
+ */
+export const FORBIDDEN_WINDOWS_LETTERS = ["E", "Z"] as const
+export const VIRTUAL_WINDOWS_LETTER = "F"
+export const VIRTUAL_ALCOHOL_LABEL = "виртуальный диск Alcohol"
+
+const FORBIDDEN = new Set<string>(FORBIDDEN_WINDOWS_LETTERS)
 
 export function normalizeUuid(value: string | null | undefined): string {
   return String(value ?? "").trim().toLowerCase()
@@ -36,7 +46,7 @@ export function storageRole(volume: VolumeRef): StorageRole {
   if (uuid === MAC_DATA_UUID || uuid === MAC_VAULT_UUID) return "scratch"
   const letter = String(volume.letter ?? "").trim().replace(":", "").toUpperCase()
   if (volume.os === "win32" && FORBIDDEN.has(letter)) return "forbidden"
-  if (volume.os === "win32" && letter === "F") return "virtual"
+  if (volume.os === "win32" && letter === VIRTUAL_WINDOWS_LETTER) return "virtual"
   if (volume.os === "win32" && letter === "C") return "game-pool"
   if (volume.os === "win32" && letter) return "cold-archive"
   return "unconfigured"

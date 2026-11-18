@@ -140,7 +140,7 @@ describe("file job queue", () => {
       kind: "move",
       host: "pc-agent",
       source: "D:\\Downloads\\a.bin",
-      destination: "E:\\Archive\\a.bin",
+      destination: "H:\\Archive\\a.bin",
     });
     let current = failing.job;
     for (let attempt = 0; attempt < 3; attempt += 1) {

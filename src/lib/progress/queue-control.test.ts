@@ -187,7 +187,7 @@ describe("shared task queue", () => {
       kind: "copy",
       host: "pc-agent",
       source: "D:\\Movies\\third.mkv",
-      destination: "E:\\Movies\\third.mkv",
+      destination: "H:\\Movies\\third.mkv",
     });
     const current = await readControl();
     current.load.yieldWhileActive = true;
@@ -371,7 +371,7 @@ describe("shared task queue", () => {
       kind: "copy",
       host: "pc-agent",
       source: "D:\\Movies\\free.mkv",
-      destination: "E:\\Movies\\free.mkv",
+      destination: "H:\\Movies\\free.mkv",
     });
     expect(await store.claimNext("mac-local")).toBeNull();
     expect((await store.claimNext("pc-agent"))?.host).toBe("pc-agent");

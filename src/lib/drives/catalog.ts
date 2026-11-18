@@ -9,6 +9,8 @@ import { dataDir } from "@/lib/qbittorrent/store";
 /**
  * Demo disks so the scheduler and progress pages work before Drive Manager
  * lands. Same serial+UUID on two hosts shares one download slot.
+ * The live Windows probe is separate: E: and Z: are never opened, and F: is the
+ * virtual Alcohol drive. This fixture does not probe those letters.
  */
 export function demoDriveCatalog(): CatalogDisk[] {
   return [
@@ -45,7 +47,7 @@ export function demoDriveCatalog(): CatalogDisk[] {
       label: "Архив",
       filesystem: "ntfs",
       online: false,
-      mounts: [{ hostId: DEMO_PC_ID, os: "win32", path: "E:\\" }],
+      mounts: [{ hostId: DEMO_PC_ID, os: "win32", path: "H:\\" }],
     },
     {
       id: DISK_ID.media,
@@ -54,7 +56,7 @@ export function demoDriveCatalog(): CatalogDisk[] {
       label: "Медиадиск",
       filesystem: "ntfs",
       online: true,
-      mounts: [{ hostId: DEMO_PC_ID, os: "win32", path: "E:\\" }],
+      mounts: [{ hostId: DEMO_PC_ID, os: "win32", path: "H:\\" }],
     },
   ];
 }

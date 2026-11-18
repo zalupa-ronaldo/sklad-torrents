@@ -4,7 +4,8 @@
 $ErrorActionPreference = "Stop"
 $letter = [string]$env:SKLAD_VOLUME
 if ($letter -notmatch '^[A-Z]$') { throw "SKLAD_VOLUME must be a drive letter." }
-if ($letter -eq 'Z') { throw "Том исключён до открытия устройства." }
+if ($letter -eq 'E' -or $letter -eq 'Z') { throw "Том исключён до открытия устройства." }
+if ($letter -eq 'F') { throw "F — виртуальный диск Alcohol. Том не открывается." }
 foreach ($item in ([string]$env:SKLAD_EXCLUDE_LETTERS).ToUpper().Split(',')) {
   $token = $item.Trim().TrimEnd(':')
   if ($token -eq $letter) { throw "Том исключён до открытия устройства." }

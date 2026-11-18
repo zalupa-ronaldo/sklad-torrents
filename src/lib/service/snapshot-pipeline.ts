@@ -37,6 +37,7 @@ export function parseSnapshotFixture(payload: unknown): SnapshotFixture {
     throw new Error("В снимке нужны serial, volumeUuid, label и непустой список files.");
   }
   const letter = String(raw.letter ?? "").replace(":", "").toUpperCase();
+  // Not a WizTree MFT export. That path is mft-import: it rejects E and F, and keeps Z as snapshotOnly.
   if (letter === "E" || letter === "Z") throw new Error("Тома E и Z в офлайн-снимок не принимаются.");
   return {
     format: "sklad-snapshot-v1",

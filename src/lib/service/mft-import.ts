@@ -110,6 +110,10 @@ export async function importMftExport(input: {
     await closeHandle();
     throw error;
   }
+  // Offline file, not a live open. E stays rejected: the disk is unhealthy and a new
+  // export is not accepted. Z is stored as snapshotOnly and is never scanned or compressed.
+  // F is the virtual Alcohol drive and is not an index. Known serial/uuid rows may still
+  // name E and Z; sklad-snapshot-v1 also rejects E and Z.
   if (footer.letter === "E" || footer.letter === "F") {
     await closeHandle();
     throw new Error("Тома E и F в импорт не принимаются.");

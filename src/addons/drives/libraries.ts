@@ -9,8 +9,8 @@ export const DEFAULT_LIBRARIES: LibraryRule[] = [
   { prefix: "/Volumes/vault/Music", category: "media" },
   { prefix: "D:\\Downloads", category: "torrent" },
   { prefix: "D:\\Games", category: "game" },
-  { prefix: "E:\\Archive", category: "media" },
-  { prefix: "E:\\Archive", category: "torrent" },
+  { prefix: "H:\\Archive", category: "media" },
+  { prefix: "H:\\Archive", category: "torrent" },
 ];
 
 export function inferCategory(prefix: string, label: string): MediaCategory | null {

@@ -1,5 +1,5 @@
 import { isChannelDetail } from "@/lib/progress/channel";
-import { isIgnoredVolume } from "@/lib/progress/paths";
+import { ignoredVolumeDetail, isIgnoredVolume } from "@/lib/progress/paths";
 import { registerJobSource } from "@/lib/progress/sources";
 import type { JobKind, JobSnapshot, JobStatus } from "@/lib/progress/types";
 import { QbittorrentError } from "@/lib/qbittorrent/errors";
@@ -201,7 +201,7 @@ function toolSnapshot(job: {
 }
 
 function jobError(status: JobStatus, lastError: string | null, source: string, destination: string): string | null {
-  if (isIgnoredVolume(source) || isIgnoredVolume(destination)) return "Диск Z: не используется.";
+  if (isIgnoredVolume(source) || isIgnoredVolume(destination)) return ignoredVolumeDetail(isIgnoredVolume(source) ? source : destination);
   if (status === "error") return lastError;
   if (isChannelDetail(lastError)) return lastError;
   return null;

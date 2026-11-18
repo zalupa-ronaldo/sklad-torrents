@@ -7,7 +7,7 @@ import type { HandbrakeSettings, PolicyHost, PolicyRules } from "@/lib/policies/
 import { joinRemotePath, normalizeRemotePath } from "@/lib/qbittorrent/paths";
 import type { HostOs } from "@/lib/qbittorrent/types";
 
-import { isSkippedVolume } from "@/lib/scheduler/skipped-volume";
+import { isSkippedVolume, skippedVolumeNote } from "@/lib/scheduler/skipped-volume";
 
 export const PIPELINE_STAGES = ["index", "classify", "layout", "transfer", "compress", "verify"] as const;
 export type PipelineStage = (typeof PIPELINE_STAGES)[number];
@@ -50,7 +50,7 @@ export function planPlacement(input: PlacementInput): PlacementPlan {
   if (isSkippedVolume(input.sourcePath)) {
     return blank(emptyHandbrake, {
       skippedVolume: true,
-      note: "Диск Z: пропущен.",
+      note: skippedVolumeNote(input.sourcePath),
       transfer: "skip",
     });
   }

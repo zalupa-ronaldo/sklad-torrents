@@ -1,5 +1,6 @@
 import type { HostOs, IndexCheckpoint, IndexStrategy } from "@/addons/drives/types";
 import { isNtfs, selectIndexStrategy } from "@/addons/drives/strategy";
+import { isIgnoredLetter, isVirtualAlcoholLetter, letterKey } from "@/addons/drives/volume-letters";
 import { WINDOWS_VOLUME_EVENT_SCRIPT, WINDOWS_VOLUME_SCRIPT } from "@/addons/drives/win-script";
 
 export const READ_ONLY_OPS = [
@@ -94,6 +95,9 @@ export function assertSpawnAllowed(request: SpawnRequest): void {
   if (bin === "fsutil") {
     const letter = args[2] ?? "";
     const letterOk = /^[A-Za-z]:$/.test(letter);
+    if (letterOk && (isIgnoredLetter(letterKey(letter)) || isVirtualAlcoholLetter(letterKey(letter)))) {
+      throw new Error("Том исключён до открытия устройства.");
+    }
     const query = args.length === 3 && args[0] === "usn" && args[1] === "queryJournal" && letterOk;
     const read =
       (args.length === 3 || args.length === 4) &&

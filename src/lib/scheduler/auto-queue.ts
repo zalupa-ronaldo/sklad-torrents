@@ -9,7 +9,7 @@ import type { JobSnapshot } from "@/lib/progress/types";
 import type { HostOs } from "@/lib/qbittorrent/types";
 
 import { INCOMING_FOLDER, folderKind, planPlacement, type PipelineStage } from "@/lib/scheduler/auto-plan";
-import { isSkippedVolume, mightBeLocal } from "@/lib/scheduler/skipped-volume";
+import { isSkippedVolume, mightBeLocal, skippedVolumeNote } from "@/lib/scheduler/skipped-volume";
 
 const VIDEO = new Set(["mkv", "mp4", "avi", "m4v", "webm", "mov", "ts", "m2ts"]);
 
@@ -260,7 +260,7 @@ export function enqueuePipelineRun(seed: PipelineSeed): PipelineRun | null {
     id: randomUUID(),
     trigger: seed.trigger,
     key: seed.key,
-    title: skipped ? "Диск Z:" : seed.title.slice(0, 180),
+    title: skipped ? skippedVolumeNote(seed.sourcePath).replace(" пропущен.", "") : seed.title.slice(0, 180),
     hostId: seed.hostId,
     hash: seed.hash,
     diskId: seed.diskId,
@@ -275,7 +275,7 @@ export function enqueuePipelineRun(seed: PipelineSeed): PipelineRun | null {
     copyRoot: "",
     postAction: "none",
     transfer: "skip",
-    note: skipped ? "Диск Z: пропущен." : "В очереди",
+    note: skipped ? skippedVolumeNote(seed.sourcePath) : "В очереди",
     error: null,
     currentFile: null,
     progress: skipped ? 1 : 0,
@@ -362,7 +362,7 @@ async function step(run: PipelineRun): Promise<void> {
   if (isSkippedVolume(run.sourcePath)) {
     run.status = "skipped";
     run.stage = "done";
-    run.note = "Диск Z: пропущен.";
+    run.note = skippedVolumeNote(run.sourcePath);
     run.sourcePath = "";
     return;
   }
@@ -672,7 +672,7 @@ function defer(run: PipelineRun, note: string): void {
 function skipVolume(run: PipelineRun): void {
   run.status = "skipped";
   run.stage = "done";
-  run.note = "Диск Z: пропущен.";
+  run.note = skippedVolumeNote(run.sourcePath || run.note);
   run.sourcePath = "";
   run.name = "";
   run.copyFiles = [];
@@ -681,7 +681,7 @@ function skipVolume(run: PipelineRun): void {
 function fail(run: PipelineRun, error: unknown): void {
   run.status = "error";
   run.error = error instanceof Error ? error.message : "Сбой авторежима";
-  if (isSkippedVolume(run.error)) run.error = "Диск Z: пропущен.";
+  if (isSkippedVolume(run.error)) run.error = skippedVolumeNote(run.error);
   run.note = "Оригинал не удалён.";
   run.deletesSource = false;
 }

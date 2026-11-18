@@ -12,6 +12,7 @@ import {
   displayInside,
   insideFolder,
   isProtectedVolume,
+  protectedVolumeMessage,
   machineLabel,
   protocolFileName,
   relativeFromRoot,
@@ -45,7 +46,10 @@ export interface DrivePick {
   kind?: string;
 }
 
-const PROTECTED = "Диск Z: не используется. Файл не читался и не отправлялся.";
+function refuseProtected(paths: readonly (string | null | undefined)[]): void {
+  const hit = paths.find((item) => item && isProtectedVolume(item));
+  if (hit) throw new AppError(400, `${protectedVolumeMessage(hit)} Файл не читался и не отправлялся.`);
+}
 
 export async function collectSendFiles(entryIds: string[], picks: DrivePick[]): Promise<SendFilePayload[]> {
   const fromCatalog = await catalogFiles(entryIds);
@@ -60,17 +64,13 @@ async function catalogFiles(ids: string[]): Promise<SendFilePayload[]> {
   if (ids.length === 0) return [];
   const picked = await entriesByIds(ids);
   for (const entry of picked) {
-    if (isProtectedVolume(entry.path) || (entry.localPath != null && isProtectedVolume(entry.localPath))) {
-      throw new AppError(400, PROTECTED);
-    }
+    refuseProtected([entry.path, entry.localPath]);
   }
   const expanded = await expandSelection(ids);
   const files: SendFilePayload[] = [];
   for (const entry of expanded) {
     if (entry.kind !== "file") continue;
-    if (isProtectedVolume(entry.path) || (entry.localPath != null && isProtectedVolume(entry.localPath))) {
-      throw new AppError(400, PROTECTED);
-    }
+    refuseProtected([entry.path, entry.localPath]);
     const folder = picked.find((item) => item.kind === "folder" && isPathUnder(item.os, item.path, entry.path));
     const fileName = folder
       ? protocolFileName(folder.name, relativeFromRoot(folder.path, entry.path, folder.os), entry.name)
@@ -110,9 +110,7 @@ async function shelfFiles(picks: DrivePick[]): Promise<SendFilePayload[]> {
     const disk = disks.find((item) => item.id === pick.diskId);
     if (!disk) throw new AppError(404, "Диск из полки не найден.");
     const mounts = [disk.lastMountPath, ...disk.connectedHosts.flatMap((host) => host.mountPaths)].filter(Boolean);
-    if (mounts.some((mount) => isProtectedVolume(mount)) || isProtectedVolume(pick.path)) {
-      throw new AppError(400, PROTECTED);
-    }
+    refuseProtected([...mounts, pick.path]);
     const mount = mounts[0] || "";
     const chosen = filesInside(disk, pick, mount);
     if (chosen.length === 0) {
@@ -128,7 +126,7 @@ async function shelfFiles(picks: DrivePick[]): Promise<SendFilePayload[]> {
     for (const file of chosen) {
       const relative = file.relativePath.replace(/\\/g, "/");
       const full = joinDisplay(disk.pathStyle, mount, file.relativePath);
-      if (isProtectedVolume(full) || isProtectedVolume(relative)) throw new AppError(400, PROTECTED);
+      refuseProtected([full, relative]);
       const fileName =
         pick.kind === "dir"
           ? protocolFileName(pick.name, insideFolder(stripMount(mount, pick.path), relative), file.name)

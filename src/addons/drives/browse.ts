@@ -6,7 +6,7 @@ import { diskStrip, displayDiskName, isBrowsableRecord, isServiceVolume } from "
 import { mountPathsOf, online } from "@/addons/drives/reconcile";
 import type { DiskRecord, DiskStrip, MediaCategory, PathStyle } from "@/addons/drives/types";
 import { DriveError } from "@/addons/drives/types";
-import { isIgnoredVolume } from "@/addons/drives/volume-letters";
+import { excludedFromCatalog } from "@/addons/drives/volume-letters";
 
 export interface BrowseEntry {
   diskId: string;
@@ -394,7 +394,7 @@ export function browseDisk(
   cursor = 0,
 ): BrowseResponse {
   const disk = disks.find((item) => item.id === diskId);
-  if (!disk || isIgnoredVolume(disk) || isServiceVolume(disk)) throw new DriveError(404, "Диск в каталоге не найден.");
+  if (!disk || excludedFromCatalog(disk) || isServiceVolume(disk)) throw new DriveError(404, "Диск в каталоге не найден.");
   const mount = mountOf(disk);
   const parent = slash(relativePath);
   const tree = buildDiskTree(disk);

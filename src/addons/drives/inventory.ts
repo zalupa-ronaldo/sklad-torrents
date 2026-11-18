@@ -1,7 +1,7 @@
 import { normalizeUuid } from "@/addons/drives/identity";
 import { mountPathsOf } from "@/addons/drives/reconcile";
 import type { DiskRecord, DiskStrip, DiskView } from "@/addons/drives/types";
-import { isIgnoredVolume } from "@/addons/drives/volume-letters";
+import { excludedFromCatalog } from "@/addons/drives/volume-letters";
 import { formatBytes } from "@/lib/format";
 
 const JUNK_NAME = /^(efi|recovery|preboot|update|vm|xart|hardware|iscpreboot)$/i;
@@ -71,7 +71,7 @@ export function isServiceVolume(disk: { label?: string | null; volumeName?: stri
 
 function isJunkVolume(disk: DiskFace): boolean {
   if (isServiceVolume(disk)) return true;
-  if (isIgnoredVolume(disk)) return true;
+  if (excludedFromCatalog(disk)) return true;
   return false;
 }
 

@@ -55,7 +55,7 @@ describe("stale registry letters", () => {
     };
     const parsed = parseWindowsVolumes(report, { excludeLetters: ["Z"] });
     expect(parsed.elevated).toBe(true);
-    expect(parsed.volumes.map((volume) => volume.letter)).toEqual(["C", "D", "E", "S"]);
+    expect(parsed.volumes.map((volume) => volume.letter)).toEqual(["C", "D", "S"]);
     const note = windowsSkipNote(report, parsed.volumes);
     expect(note).toContain("G");
     expect(note).not.toContain("Z");
@@ -105,7 +105,7 @@ function Get-ItemProperty {
 function Get-Volume {
   [CmdletBinding()] param([string]$DriveLetter)
   Add-Content -Path $env:SKLAD_PROBE_LOG -Value ("Get-Volume:" + $DriveLetter)
-  if ($DriveLetter -eq 'Z') { throw 'Z was queried' }
+  if ($DriveLetter -eq 'Z' -or $DriveLetter -eq 'E') { throw "$DriveLetter was queried" }
   if ($DriveLetter -eq 'G') {
     if ($env:SKLAD_PROBE_MODE -eq 'access') {
       $exception = New-Object System.UnauthorizedAccessException 'Access is denied'
@@ -157,25 +157,24 @@ function Get-CimInstance {
     }
   }
 
-  it("queries C/D/E/S, isolates missing G, and does not clear a real administrator token", async () => {
+  it("queries C/D/S, skips stale G, and does not query E or Z", async () => {
     const { report, probes } = await run("absent");
     expect(report.admin).toBe(true);
-    expect(asList(report.queried).sort()).toEqual(["C", "D", "E", "G", "S"]);
-    expect(asList(report.vols).map((volume) => volume.DriveLetter).sort()).toEqual(["C", "D", "E", "S"]);
+    expect(asList(report.queried).sort()).toEqual(["C", "D", "G", "S"]);
+    expect(asList(report.vols).map((volume) => volume.DriveLetter).sort()).toEqual(["C", "D", "S"]);
     expect(asList(report.skipped)).toEqual([
       expect.objectContaining({ letter: "G", kind: "absent" }),
     ]);
     expect(probes.filter((line) => line.startsWith("Get-Volume:")).sort()).toEqual([
       "Get-Volume:C",
       "Get-Volume:D",
-      "Get-Volume:E",
       "Get-Volume:G",
       "Get-Volume:S",
     ]);
     expect(probes.filter((line) => line === "Get-Volume:G" || line === "Get-Partition:G" || line.includes("Name='G:'") || line.includes("Z"))).toEqual(["Get-Volume:G"]);
     const parsed = parseWindowsVolumes(report, { excludeLetters: ["Z"] });
     expect(parsed.elevated).toBe(true);
-    expect(parsed.volumes.map((volume) => volume.letter).sort()).toEqual(["C", "D", "E", "S"]);
+    expect(parsed.volumes.map((volume) => volume.letter).sort()).toEqual(["C", "D", "S"]);
     expect(windowsSkipNote(report, parsed.volumes)).toContain("G");
   }, 30_000);
 
@@ -185,8 +184,8 @@ function Get-CimInstance {
     expect(asList(report.skipped)).toEqual([
       expect.objectContaining({ letter: "G", kind: "access" }),
     ]);
-    expect(asList(report.vols).map((volume) => volume.DriveLetter).sort()).toEqual(["C", "D", "E", "S"]);
-    expect(probes.some((line) => line.includes("Z"))).toBe(false);
+    expect(asList(report.vols).map((volume) => volume.DriveLetter).sort()).toEqual(["C", "D", "S"]);
+    expect(probes.some((line) => line.includes("Z") || line.endsWith(":E"))).toBe(false);
     expect(parseWindowsVolumes(report, { excludeLetters: ["Z"] }).elevated).toBe(true);
   }, 30_000);
 });
