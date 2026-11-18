@@ -88,9 +88,7 @@ export async function enqueueIntegrity(input: EnqueueInput): Promise<IntegrityJo
   }
   readersById.set(job.id, { source: input.source, destination: input.destination ?? null });
   await publishBackground(job, key);
-  setTimeout(() => {
-    void runJob(job.id);
-  }, 0);
+  setTimeout(() => startIntegrity(job.id), 0);
   return job;
 }
 
@@ -267,9 +265,7 @@ export async function markTransferDone(id: string): Promise<IntegrityJob> {
     return current;
   });
   if (!job) throw new Error("Задача хэша не найдена.");
-  setTimeout(() => {
-    void runJob(id);
-  }, 0);
+  setTimeout(() => startIntegrity(id), 0);
   return job;
 }
 
@@ -333,6 +329,13 @@ export function presentIntegrityJob(job: BackgroundJob) {
     speed: typeof job.payload.speed === "number" ? job.payload.speed : 0,
     etaSeconds: typeof job.payload.etaSeconds === "number" ? job.payload.etaSeconds : null,
   };
+}
+
+function startIntegrity(id: string): void {
+  void runJob(id).catch((error: unknown) => {
+    if (error instanceof Error && error.message === "Задача хэша не найдена.") return;
+    throw error;
+  });
 }
 
 async function runJob(id: string): Promise<IntegrityJob> {
