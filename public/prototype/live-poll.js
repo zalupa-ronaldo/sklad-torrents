@@ -1,16 +1,16 @@
 "use strict";
 
-export const FAST_POLL_MS = 5_000;
-export const HEAVY_POLL_MS = 60_000;
 export const SSE_COALESCE_MS = 2_000;
 
 const HEAVY_PAGES = new Set(["devices", "drives", "hosts", "games", "media", "optical", "localsend", "policies", "scheduler", "jobs", "integrity", "torrents", "overview"]);
 
-export function pollPlan({ hidden, now, lastFast, lastHeavy, fastBusy, heavyBusy }) {
+/** Idle time does not schedule a request. `now` is accepted and ignored. */
+export function pollPlan({ hidden, reason, now }) {
+  void now;
   if (hidden) return { fast: false, heavy: false };
-  const heavy = !heavyBusy && (!lastHeavy || now - lastHeavy >= HEAVY_POLL_MS);
-  const fast = !fastBusy && !heavy && (!lastFast || now - lastFast >= FAST_POLL_MS);
-  return { fast, heavy };
+  if (reason === "job") return { fast: true, heavy: false };
+  if (reason === "open" || reason === "show" || reason === "navigate") return { fast: false, heavy: true };
+  return { fast: false, heavy: false };
 }
 
 export function sseDue({ hidden, lastAt, now }) {
@@ -81,8 +81,6 @@ export function confirmSpec(name, page) {
 }
 
 globalThis.LivePoll = {
-  FAST_POLL_MS,
-  HEAVY_POLL_MS,
   SSE_COALESCE_MS,
   pollPlan,
   sseDue,

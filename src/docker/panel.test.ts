@@ -38,6 +38,8 @@ describe("panel container", () => {
 
   it("publishes only the panel on loopback 4317 for linux/arm64", () => {
     expect(serviceNames(compose)).toEqual(["panel"]);
+    expect(compose).toContain("ghcr.io/zalupa-ronaldo/sklad-torrents:${SKLAD_PANEL_TAG:-main}");
+    expect(compose).not.toMatch(/dockerfile:/);
     expect(compose).toContain("platform: linux/arm64");
     expect(compose).toContain("127.0.0.1:4317:4317");
     expect(compose).toContain("restart: unless-stopped");
@@ -64,6 +66,8 @@ describe("panel container", () => {
 
   it("does not copy the drive-agent, secrets, or /Volumes into the image", () => {
     expect(dockerfile).toContain("--platform=linux/arm64");
+    expect(dockerfile).toContain("NODE_OPTIONS=--max-old-space-size=768");
+    expect(dockerfile).toContain("tsconfig.docker.json");
     expect(dockerfile).toContain("EXPOSE 4317");
     expect(dockerfile).not.toMatch(/drive\.mts/);
     expect(dockerfile).not.toMatch(/\/Volumes/);
@@ -80,5 +84,15 @@ describe("panel container", () => {
     ]) {
       expect(ignore).toContain(excluded);
     }
+    const events = readFileSync(path.join(root, "agents/lib/volume-events.mts"), "utf8");
+    expect(events).not.toContain("mac-agent/collect.mts");
+    expect(events).toContain("mac-agent/mount.mts");
+    expect(events).not.toContain("fs.watch");
+    const workflow = readFileSync(path.join(root, ".github/workflows/windows-emulation.yml"), "utf8");
+    expect(workflow).toContain("docker buildx build");
+    expect(workflow).toContain("ghcr.io/zalupa-ronaldo/sklad-torrents");
+    expect(workflow).toContain("secrets.GITHUB_TOKEN");
+    expect(workflow).not.toContain("GHCR_TOKEN");
+    expect(workflow).not.toContain("CR_PAT");
   });
 });

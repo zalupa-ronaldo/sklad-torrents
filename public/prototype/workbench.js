@@ -127,10 +127,18 @@ function sidebar(s) {
     <div class="host-head"><p class="caption">Хосты</p><span class="count">${s.hosts.length}</span></div><nav aria-label="Хосты">${s.hosts.map((h) => button("host", icon(h.id === "mac" ? "Laptop" : "Monitor") + esc(h.name) + `<small class="host-state">${h.online ? "В сети" : "Нет связи"}</small>`, h.id, "")).join("")}</nav></div>
     <div class="side-foot">${icon("Network")}<div>Локальная сеть<small>${s.demo ? "Деморежим" : '<a href="/legacy">Прежняя панель</a>'}</small></div></div>`;
 }
+function gameModeChip(s) {
+  const mode = s.gameMode;
+  if (!mode || mode.active == null) return "";
+  const label = mode.active ? `Игра${mode.game ? `: ${mode.game}` : ""}` : "Фон работает";
+  const next = mode.active ? "off" : "on";
+  return `<span class="online" id="game-mode">${esc(label)}</span>${button("gameMode", mode.active ? "Закончил" : "Играю", next)}`;
+}
 function topbar(s) {
   return `${button("menu", icon("Menu"), "", "icon-button", `id="menu" aria-label="Открыть навигацию" aria-controls="sidebar" aria-expanded="${s.ui.menu}"`)}
   <span class="breadcrumb">Рабочее пространство</span><i class="breadcrumb">${icon("ChevronRight")}</i><strong>${pages[s.ui.page][0]}</strong>
   <span class="online">В сети · ${s.hosts.filter((h) => h.online).length} / ${s.hosts.length}</span>
+  ${gameModeChip(s)}
   ${s.demo ? `<label class="scenario-label">Демо ${select("scenario", s.scenarioOptions || [], s.scenario, "Демосостояние")}</label>` : ""}`;
 }
 function heading(s) {
@@ -523,7 +531,7 @@ function liveGameShelf(s) {
   const platforms = ["Все", "Windows", "macOS", "Switch", "PSP", "PS2", "PS4"];
   const tabs = platforms.map((p) => button("platform", p, p, "secondary-action", `aria-pressed="${s.ui.platform === p}"`)).join("");
   const games = (s.shelfGames || []).filter((game) => s.ui.platform === "Все" || game.platform === s.ui.platform);
-  return `<div class="platforms">${tabs}</div><div class="game-grid">${
+  return `${gameModeChip(s)}<div class="platforms">${tabs}</div><div class="game-grid">${
     games
       .map(
         (game) =>

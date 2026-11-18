@@ -28,6 +28,8 @@
 
 Код этих проектов не копируется и в этом репозитории его нет: CompactGUI (своё `compact.exe` / WOF; `database.json` не кладём в репозиторий и не читаем локальной копией), Av1an, Jellyfin, проекты \*arr, RomM, Unmanic, rmlint, smartmontools, Syncthing (MPL).
 
+Игровой режим использует идею клиента Steam и Playnite: пока игра на переднем плане, фон на паузе. Фрагментов этих проектов в репозитории нет. Steam — проприетарный клиент. Playnite в списке разрешённых выше как MIT, но этот режим написан заново и файл оттуда не копирует. DiskArbitration и FSEvents вызываются своим кодом, без привязки objc2-disk-arbitration и без чужого `fsevents`.
+
 ## Не использовать
 
 Tdarr (EULA), FileFlows (коммерческая лицензия), leovp/steamfiles (архив).

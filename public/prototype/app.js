@@ -985,8 +985,6 @@ document.addEventListener("pointerdown", inspectGraph);
 render(state);
 if (state.demo) setInterval(() => advanceTasks(1), 1000);
 else {
-  let lastFast = 0;
-  let lastHeavy = 0;
   let lastSse = 0;
   let fastBusy = false;
   let heavyBusy = false;
@@ -1012,7 +1010,6 @@ else {
   const runHeavy = () => {
     if (heavyBusy) return;
     heavyBusy = true;
-    lastFast = Date.now();
     void LiveWire.refresh(state)
       .then(paint)
       .catch(fail)
@@ -1020,33 +1017,28 @@ else {
         heavyBusy = false;
       });
   };
-  const tick = () => {
+  const tick = (reason) => {
     const hidden = typeof document !== "undefined" && document.hidden;
-    const now = Date.now();
-    const plan = LivePoll.pollPlan({ hidden, now, lastFast, lastHeavy, fastBusy, heavyBusy });
-    if (plan.heavy) {
-      lastHeavy = now;
-      runHeavy();
-    } else if (plan.fast) {
-      lastFast = now;
-      runFast();
-    }
+    const plan = LivePoll.pollPlan({ hidden, reason });
+    if (plan.heavy) runHeavy();
+    else if (plan.fast) runFast();
   };
-  requestHeavy = () => {
-    const hidden = typeof document !== "undefined" && document.hidden;
-    if (hidden || !LivePoll.sectionDue(state.ui.page)) return;
-    const now = Date.now();
-    if (lastHeavy && now - lastHeavy < 5_000) return;
-    lastHeavy = now;
-    runHeavy();
-  };
-  document.addEventListener("visibilitychange", tick);
+  requestHeavy = () => tick("navigate");
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) tick("show");
+  });
   LegacyApi.listenJobs(() => {
     const now = Date.now();
     if (!LivePoll.sseDue({ hidden: document.hidden, lastAt: lastSse, now })) return;
     lastSse = now;
-    runFast();
+    tick("job");
   });
-  tick();
-  setInterval(tick, LivePoll.FAST_POLL_MS);
+  if (LegacyApi.listenGameMode) {
+    LegacyApi.listenGameMode((payload) => {
+      if (!payload || typeof payload !== "object") return;
+      state.gameMode = payload;
+      render(state);
+    });
+  }
+  tick("open");
 }

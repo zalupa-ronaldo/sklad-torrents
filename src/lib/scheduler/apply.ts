@@ -8,6 +8,7 @@ import type { DashboardPayload } from "@/lib/qbittorrent/types";
 import { loadDriveCatalog } from "@/lib/drives/catalog";
 import type { CatalogDisk } from "@/lib/drives/types";
 import { planDownloads } from "@/lib/scheduler/plan";
+import { scheduleAutoPipeline } from "@/lib/scheduler/auto-watch";
 import { downloadPhase } from "@/lib/scheduler/phase";
 import { loadSchedulerPrefs, saveSchedulerPrefs, setUserPaused } from "@/lib/scheduler/store";
 import {
@@ -28,18 +29,58 @@ export interface SchedulerTick {
 
 const globalStore = globalThis as typeof globalThis & {
   __skladSchedulerTimer?: ReturnType<typeof scheduleInterval>;
+  __skladSchedulerPending?: boolean;
 };
+
+/** Keep a timer only while a download is active, queued, or about to change. */
+export function schedulerStayAwake(input: {
+  plan: { pause: readonly unknown[]; resume: readonly unknown[] };
+  dashboard: { torrents: readonly { state: DashboardPayload["torrents"][number]["state"]; rawState: string; progress: number }[] };
+}): boolean {
+  if (input.plan.pause.length > 0 || input.plan.resume.length > 0) return true;
+  return input.dashboard.torrents.some((torrent) => {
+    const phase = downloadPhase(torrent);
+    return phase === "active" || phase === "queued";
+  });
+}
+
+function disarmScheduler(): void {
+  const timer = globalStore.__skladSchedulerTimer;
+  if (timer) clearInterval(timer);
+  globalStore.__skladSchedulerTimer = undefined;
+}
+
+function armSchedulerInterval(): void {
+  if (process.env.VITEST) return;
+  if (globalStore.__skladSchedulerTimer) return;
+  const timer = scheduleInterval(() => {
+    void tickScheduler()
+      .then((tick) => {
+        scheduleAutoPipeline();
+        if (!schedulerStayAwake(tick)) disarmScheduler();
+      })
+      .catch(() => disarmScheduler());
+  }, 10_000);
+  timer.unref();
+  globalStore.__skladSchedulerTimer = timer;
+}
 
 let inflight: Promise<SchedulerTick> | null = null;
 
 export function ensureSchedulerLoop(): void {
   if (process.env.VITEST) return;
-  if (globalStore.__skladSchedulerTimer) return;
-  const timer = scheduleInterval(() => {
-    void tickScheduler().catch(() => undefined);
-  }, 10_000);
-  timer.unref();
-  globalStore.__skladSchedulerTimer = timer;
+  if (globalStore.__skladSchedulerTimer || globalStore.__skladSchedulerPending) return;
+  globalStore.__skladSchedulerPending = true;
+  void tickScheduler()
+    .then((tick) => {
+      globalStore.__skladSchedulerPending = false;
+      if (!schedulerStayAwake(tick)) return;
+      scheduleAutoPipeline();
+      armSchedulerInterval();
+    })
+    .catch(() => {
+      globalStore.__skladSchedulerPending = false;
+    });
 }
 
 export function tickScheduler(): Promise<SchedulerTick> {

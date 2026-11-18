@@ -30,16 +30,18 @@ export function startMockWorker(store: JobStore, host: JobHost, options: MockWor
   const intervalMs = options.intervalMs ?? positiveNumber(process.env.SKLAD_JOB_TICK_MS, 600);
   const steps = options.steps ?? 5;
   const controller = new AbortController();
-  let timer: ReturnType<typeof setTimeout> | null = null;
   let stopped = false;
   let ticking = false;
   let adopted = false;
+  let pending = false;
 
-  const schedule = (delay: number) => {
+  const wake = () => {
     if (stopped) return;
-    timer = arm(delay, () => {
-      void loop();
-    });
+    if (ticking) {
+      pending = true;
+      return;
+    }
+    void loop();
   };
 
   const loop = async () => {
@@ -66,17 +68,23 @@ export function startMockWorker(store: JobStore, host: JobHost, options: MockWor
       // The demo worker stays up after a cancelled tick or a full disk in tests.
     } finally {
       ticking = false;
-      schedule(claimed ? 30 : Math.min(intervalMs, 400));
+      if (!stopped && (claimed || pending)) {
+        pending = false;
+        wake();
+      }
     }
   };
 
-  schedule(intervalMs);
+  const unsubscribe = store.subscribe((event) => {
+    if (event.type === "upsert" && event.job.state === "queued") wake();
+  });
+  wake();
 
   return {
     stop() {
       stopped = true;
       controller.abort();
-      if (timer) clearTimeout(timer);
+      unsubscribe();
     },
   };
 }
@@ -160,10 +168,4 @@ function positiveNumber(value: string | undefined, fallback: number): number {
   const parsed = Number(value);
   if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
   return parsed;
-}
-
-function arm(delay: number, fn: () => void): ReturnType<typeof setTimeout> {
-  const timer = setTimeout(fn, delay);
-  (timer as unknown as { unref?: () => void }).unref?.();
-  return timer;
 }

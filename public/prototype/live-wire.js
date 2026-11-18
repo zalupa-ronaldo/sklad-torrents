@@ -107,6 +107,7 @@ const LiveWire = {
       files: keepFiles ? current.files : snapshot.files,
       demo: false,
       live,
+      gameMode: live.gameMode?.ok ? live.gameMode.data : current.gameMode || null,
       shelfGames: LivePoll.flattenShelfGames(live.games?.ok ? live.games.data : null),
       loading: false,
     };
@@ -166,6 +167,10 @@ async function perform(name, value, state) {
         form.label = form.diskLabel || form.label || "";
         state.ui.modal = null;
         return { stop: true, ...(await LegacyApi.actions.renameDisk(fetch, state)) };
+      }
+      if (name === "gameMode") {
+        state.ui.form.gameMode = value === "off" || value === "auto" ? value : "on";
+        return { stop: true, ...(await LegacyApi.actions.gameMode(fetch, state)) };
       }
       if (name === "game") {
         form.gameId = value;

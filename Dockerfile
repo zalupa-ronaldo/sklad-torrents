@@ -8,10 +8,14 @@ RUN npm ci
 
 FROM --platform=linux/arm64 node:22-bookworm-slim AS build
 WORKDIR /app
-ENV NEXT_TELEMETRY_DISABLED=1
+# 768 MiB heap leaves room in the 1536 MiB Mac Docker VM. Do not raise this
+# while the VM stays at 1536 MiB.
+ENV NEXT_TELEMETRY_DISABLED=1 \
+    NODE_OPTIONS=--max-old-space-size=768 \
+    SKLAD_DOCKER_BUILD=1
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
-RUN npm run build
+RUN npm run build && npx tsc --noEmit --pretty false --incremental false -p tsconfig.docker.json
 
 FROM --platform=linux/arm64 node:22-bookworm-slim AS run
 WORKDIR /app

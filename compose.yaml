@@ -6,10 +6,8 @@ name: sklad
 
 services:
   panel:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: sklad-panel:local
+    # Тег или полный SHA, который CI опубликовал в GHCR. Сборка на Mac не нужна.
+    image: ghcr.io/zalupa-ronaldo/sklad-torrents:${SKLAD_PANEL_TAG:-main}
     platform: linux/arm64
     restart: unless-stopped
     ports:
