@@ -1,39 +1,41 @@
 "use strict";
 const $ = (id) => document.getElementById(id);
-function blankUi(data, page = "overview") {
-  return {
-    page,
-    menu: false,
-    modal: null,
-    notice: "",
-    query: "",
-    family: "",
-    connection: "all",
-    limit: 6,
-    fileQuery: "",
-    disk: "",
-    host: "",
-    status: "",
-    torrentQuery: "",
-    period: "60",
-    sample: null,
-    platform: "Все",
-    category: Object.keys(data.rules || {})[0] || "",
-    form: {},
-  };
-}
 function createState(scenario, page = "overview") {
   const data = DemoData.snapshot(scenario);
   return {
     ...data,
-    demo: true,
     scenario,
     scenarioOptions: DemoData.scenarios,
-    ui: blankUi(data, page),
+    ui: {
+      page,
+      menu: false,
+      navMore: false,
+      taskId: data.tasks[0]?.id,
+      pending: null,
+      modal: null,
+      notice: "",
+      query: "",
+      family: "",
+      connection: "all",
+      limit: 6,
+      fileQuery: "",
+      fileId: null,
+      disk: "",
+      host: "",
+      status: "",
+      torrentQuery: "",
+      period: "60",
+      sample: null,
+      platform: "Все",
+      taskKind: "",
+      category: Object.keys(data.rules)[0],
+      form: {},
+    },
   };
 }
-const liveMode = !PanelAdapter.demoEnabled(location.search, globalThis.SKLAD_DEV === true);
-let state = liveMode ? { ...PanelAdapter.loadingSnapshot(), ui: blankUi({}) } : createState("normal");
+const demoOn = globalThis.PanelAdapter && PanelAdapter.demoEnabled(location.search, globalThis.SKLAD_DEV === true);
+let state = demoOn ? createState("normal") : LiveWire.placeholder();
+state.demo = Boolean(demoOn);
 
 // Update only changed nodes. Ticks and filter changes must not replace a focused input,
 // dismiss a native select, reset a file picker or move the caret.
@@ -77,25 +79,40 @@ function render(s) {
   region("page-head", heading(s));
   region(
     "alerts",
-    (s.error ? `<p class="host-alert">${icon("Network")}${esc(s.error)}</p>` : "") +
-      s.hosts
-        .filter((h) => !h.online)
-        .map(
-          (h) =>
-            `<p class="host-alert">${icon("Network")}Нет связи с ${esc(h.name)}.${h.error ? " " + esc(h.error) : " Доступен последний снимок файлов."}</p>`,
-        )
-        .join(""),
+    s.hosts
+      .filter((h) => !h.online)
+      .map(
+        (h) => `<p class="host-alert">${icon("Network")}Нет связи с ${esc(h.name)}. Доступен последний снимок файлов.</p>`,
+      )
+      .join(""),
   );
+  const pageFault = s.faults[s.ui.page];
+  const feedback = pageFault ? `<p class="action-fault" role="alert">${icon("Activity")}${esc(pageFault)}</p>` : "";
+  const busy = s.ui.pending ? '<p class="busy-line" role="status">Выполняется операция…</p>' : "";
+  region("action-status", s.ui.modal || s.loading ? "" : feedback + busy);
   region("screen", screen(s));
   region("notice", esc(s.ui.notice));
   const dialog = $("dialog");
+  const modalKey = s.ui.modal?.kind;
+  const changedDialog = dialog.dataset.view !== modalKey;
   if (s.ui.modal) {
-    region("dialog", modalView(s));
+    region("dialog", modalView(s) + (s.ui.modal && s.ui.pending ? busy : "") + (s.ui.modal && pageFault ? feedback : ""));
     if (!dialog.open) {
       dialog.showModal();
       if (s.ui.modal.kind === "add") $("magnet")?.focus();
     }
-  } else if (dialog.open) dialog.close();
+    dialog.dataset.view = modalKey;
+    if (modalKey === "confirm") {
+      dialog.setAttribute("aria-describedby", "confirm-description");
+      if (changedDialog) $("confirm-cancel")?.focus();
+    } else {
+      dialog.removeAttribute("aria-describedby");
+      if (changedDialog && modalKey.startsWith("inv")) dialog.querySelector("input,select,button")?.focus();
+    }
+  } else if (dialog.open) {
+    dialog.close();
+    delete dialog.dataset.view;
+  }
   document.title = pages[s.ui.page][0] + " — Склад";
   document.body.classList.toggle("menu-open", s.ui.menu);
   $("backdrop").hidden = !s.ui.menu;
@@ -118,6 +135,9 @@ function resetForm() {
 }
 function navigate(page) {
   resetForm();
+  if (["media", "index", "integrity", "policies", "hosts", "scheduler", "localsend", "optical"].includes(page))
+    state.ui.navMore = true;
+  if (page === "jobs") state.ui.taskKind = "";
   Object.assign(state.ui, { page, menu: false, modal: null });
   window.scrollTo(0, 0);
 }
@@ -134,6 +154,9 @@ function placement(rule, size, host) {
       d.freeBytes >= size,
   );
   return candidates.sort((a, b) => b.freeBytes - a.freeBytes)[0];
+}
+function canCompressFile(f) {
+  return f.sizeBytes > 0 && (f.allocatedBytes ?? f.sizeBytes) >= f.sizeBytes;
 }
 function writeCopy(file, disk, dir, changes = {}) {
   const copy = { ...file, ...changes, id: crypto.randomUUID(), diskId: disk.id, dir };
@@ -169,10 +192,15 @@ function enqueue(kind, title, host, totalBytes, operation) {
     progress: 0,
     error: null,
   });
+  const job = state.tasks[0],
+    paths = state.toolPaths[host];
+  if (operation.type === "encode" && paths?.encoder) recordEvent(job, paths.encoder + " · " + operation.preset);
+  if (operation.type === "folderCompress" && paths?.compact) recordEvent(job, paths.compact + " · " + operation.algorithm);
+  recordEvent(job, "Задача поставлена в очередь.");
   return true;
 }
 function onArrival(f) {
-  if (!state.automation || !state.previewFresh) return;
+  if (!state.schedule.enabled || !state.automation || !state.previewFresh) return;
   const d = diskOf(state, f);
   if (!available(state, d)) return;
   if (
@@ -180,24 +208,27 @@ function onArrival(f) {
     d.host === "pc" &&
     d.fs === "NTFS" &&
     f.expectedSaving >= 0.1 &&
-    !f.allocatedBytes &&
-    state.rules["Игры"].after === "Сжатие NTFS"
+    canCompressFile(f) &&
+    state.rules["Игры"]?.after === "Сжатие NTFS"
   ) {
     enqueue("copy", "Подготовка игры · " + f.name, d.host, f.sizeBytes, { type: "compress", fileId: f.id });
   }
-  if (f.type !== "Видео" || f.optimized || state.rules["Фильмы"].after !== "HandBrake") return;
+  if (f.type !== "Видео" || f.optimized || state.rules["Фильмы"]?.after !== "HandBrake") return;
   const content = "av1:" + f.contentId;
   if (
     state.files.some((c) => c.contentId === content) ||
     state.tasks.some((j) => ["running", "paused"].includes(j.state) && j.operation?.content === content)
   )
     return;
-  const size = Math.round(f.sizeBytes * 0.67),
+  const profile = state.encodingProfiles[state.toolSettings.preset];
+  const size = Math.round(f.sizeBytes * (1 - profile.saveRatio)),
     rule = state.rules["Фильмы"],
     dest = placement(rule, size);
   if (dest)
-    enqueue("copy", "Подготовка видео · " + f.name, "mac", f.sizeBytes, {
+    enqueue("av1", "AV1 · " + f.name, d.host, f.sizeBytes, {
       type: "encode",
+      preset: state.toolSettings.preset,
+      fps: profile.fps,
       fileId: f.id,
       content,
       size,
@@ -210,6 +241,8 @@ function completeTask(task) {
   if (!op) return;
   const f = byId(state.files, op.fileId),
     target = byId(state.disks, op.target);
+  if ((op.fileId && !f) || (op.target && !target) || (op.other && !byId(state.files, op.other)))
+    throw Error("Источник или назначение отсутствует в снимке.");
   if (
     !byId(state.hosts, task.host)?.online ||
     (f && !available(state, diskOf(state, f))) ||
@@ -233,39 +266,73 @@ function completeTask(task) {
         );
       }
       break;
-    case "copy":
+    case "place":
+    case "copy": {
+      if (op.torrentId && (!byId(state.torrents, op.torrentId) || f.torrentId !== op.torrentId))
+        throw Error("Раздача изменилась во время переноса.");
+      const reason = copyReason(state, f, target, op.dir ?? f.dir);
+      if (reason) throw new Error(reason);
+      const copy = writeCopy(f, target, op.dir ?? f.dir, { allocatedBytes: f.sizeBytes });
+      state.manifests[copy.id] = task.checksum;
+      task.copyId = copy.id;
+      task.sourcePath = pathOf(state, f);
+      if (op.torrentId) {
+        const torrent = byId(state.torrents, op.torrentId);
+        torrent.diskId = target.id;
+        copy.torrentId = torrent.id;
+        delete f.torrentId;
+      }
+      task.verified = true;
+      onArrival(copy);
+      break;
+    }
     case "receive":
     case "game": {
       const copy = writeCopy(f, target, op.dir ?? f.dir, op.type === "game" ? { original: f.id } : {});
       onArrival(copy);
       break;
     }
-    case "move": {
-      const allocated = f.allocatedBytes ?? f.sizeBytes;
-      if (target.id !== f.diskId && target.freeBytes < allocated) throw new Error("Недостаточно свободного места.");
-      diskOf(state, f).freeBytes += allocated;
-      target.freeBytes -= allocated;
-      f.diskId = target.id;
-      f.dir = op.dir ?? f.dir;
-      const torrent = byId(state.torrents, f.torrentId);
-      if (torrent) torrent.diskId = target.id;
-      onArrival(f);
+    case "folderCompress": {
+      let saved = 0;
+      for (const file of state.files.filter((c) => c.diskId === target.id && c.dir === op.dir && canCompressFile(c))) {
+        file.allocatedBytes = Math.round(file.sizeBytes * (1 - state.compressionRatios[op.algorithm]));
+        saved += file.sizeBytes - file.allocatedBytes;
+      }
+      target.freeBytes += saved;
+      state.reclaimedBytes += saved;
+      task.savedBytes = saved;
+      recordEvent(task, "Освобождено " + bytes(saved));
       break;
     }
     case "compress":
+      if (!canCompressFile(f)) {
+        recordEvent(task, "Файл уже сжат.");
+        break;
+      }
       f.allocatedBytes = Math.round(f.sizeBytes * (1 - f.expectedSaving));
       diskOf(state, f).freeBytes += f.sizeBytes - f.allocatedBytes;
+      state.reclaimedBytes += f.sizeBytes - f.allocatedBytes;
       break;
     case "encode":
+      if (state.files.some((c) => c.contentId === op.content)) throw Error("AV1-копия уже существует.");
       writeCopy(f, target, op.dir, {
         contentId: op.content,
         optimized: true,
+        tracks: f.tracks?.map((t) => {
+          if (t.kind !== "video") return { ...t };
+          const profile = state.encodingProfiles[op.preset];
+          const details = profile?.height === 720 ? t.details.replace(/1920 × 1080/g, "1280 × 720") : t.details;
+          return { ...t, codec: "AV1", details };
+        }),
         name: f.name.replace(/\.[^.]+$/, "") + ".sklad-av1.mkv",
         sizeBytes: op.size,
         allocatedBytes: op.size,
       });
+      task.savedBytes = f.sizeBytes - op.size;
       break;
     case "burn": {
+      if (!state.opticalDrive?.writable || state.opticalDrive.open || state.opticalDrive.medium !== op.medium)
+        throw Error("Установите чистый носитель выбранного типа.");
       const d = {
         id: crypto.randomUUID(),
         label: "Запись " + op.medium + " · " + f.name,
@@ -281,157 +348,101 @@ function completeTask(task) {
       };
       writeCopy(f, d, f.dir);
       state.disks.push(d);
+      state.opticalDrive.writable = false;
       break;
     }
-    case "image":
-      writeCopy(f, target, "Images/", { contentId: task.id, name: op.name, type: "Образ", platform: null });
+    case "image": {
+      const image = writeCopy(f, target, "Images/", {
+        contentId: task.id,
+        name: op.name,
+        type: "Образ",
+        platform: null,
+        tracks: [],
+      });
+      state.opticalImages.push({
+        id: image.id,
+        fileId: image.id,
+        diskId: target.id,
+        name: image.name,
+        sizeBytes: image.sizeBytes,
+      });
       break;
+    }
     case "send":
+      if (![...state.hosts, ...state.devices].some((p) => p.id === op.peer && p.online))
+        throw Error("Устройство больше не в сети.");
+      recordEvent(task, "Получатель подтвердил передачу.");
       break;
   }
 }
+async function fixtureDigest(contentId) {
+  const hash = await crypto.subtle.digest("SHA-256", new TextEncoder().encode("sklad-demo/" + contentId));
+  return [...new Uint8Array(hash)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+const finishing = new WeakSet();
+async function finishTask(j, snapshot) {
+  if (finishing.has(j)) return;
+  finishing.add(j);
+  try {
+    if (["copy", "place"].includes(j.operation?.type)) {
+      const f = byId(snapshot.files, j.operation.fileId);
+      const expected = snapshot.manifests[f.id] || snapshot.checksums[f.contentId] || (await fixtureDigest(f.contentId));
+      const actual = await fixtureDigest(f.contentId);
+      j.sourceChecksum = expected;
+      if (actual !== expected) throw new Error("SHA-256 не совпал. Копия не добавлена в каталог.");
+      j.checksum = actual;
+    }
+    if (snapshot !== state || !state.tasks.includes(j) || j.state !== "running") return;
+    j.state = "done";
+    j.bytesPerSec = 0;
+    j.etaSec = 0;
+    completeTask(j);
+    recordEvent(j, j.verified ? "SHA-256 совпал. Копия зарегистрирована." : "Операция завершена.");
+  } catch (error) {
+    if (snapshot !== state || !state.tasks.includes(j) || j.state === "paused") return;
+    j.state = "error";
+    j.bytesPerSec = 0;
+    j.etaSec = null;
+    j.error = error.message;
+    recordEvent(j, error.message);
+  } finally {
+    finishing.delete(j);
+    if (state === snapshot) render(state);
+  }
+}
 function advanceTasks(seconds) {
-  let changed = false;
+  const minute = Math.floor(state.schedule.clock / 60000);
+  Pipeline.tick(state, seconds);
+  let changed = state.ui.page === "scheduler" && minute !== Math.floor(state.schedule.clock / 60000);
   // Snapshot the list: completing a copy can enqueue another job.
   for (const j of [...state.tasks]) {
     if (j.state !== "running") continue;
     changed = true;
+    const milestone = Math.floor(j.progress / 25);
     j.progress = Math.min(100, j.progress + ((seconds * j.bytesPerSec) / Math.max(j.totalBytes, 1)) * 100);
     j.etaSec = Math.max(0, Math.ceil((((100 - j.progress) / 100) * j.totalBytes) / j.bytesPerSec));
+    if (j.progress < 100 && Math.floor(j.progress / 25) > milestone)
+      recordEvent(j, "Выполнено " + Math.floor(j.progress) + "%.");
     if (j.progress < 100) continue;
-    j.state = "done";
-    j.bytesPerSec = 0;
-    j.etaSec = 0;
-    try {
-      completeTask(j);
-    } catch (e) {
-      j.state = "error";
-      j.error = e.message;
-      j.etaSec = null;
-    }
+    void finishTask(j, state);
   }
   if (changed) render(state);
 }
-async function liveJson(url, options) {
-  const response = await fetch(url, options);
-  const body = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(typeof body.error === "string" && body.error ? body.error : "Панель отклонила запрос.");
-  return body;
-}
-let liveFlight = null;
-async function refreshLive() {
-  if (state.demo) return;
-  if (liveFlight) return liveFlight;
-  liveFlight = Promise.all([
-    PanelAdapter.loadPanel({ fetchImpl: fetch, timeoutMs: 8000 }),
-    globalThis.LegacyApi ? LegacyApi.loadSurface(fetch) : Promise.resolve(null),
-  ])
-    .then(([snapshot, live]) => {
-      const keepFiles = Boolean(state.ui.fileQuery || state.ui.disk || state.ui.page === "move" || state.ui.page === "details");
-      state = {
-        ...snapshot,
-        ui: state.ui,
-        files: keepFiles ? state.files : snapshot.files,
-        demo: false,
-        catalogError: state.catalogError,
-        live,
-      };
-      render(state);
-    })
-    .catch((error) => {
-      state.loading = false;
-      state.error = error instanceof PanelAdapter.PanelError ? error.message : "Панель не ответила.";
-      render(state);
-    })
-    .finally(() => {
-      liveFlight = null;
-    });
-  return liveFlight;
-}
-let searchTimer;
-function scheduleCatalog() {
-  clearTimeout(searchTimer);
-  searchTimer = setTimeout(() => void refreshCatalog(), 300);
-}
-async function refreshCatalog() {
-  if (state.demo) return;
-  try {
-    state.files = await PanelAdapter.loadCatalog(fetch, { q: state.ui.fileQuery, diskId: state.ui.disk, timeoutMs: 8000 });
-    state.catalogError = null;
-  } catch (error) {
-    state.catalogError = error instanceof PanelAdapter.PanelError ? error.message : "Каталог не ответил.";
-  }
-  render(state);
-}
-async function liveTask(name, id) {
-  const j = byId(state.tasks, id);
-  if (!j) return;
-  if (j.source === "copy") {
-    if (name === "retry") {
-      message("Повтор копирования эта кнопка не отправляет.");
-      return;
-    }
-    const action = name === "pause" && j.state === "paused" ? "resume" : name;
-    if (!j.progressId) {
-      message("У копирования нет идентификатора прогресса.");
-      return;
-    }
-    await liveJson(`/api/progress/${encodeURIComponent(j.progressId)}`, {
-      method: "POST",
-      headers: { "content-type": "application/json", accept: "application/json" },
-      body: JSON.stringify({ action }),
-    });
-    await refreshLive();
-    return;
-  }
-  if (j.source === "queue") {
-    const action = name === "pause" && j.state === "paused" ? "resume" : name;
-    await LegacyApi.jobControl(fetch, j.id, action);
-    await refreshLive();
-    return;
-  }
-  message("Эта задача не управляется из живой панели.");
-}
-async function liveToggle(id) {
-  const t = byId(state.torrents, id);
-  if (!t?.hostId) {
-    message("У раздачи нет хоста qBittorrent.");
-    return;
-  }
-  const action = t.state === "pause" ? "resume" : "pause";
-  await liveJson(`/api/torrents/${encodeURIComponent(t.hostId)}/${encodeURIComponent(t.id)}`, {
-    method: "POST",
-    headers: { "content-type": "application/json", accept: "application/json" },
-    body: JSON.stringify({ action }),
-  });
-  await refreshLive();
-}
-async function liveCopy() {
-  const file = byId(state.files, state.ui.form.source) || state.files.find((item) => item.path && item.diskId);
-  const dest = byId(state.destinations || [], state.ui.form.dest);
-  if (!file?.path || !file.diskId || !dest?.id) {
-    message("Нужны файл из каталога и назначение.");
-    return;
-  }
-  await liveJson("/api/files/copy", {
-    method: "POST",
-    headers: { "content-type": "application/json", accept: "application/json" },
-    body: JSON.stringify({ diskId: file.diskId, path: file.path, destinationId: dest.id }),
-  });
-  message("Копирование поставлено в очередь. SHA-256 считает панель.");
-  navigate("jobs");
-  await refreshLive();
-}
-async function taskAction(name, id) {
-  if (!state.demo) return liveTask(name, id);
+function taskAction(name, id) {
   const j = byId(state.tasks, id);
   if (!j) return;
   if (name === "cancel") {
+    j.state = "cancelled";
+    j.bytesPerSec = 0;
+    j.etaSec = null;
+    recordEvent(j, "Операция отменена.");
+    state.cancelled.push(j);
     state.tasks = state.tasks.filter((t) => t !== j);
     message("Задание отменено.");
     return;
   }
   if (name === "pause" && j.state === "running") {
+    recordEvent(j, "Поставлено на паузу.");
     j.state = "paused";
     j.resumeRate = j.bytesPerSec;
     j.bytesPerSec = 0;
@@ -439,6 +450,11 @@ async function taskAction(name, id) {
     return;
   }
   if ((name === "pause" && j.state === "paused") || (name === "retry" && j.state === "error")) {
+    if (!taskAvailable(state, j)) {
+      message("Для продолжения подключите носитель и его хост.");
+      return;
+    }
+    recordEvent(j, name === "retry" ? "Запущено повторно." : "Выполнение продолжено.");
     if (name === "retry") j.progress = 0;
     j.state = "running";
     j.error = null;
@@ -459,14 +475,13 @@ async function runOperation() {
     op;
   if (page === "move") {
     title = m.mode + " · " + f.name;
-    op = { type: m.mode === "Копирование" ? "copy" : "move", fileId: f.id, target: m.target.id };
+    op = { type: "copy", moveSource: m.mode !== "Копирование", fileId: f.id, target: m.target.id };
   } else if (page === "integrity") {
     kind = "sha256";
     title = "SHA-256 · " + f.name;
     const entries = await Promise.all(
       [f, m.other].filter(Boolean).map(async (c) => {
-        const hash = await crypto.subtle.digest("SHA-256", new TextEncoder().encode("sklad-demo/" + c.contentId));
-        return [c.id, [...new Uint8Array(hash)].map((b) => b.toString(16).padStart(2, "0")).join("")];
+        return [c.id, await fixtureDigest(c.contentId)];
       }),
     );
     if (state !== s || u.page !== page) return;
@@ -488,7 +503,7 @@ async function runOperation() {
       op.name = (m.art ? u.form.artName || "Склад" : f.name) + "." + (m.art && m.medium === "CD-R" ? "wav" : "iso");
     }
   }
-  if (enqueue(kind, title, host, f.sizeBytes, op)) navigate("jobs");
+  if (enqueue(kind, title, host, f.sizeBytes, op)) openJob(s.tasks[0].id);
 }
 function rebalance() {
   for (const d of state.disks) {
@@ -527,10 +542,11 @@ function finishTorrent(id) {
     state.files.push(f);
     d.freeBytes = Math.max(0, d.freeBytes - f.sizeBytes);
     const rule = state.rules[{ image: "Софт", video: "Фильмы", audio: "Музыка" }[t.kind] || "Прочее"];
-    const target = state.automation ? placement(rule, f.sizeBytes, d.host) : null;
+    const target = state.schedule.enabled && state.automation ? placement(rule, f.sizeBytes, d.host) : null;
     if (target)
       enqueue("copy", "Раскладка · " + f.name, d.host, f.sizeBytes, {
-        type: "move",
+        type: "place",
+        torrentId: t.id,
         fileId: f.id,
         target: target.id,
         dir: rule.folder + "/",
@@ -544,7 +560,11 @@ function gameAction(id) {
     copy = state.files.find((c) => c.original === id),
     pool = byId(state.disks, state.gamePool);
   if (copy || f.platform === "macOS") {
-    state.ui.modal = { kind: copy ? "launch" : "file", id: copy?.id || id };
+    if (copy) state.ui.modal = { kind: "launch", id: copy.id };
+    else {
+      navigate("details");
+      state.ui.fileId = id;
+    }
     return;
   }
   if (!available(state, pool) || pool.freeBytes < f.sizeBytes) {
@@ -562,33 +582,29 @@ function gameAction(id) {
     navigate("jobs");
 }
 
+function askConfirm(kind, id, title, description, label) {
+  state.ui.modal = { kind: "confirm", action: kind, id, title, description, label };
+}
 async function act(name, value) {
+  if (name.startsWith("inv")) return Inventory.act(name, value);
+  if (name.startsWith("pipe")) return Pipeline.act(name, value);
+  if (name.startsWith("shop")) return Workshops.act(name, value);
   const u = state.ui;
-  if (!state.demo && name === "gameLaunch") {
-    u.form.gameId = value;
-    u.form.gameAction = "launch";
-    name = "gameAct";
-  }
-  if (!state.demo && name === "gameWant") {
-    u.form.gameId = value;
-    u.form.gameAction = "want";
-    name = "gameAct";
-  }
-  if (!state.demo && name === "gameReturn") {
-    u.form.gameId = value;
-    u.form.gameAction = "return";
-    name = "gameAct";
-  }
-  if (!state.demo && globalThis.LegacyApi?.actions?.[name]) {
-    if ((name === "rescan" || name === "compact") && value) u.form.diskId = value;
-    const result = await LegacyApi.actions[name](fetch, state);
-    if (result?.message) message(result.message);
-    if (result?.refresh) await refreshLive();
-    return;
-  }
   switch (name) {
     case "page":
       navigate(value);
+      break;
+    case "confirmAction": {
+      const m = u.modal;
+      if (m?.kind !== "confirm") break;
+      if (m.action === "pipeDelete") Pipeline.confirmed(m.action, m.id);
+      else Inventory.confirmed(m.action, m.id);
+      u.modal = null;
+      message("Изменения сохранены.");
+      break;
+    }
+    case "navMore":
+      u.navMore = !u.navMore;
       break;
     case "menu":
       u.menu = true;
@@ -625,32 +641,44 @@ async function act(name, value) {
       u.fileQuery = "";
       break;
     case "file":
-      if (!state.demo) {
-        u.fileId = value;
-        navigate("details");
-        break;
-      }
-      u.modal = { kind: name, id: value };
-      break;
-    case "torrent":
-      u.modal = { kind: name, id: value };
-      if (!state.demo) u.form.torrentId = value;
+      if (u.page !== "details") navigate("details");
+      u.fileId = value;
+      delete u.form.copyTarget;
       break;
     case "backToFiles":
       navigate("drives");
       break;
-    case "pickHost":
-      u.form.hostId = value;
+    case "copyDetail": {
+      const f = byId(state.files, u.fileId),
+        target = byId(state.disks, u.form.copyTarget);
+      if (!f || copyReason(state, f, target)) break;
+      if (
+        enqueue("copy", "Копирование · " + f.name, diskOf(state, f).host, f.sizeBytes, {
+          type: "copy",
+          fileId: f.id,
+          target: target.id,
+        })
+      ) {
+        navigate("jobs");
+        u.taskKind = "";
+      }
+      break;
+    }
+    case "torrent":
+      u.modal = { kind: name, id: value };
       break;
     case "close":
       u.modal = null;
       break;
     case "fileOp": {
-      const id = u.modal.id;
+      const id = u.fileId;
       navigate(value);
       u.form.source = id;
       break;
     }
+    case "addTorrent":
+      addTorrent();
+      break;
     case "add":
       resetForm();
       u.form.addHost = u.host;
@@ -665,10 +693,6 @@ async function act(name, value) {
       u.torrentQuery = "";
       break;
     case "toggleTorrent": {
-      if (!state.demo) {
-        await liveToggle(value);
-        break;
-      }
       const t = byId(state.torrents, value);
       t.state = t.state === "pause" ? (t.progress === 100 ? "seed" : "wait") : "pause";
       rebalance();
@@ -678,6 +702,9 @@ async function act(name, value) {
       navigate("move");
       u.form.source = state.files.find((f) => f.torrentId === value).id;
       break;
+    case "taskKind":
+      u.taskKind = value;
+      break;
     case "platform":
       u.platform = value;
       break;
@@ -686,19 +713,15 @@ async function act(name, value) {
       break;
     case "reindex": {
       const d = byId(state.disks, value);
-      if (enqueue("index", "Обновить индекс · " + d.label, d.host, d.sizeBytes, { type: "index", target: d.id }))
-        navigate("jobs");
+      if (!available(state, d)) break;
+      if (enqueue("index", "Обновить индекс · " + d.label, d.host, d.sizeBytes, { type: "index", target: d.id })) {
+        if (u.page !== "devices") navigate("jobs");
+        else message("Сканирование началось.");
+      }
       break;
     }
     case "run":
-      if (!state.demo) {
-        message("Эта операция в живой панели не отправляется.");
-        break;
-      }
       await runOperation();
-      break;
-    case "liveCopy":
-      await liveCopy();
       break;
     case "dest":
       u.form.dest = value;
@@ -712,10 +735,6 @@ async function act(name, value) {
       byId(state.torrents, value).rank = Math.min(...state.torrents.map((t) => t.rank)) - 1;
       break;
     case "finish":
-      if (!state.demo) {
-        message("Завершение раздачи делает qBittorrent.");
-        break;
-      }
       finishTorrent(value);
       break;
     case "dry":
@@ -726,14 +745,83 @@ async function act(name, value) {
       break;
   }
 }
+const simulatedRequests = new Set([
+  "invSaveHost",
+  "invProbe",
+  "invCompress",
+  "invDownload",
+  "invManifest",
+  "invMigrate",
+  "confirmAction",
+  "pipeSchedule",
+  "pipeAuto",
+  "pipeSettings",
+  "pipeSSD",
+  "pipeCompress",
+  "pipeEncode",
+  "shopDiscover",
+  "shopTray",
+  "shopBlank",
+  "shopSendSettings",
+  "shopApply",
+  "run",
+  "reindex",
+  "copyDetail",
+  "game",
+  "toggleTorrent",
+  "dry",
+  "auto",
+  "finish",
+  "next",
+  "pause",
+  "cancel",
+  "invHashRun",
+  "retry",
+  "addTorrent",
+]);
 async function dispatch(name, value) {
-  const wasPage = state.ui.page;
+  if (!state.demo && globalThis.LiveWire) {
+    const outcome = await LiveWire.handle(name, value, state);
+    if (outcome && outcome.stop) {
+      if (outcome.message) message(outcome.message);
+      if (outcome.refresh) {
+        try {
+          state = await LiveWire.refresh(state);
+        } catch (error) {
+          state.loading = false;
+          state.error = error instanceof Error ? error.message : "Панель не ответила.";
+        }
+      }
+      render(state);
+      return;
+    }
+  }
+  const snapshot = state,
+    wasPage = state.ui.page,
+    modal = state.ui.modal;
+  if (state.ui.pending && simulatedRequests.has(name)) return;
+  let pending = null;
   try {
+    if (simulatedRequests.has(name)) {
+      pending = { name, value };
+      state.ui.pending = pending;
+      render(state);
+      await new Promise((resolve) => setTimeout(resolve, 240));
+      if (state !== snapshot || state.ui.page !== wasPage || modal !== state.ui.modal) return;
+      if (state.failNext[wasPage]) {
+        const reason = state.failNext[wasPage];
+        delete state.failNext[wasPage];
+        throw Error(reason + " Повторите действие.");
+      }
+      delete state.faults[wasPage];
+    }
     await act(name, value);
   } catch (e) {
-    message(e.message);
+    if (snapshot === state) state.faults[wasPage] = e.message;
+  } finally {
+    if (snapshot.ui.pending === pending) snapshot.ui.pending = null;
+    if (snapshot === state) render(state);
   }
-  render(state);
   if (name === "find") $("catalog-q")?.focus();
   else if (name === "menu") $("sidebar").querySelector("button")?.focus();
   else if (name === "closeMenu") $("menu").focus();
@@ -767,8 +855,10 @@ function updateControl(el) {
     resetForm();
     clearTimeout(toastTimer);
     state = createState(v, u.page);
-  } else if (id === "savePath") u.form.savePath = v;
-  else if (id in textFields) {
+    state.ui.fileId = u.fileId;
+    state.ui.navMore = u.navMore;
+    if (u.page === "task") state.ui.taskId = byId(state.tasks, u.taskId)?.id || state.tasks[0]?.id;
+  } else if (id in textFields) {
     u[textFields[id]] = v;
     if (id === "shelf-query") u.limit = 6;
   } else if (id === "shelf-filter") {
@@ -796,6 +886,19 @@ function updateControl(el) {
     u.form.artURL = image ? URL.createObjectURL(image) : "";
     u.form.artName = image?.name;
   } else if (id) {
+    if (id === "configHost") {
+      delete u.form.encoderPath;
+      delete u.form.compactPath;
+      delete u.form.agentAddress;
+    }
+    if (id === "moveDisk") {
+      delete u.form.source;
+      delete u.form.dest;
+    }
+    if (id === "toolDisk") {
+      delete u.form.toolDir;
+      delete u.form.toolFile;
+    }
     if (id === "source") {
       delete u.form.mode;
       delete u.form.dest;
@@ -806,7 +909,6 @@ function updateControl(el) {
     u.form[id] = v;
   }
   render(state);
-  if (!state.demo && (id === "catalog-q" || id === "disk-filter")) scheduleCatalog();
 }
 document.addEventListener("input", (e) => {
   if (e.target instanceof HTMLInputElement && e.target.type !== "file") updateControl(e.target);
@@ -815,34 +917,12 @@ document.addEventListener("change", (e) => {
   if (e.target instanceof HTMLSelectElement || e.target.type === "file") updateControl(e.target);
 });
 document.addEventListener("submit", (e) => {
-  if (e.target.id !== "add-form") return;
-  e.preventDefault();
-  if (!state.demo) {
-    const magnet = $("magnet");
-    const link = magnet.value.trim();
-    const hostId = $("addHost")?.value;
-    const savePath = $("savePath")?.value.trim();
-    if (!/^magnet:\?/i.test(link) || !hostId || !savePath) {
-      magnet.setCustomValidity("Нужны magnet-ссылка, хост и каталог.");
-      magnet.reportValidity();
-      return;
-    }
-    void liveJson("/api/torrents", {
-      method: "POST",
-      headers: { "content-type": "application/json", accept: "application/json" },
-      body: JSON.stringify({ hostId, urls: link, savePath }),
-    })
-      .then(async () => {
-        state.ui.modal = null;
-        message("Раздача добавлена.");
-        await refreshLive();
-      })
-      .catch((error) => {
-        message(error.message);
-        render(state);
-      });
-    return;
+  if (e.target.id === "add-form") {
+    e.preventDefault();
+    void dispatch("addTorrent", "");
   }
+});
+function addTorrent() {
   const magnet = $("magnet"),
     link = magnet.value.trim(),
     params = new URLSearchParams(link.slice(link.indexOf("?") + 1));
@@ -858,6 +938,7 @@ document.addEventListener("submit", (e) => {
     id: crypto.randomUUID(),
     name: params.get("dn") || hash.slice(9, 21) + "…",
     kind: "archive",
+    infoHash: hash.slice(9),
     diskId: d.id,
     sizeBytes: null,
     progress: 0,
@@ -870,12 +951,9 @@ document.addEventListener("submit", (e) => {
   rebalance();
   message("Раздача добавлена.");
   render(state);
-});
+}
 document.addEventListener("dragstart", (e) => {
-  if (e.target.id === "grab-file") {
-    const model = operationModel(state);
-    if (model.file) e.dataTransfer.setData("text/plain", model.file.id);
-  }
+  if (e.target.id === "grab-file") e.dataTransfer.setData("text/plain", operationModel(state).file.id);
 });
 document.addEventListener("dragover", (e) => {
   if (e.target.closest('[data-action="dest"]')) e.preventDefault();
@@ -884,8 +962,7 @@ document.addEventListener("drop", (e) => {
   const dest = e.target.closest('[data-action="dest"]');
   if (dest) {
     e.preventDefault();
-    const model = operationModel(state);
-    if (model.file && e.dataTransfer.getData("text/plain") === model.file.id) void dispatch("dest", dest.dataset.value);
+    if (e.dataTransfer.getData("text/plain") === operationModel(state).file.id) void dispatch("dest", dest.dataset.value);
   }
 });
 function inspectGraph(e) {
@@ -903,7 +980,23 @@ document.addEventListener("pointerdown", inspectGraph);
 render(state);
 if (state.demo) setInterval(() => advanceTasks(1), 1000);
 else {
-  if (globalThis.LegacyApi) LegacyApi.listenJobs(() => void refreshLive());
-  void refreshLive();
-  setInterval(() => void refreshLive(), 4000);
+  let lastPoll = 0;
+  const tick = () => {
+    const hidden = typeof document !== "undefined" && document.hidden;
+    if (!LivePoll.pollDue({ hidden, inFlight: false, lastAt: lastPoll, now: Date.now() })) return;
+    lastPoll = Date.now();
+    void LiveWire.refresh(state)
+      .then((next) => {
+        state = next;
+        render(state);
+      })
+      .catch((error) => {
+        state.loading = false;
+        state.error = error instanceof Error ? error.message : "Панель не ответила.";
+        render(state);
+      });
+  };
+  document.addEventListener("visibilitychange", tick);
+  tick();
+  setInterval(tick, LivePoll.LIVE_POLL_MS);
 }

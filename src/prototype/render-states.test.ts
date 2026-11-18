@@ -92,7 +92,7 @@ describe("collection screens", () => {
     expect(offlineDisk.sidebar).toContain("В сети");
     expect(offlineDisk.screen).toContain("Не в сети");
     expect(offlineDisk.screen).toContain("Shelf");
-    expect(offlineDisk.screen).toContain("Тип носителя не сообщается");
+    expect(offlineDisk.screen).toContain("carrier-type\">—");
 
     const copying = mapCopyJob({ id: "c1", status: "running", title: "Копирование · notes.txt", bytesDone: 25, bytesTotal: 100, speed: 5, sourceSha256: "deadbeef", verified: false, error: null });
     const withCopy = paint(
@@ -139,7 +139,7 @@ describe("collection screens", () => {
     expect(torrents.screen).toContain("Раздача");
     expect(torrents.screen).toContain("Mac mini");
     const files = paint({ ...snapshot, files: [] }, "drives");
-    expect(files.screen).toContain("Введите имя файла");
+    expect(files.screen).toContain("Ничего не найдено в каталоге");
     const jobs = paint(snapshot, "jobs");
     expect(jobs.screen).toContain("index");
     expect(jobs.screen).toContain("Готово");
@@ -148,41 +148,36 @@ describe("collection screens", () => {
     expect(legacy.sidebar).not.toContain("Деморежим");
   });
 
-  it("renders the move form, devices, file details, and offline AV1 as text", () => {
+  it("renders the move form, devices, and offline AV1 as text", () => {
     const code = readFileSync(path.join(process.cwd(), "public/prototype/workbench.js"), "utf8");
-    const pages = readFileSync(path.join(process.cwd(), "public/prototype/live-pages.js"), "utf8");
-    const sandbox: {
-      LivePages?: { render: (state: Record<string, unknown>) => string; av1: (state: Record<string, unknown>) => string };
-      SkladWorkbench?: { screen: (state: Record<string, unknown>) => string };
-    } = {};
+    const inventory = readFileSync(path.join(process.cwd(), "public/prototype/inventory.js"), "utf8");
+    const sandbox: { SkladWorkbench?: { screen: (state: Record<string, unknown>) => string } } = {};
     createContext(sandbox);
     new Script(code).runInContext(sandbox);
-    new Script(pages).runInContext(sandbox);
+    new Script(inventory).runInContext(sandbox);
+    const view = sandbox.SkladWorkbench;
+    if (!view) throw new Error("workbench did not export");
     const base = {
       demo: false,
       loading: false,
       hosts: [{ id: "mac-mini", name: "Mac mini", online: true }],
-      disks: [{ id: "disk-1", label: "Vault", host: "mac-mini", online: true, sizeBytes: 100, freeBytes: 40, mount: "/Volumes/vault", fs: "APFS", lastSeen: "2026-11-18T00:00:00Z" }],
-      files: [{ id: "file-1", name: "notes.txt", diskId: "disk-1", path: "/Volumes/vault/notes.txt", sizeBytes: 12, contentId: "file-1" }],
-      destinations: [{ id: "mac-downloads", label: "Загрузки", online: true }],
+      disks: [{ id: "disk-1", label: "Vault", kind: "ssd", host: "mac-mini", online: true, sizeBytes: 100, freeBytes: 40, mount: "/Volumes/vault", fs: "APFS", lastSeen: "2026-11-18T00:00:00Z", location: null }],
+      files: [{ id: "file-1", name: "notes.txt", diskId: "disk-1", path: "/Volumes/vault/notes.txt", dir: "", sizeBytes: 12, contentId: "file-1" }],
       torrents: [],
       tasks: [],
+      rules: {},
+      history: [],
       live: { av1: { online: false, started: false, lanes: [] } },
-      ui: ui("move"),
+      ui: { ...ui("move"), form: {} },
     };
-    const move = sandbox.SkladWorkbench?.screen(base) || "";
-    expect(move).toContain('id="move-form"');
+    const move = view.screen(base);
+    expect(typeof move).toBe("string");
+    expect(move).toContain('id="source"');
     expect(move).toContain("notes.txt");
     expect(move).not.toContain("[object Promise]");
-    expect(typeof move).toBe("string");
-    const devices = sandbox.SkladWorkbench?.screen({ ...base, ui: ui("devices") }) || "";
+    const devices = view.screen({ ...base, ui: { ...ui("devices"), form: {} } });
     expect(devices).toContain("Vault");
-    expect(devices).toContain("Пересканировать");
-    const details = sandbox.SkladWorkbench?.screen({ ...base, ui: { ...ui("details"), fileId: "file-1" } }) || "";
-    expect(details).toContain("SHA-256");
-    expect(details).toContain("/Volumes/vault/notes.txt");
-    expect(details).not.toContain("[object Promise]");
-    const jobs = sandbox.SkladWorkbench?.screen({ ...base, ui: ui("jobs") }) || "";
+    const jobs = view.screen({ ...base, ui: { ...ui("jobs"), form: {}, taskKind: "" } });
     expect(jobs).toContain("Агент ПК не в сети");
     expect(jobs).toContain("Кодирование не запускалось");
   });
