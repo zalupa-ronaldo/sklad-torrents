@@ -175,6 +175,8 @@ export interface LibraryState {
   indexes: VolumeIndex[];
   catalog: CatalogFile[];
   games: WinGame[];
+  /** Windows catalog id → id in the shared game library. The cold root stays the archive. */
+  pins: Record<string, string>;
   jobs: LibraryJob[];
   settings: LibrarySettings;
   covers: Record<string, CoverCacheEntry>;

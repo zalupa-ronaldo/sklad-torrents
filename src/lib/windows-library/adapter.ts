@@ -1,19 +1,17 @@
 import { AppError } from "@/lib/app-error";
-import { cacheFromText, type CompactDbCache } from "@/lib/compact-db/database";
+import type { GameRecord } from "@/lib/games/library";
+import type { Job } from "@/lib/jobs/model";
 import { entriesFromNodes, applyUsn, entriesFromWalk, nodesFromMftFixture } from "@/lib/windows-library/index-model";
 import { buildGames } from "@/lib/windows-library/inventory";
 import { coverFor } from "@/lib/windows-library/covers";
-import { chooseCompactAlgorithm } from "@/lib/windows-library/compression";
-import { MemoryFs } from "@/lib/windows-library/memory-fs";
-import { advanceJob, enqueueMove } from "@/lib/windows-library/pool";
 import { emptyLibraryState, loadLibraryState, saveLibraryState } from "@/lib/windows-library/store";
+import { assertMoveAllowed, engineRecords, enqueueSharedPlay, recordFor, removeSharedCopy, sharedGameJobs, sharedJobView } from "@/lib/windows-library/shared-queue";
 import type {
   CatalogFile,
   IndexedEntry,
   LibraryEvent,
   LibraryState,
   LibraryView,
-  PublicLibraryJob,
   PublicVolume,
   PublicWindowsGame,
   VolumeCursor,
@@ -24,11 +22,34 @@ import { splitUsnRead } from "@/lib/windows-library/usn-journal";
 import { dataDir } from "@/lib/qbittorrent/store";
 
 export async function readWindowsLibrary(directory = dataDir()): Promise<LibraryView> {
-  return view(await loadLibraryState(directory));
+  return present(await loadLibraryState(directory), directory);
 }
 
 export async function handleLibraryCommand(body: unknown, directory = dataDir()): Promise<unknown> {
   const state = await loadLibraryState(directory);
+  const record = recordOf(body);
+  const action = typeof record.action === "string" ? record.action : "";
+  if (action === "compress") {
+    return {
+      ok: false,
+      created: false,
+      reason: "Сжатие не ставится отдельной очередью. Его делает общая подготовка: копия, SHA-256, затем compact.exe всего корня на NTFS.",
+    };
+  }
+  if (action === "play" || action === "return") {
+    const game = requireGame(state, text(record.id));
+    assertMoveAllowed(game, { confirm: record.confirm === true, processes: processesFrom(record.processes) });
+    if (action === "play") {
+      const queued = await enqueueSharedPlay(directory, state, game);
+      await saveLibraryState(directory, state);
+      const library = await present(state, directory);
+      const job = library.games.find((item) => item.id === game.id)?.job ?? null;
+      return { ok: true, created: queued.created, jobId: queued.jobId, engineId: queued.engineId, sourceDeleted: false, job, library };
+    }
+    const removed = await removeSharedCopy(directory, state, game);
+    await saveLibraryState(directory, state);
+    return { ok: true, removed: true, sourceKept: removed.sourceKept, sourceDeleted: false, library: await present(state, directory) };
+  }
   const result = applyLibraryCommand(state, body);
   await saveLibraryState(directory, state);
   return result;
@@ -53,21 +74,10 @@ export function applyLibraryCommand(state: LibraryState, body: unknown): unknown
   if (action === "diskutil-cached") return acceptDiskutil(state, record);
   if (action === "settings") return acceptSettings(state, record);
   if (action === "remember-cover") return acceptCover(state, record);
-  if (action === "compress") return acceptCompress(state, record);
-  if (action === "play" || action === "return") return acceptMove(state, record, action);
+  if (action === "compress" || action === "play" || action === "return") {
+    throw new AppError(400, "Копия и снятие с пула идут через общую jobs.json. Отдельная очередь библиотеки их не ставит.");
+  }
   throw new AppError(400, "Неизвестное действие.");
-}
-
-/** Worker entry. Tests pass a MemoryFs. There is no disk implementation here. */
-export function advanceWindowsLibrary(
-  state: LibraryState,
-  jobId: string,
-  fs: MemoryFs,
-  cache: CompactDbCache | null = null,
-  options?: { mutateCopy?: (relative: string, bytes: Buffer) => Buffer },
-) {
-  const job = advanceJob(state, jobId, fs, cache, options);
-  return { job: publicJob(job), library: view(state) };
 }
 
 function acceptMft(state: LibraryState, record: Record<string, unknown>) {
@@ -148,51 +158,6 @@ function acceptCover(state: LibraryState, record: Record<string, unknown>) {
   };
   for (const game of state.games) game.cover = coverFor(game, state.covers);
   return { ok: true, fetched: false, library: view(state) };
-}
-
-function acceptCompress(state: LibraryState, record: Record<string, unknown>) {
-  const game = requireGame(state, text(record.id));
-  const choice = chooseCompactAlgorithm({
-    steamAppId: game.steamAppId,
-    cache: databaseFrom(record.database),
-    already: game.algorithm,
-  });
-  if (!choice.enqueue) return { ok: true, created: false, reason: choice.reason, library: view(state) };
-  const existing = state.jobs.find((job) => job.gameId === game.id && job.kind === "compress" && job.state === "queued");
-  if (existing) return { ok: true, created: false, job: publicJob(existing), library: view(state) };
-  const job = {
-    id: `wjob-compress-${game.id.slice(3, 11)}`,
-    kind: "compress" as const,
-    gameId: game.id,
-    state: "queued" as const,
-    phase: "queued",
-    percent: 0,
-    confirm: false,
-    error: null,
-    sourceDeleted: false,
-    verified: false,
-    compactAlgorithm: choice.algorithm,
-    phases: [] as string[],
-    sourceRoot: game.root,
-    destRoot: game.root,
-    destLibrary: null,
-    manifestPath: null,
-    libraryFoldersPath: null,
-    installdir: null,
-    steamAppId: game.steamAppId,
-    launcher: game.launcher,
-  };
-  state.jobs.push(job);
-  game.compression = "queued";
-  game.algorithm = choice.algorithm;
-  return { ok: true, created: true, job: publicJob(job), reason: choice.reason, library: view(state) };
-}
-
-function acceptMove(state: LibraryState, record: Record<string, unknown>, kind: "play" | "return") {
-  const game = requireGame(state, text(record.id));
-  const processes = processesFrom(record.processes);
-  const job = enqueueMove(state, { game, kind, confirm: record.confirm === true, processes });
-  return { ok: true, created: true, job: publicJob(job), library: view(state) };
 }
 
 function rebuild(state: LibraryState): void {
@@ -279,24 +244,34 @@ function entriesFrom(value: unknown): IndexedEntry[] {
   });
 }
 
-function view(state: LibraryState): LibraryView {
-  const games: PublicWindowsGame[] = state.games.map((game) => ({
-    id: game.id,
-    title: game.title,
-    launcher: game.launcher,
-    steamAppId: game.steamAppId,
-    root: game.root,
-    serial: game.serial,
-    uuid: game.uuid,
-    logicalBytes: game.logicalBytes,
-    allocatedBytes: game.allocatedBytes,
-    compression: game.compression,
-    algorithm: game.algorithm,
-    cover: game.cover,
-    pool: game.pool,
-    online: game.online,
-    job: latestJob(state, game.id),
-  }));
+async function present(state: LibraryState, directory: string): Promise<LibraryView> {
+  const [records, jobs] = await Promise.all([engineRecords(directory), sharedGameJobs(directory)]);
+  return view(state, records, jobs);
+}
+
+function view(state: LibraryState, records: readonly GameRecord[] = [], jobs: readonly Job[] = []): LibraryView {
+  const games: PublicWindowsGame[] = state.games.map((game) => {
+    const record = recordFor(records, state, game);
+    const playing = Boolean(record?.copyVerified);
+    const job = record ? jobs.filter((item) => item.payload.diskId === `game:${record.id}`).at(-1) : undefined;
+    return {
+      id: game.id,
+      title: game.title,
+      launcher: game.launcher,
+      steamAppId: game.steamAppId,
+      root: game.archiveRoot || game.root,
+      serial: game.serial,
+      uuid: game.uuid,
+      logicalBytes: record?.logicalBytes ?? game.logicalBytes,
+      allocatedBytes: record?.allocatedBytes ?? game.allocatedBytes,
+      compression: record?.compressed ? "compressed" : record?.state === "preparing" ? "queued" : game.compression,
+      algorithm: game.algorithm,
+      cover: game.cover,
+      pool: playing ? "playing" : "archive",
+      online: game.online,
+      job: job ? sharedJobView(job, game.id) : null,
+    };
+  });
   const volumes: PublicVolume[] = state.volumes.map((volume) => {
     const index = state.indexes.find((item) => item.key === volumeKey(volume));
     return {
@@ -317,27 +292,6 @@ function view(state: LibraryState): LibraryView {
     };
   });
   return { games, volumes, settings: state.settings, polling: false };
-}
-
-function latestJob(state: LibraryState, gameId: string): PublicLibraryJob | null {
-  const jobs = state.jobs.filter((job) => job.gameId === gameId);
-  const job = jobs[jobs.length - 1];
-  return job ? publicJob(job) : null;
-}
-
-function publicJob(job: LibraryState["jobs"][number]): PublicLibraryJob {
-  return {
-    id: job.id,
-    kind: job.kind,
-    gameId: job.gameId,
-    state: job.state,
-    phase: job.phase,
-    percent: job.percent,
-    error: job.error,
-    sourceDeleted: job.sourceDeleted,
-    verified: job.verified,
-    compactAlgorithm: job.compactAlgorithm,
-  };
 }
 
 function requireCursor(state: LibraryState, record: Record<string, unknown>): VolumeCursor {
@@ -423,11 +377,6 @@ function identityFrom(value: unknown): VolumeIdentity {
 function processesFrom(value: unknown): { path: string }[] | null {
   if (!Array.isArray(value)) return null;
   return value.map((item) => ({ path: text(recordOf(item).path) ?? "" }));
-}
-
-function databaseFrom(value: unknown): CompactDbCache | null {
-  if (typeof value !== "string" || !value.trim()) return null;
-  return cacheFromText(value, new Date().toISOString());
 }
 
 function bytesFrom(value: unknown, message: string): Buffer {

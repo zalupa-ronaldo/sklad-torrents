@@ -216,10 +216,19 @@ const GameLibrary = (() => {
       d.freeBytes += saved;
       g.status = "compressed";
       g.progress = 100;
+      if (j.operation.target === s.gamePool) {
+        j.state = "done";
+        j.sourceDeleted = false;
+        j.bytesPerSec = 0;
+        j.etaSec = 0;
+        recordEvent(j, "Копия на SSD готова. Холодный архив на месте.");
+        message("Игра в пуле · " + g.title);
+        return;
+      }
       j.state = "paused";
       j.bytesPerSec = 0;
       j.etaSec = null;
-      recordEvent(j, "Ожидает подтверждения удаления источника.");
+      recordEvent(j, "Копия готова. Снятие с пула ждёт явного подтверждения.");
     } else {
       if (!v.confirmed || !safeRemove(s, j)) {
         j.state = "paused";
@@ -309,7 +318,7 @@ const GameLibrary = (() => {
       "Проверка SHA-256",
       g.launcher === "Без лаунчера" ? "Обновление пути запуска" : "Обновление пути в " + g.launcher,
       toSSD ? "Сжатие на SSD" : "Сжатие в архиве",
-      toSSD ? "Удаление из архива" : "Удаление с SSD",
+      toSSD ? "Архив остаётся" : "Снятие копии с SSD",
     ];
     const rows = names
       .map((name, i) => {

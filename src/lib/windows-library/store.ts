@@ -9,6 +9,7 @@ export function emptyLibraryState(): LibraryState {
     indexes: [],
     catalog: [],
     games: [],
+    pins: {},
     jobs: [],
     settings: { fastSsd: null },
     covers: {},
@@ -24,6 +25,7 @@ export async function loadLibraryState(directory: string): Promise<LibraryState>
       indexes: Array.isArray(parsed.indexes) ? parsed.indexes : [],
       catalog: Array.isArray(parsed.catalog) ? parsed.catalog : [],
       games: Array.isArray(parsed.games) ? parsed.games : [],
+      pins: pinsOf(parsed.pins),
       jobs: Array.isArray(parsed.jobs) ? parsed.jobs : [],
       settings: parsed.settings?.fastSsd ? { fastSsd: parsed.settings.fastSsd } : empty.settings,
       covers: parsed.covers && typeof parsed.covers === "object" ? parsed.covers : {},
@@ -32,6 +34,15 @@ export async function loadLibraryState(directory: string): Promise<LibraryState>
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return emptyLibraryState();
     throw error;
   }
+}
+
+function pinsOf(value: unknown): Record<string, string> {
+  if (!value || typeof value !== "object") return {};
+  const pins: Record<string, string> = {};
+  for (const [key, item] of Object.entries(value)) {
+    if (typeof item === "string" && item) pins[key] = item;
+  }
+  return pins;
 }
 
 export async function saveLibraryState(directory: string, state: LibraryState): Promise<void> {

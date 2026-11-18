@@ -6,7 +6,7 @@ export function moveRequest(input: {
   confirmed: boolean;
   notRunning: boolean;
 }): { ok: true; body: { action: "play" | "return"; id: string; confirm: true; processes: [] } } | { ok: false; reason: string } {
-  if (!input.confirmed) return { ok: false, reason: "Сначала подтвердите удаление источника." };
+  if (!input.confirmed) return { ok: false, reason: "Сначала подтвердите действие. Без этого файлы не меняются." };
   if (!input.notRunning) return { ok: false, reason: "Отметьте, что игра не запущена. Без этого файлы не трогаем." };
   return { ok: true, body: { action: input.kind, id: input.id, confirm: true, processes: [] } };
 }

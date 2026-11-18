@@ -1,18 +1,20 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, expect, it } from "vitest";
 
 import { encodeMftFixture } from "@/addons/media-games/file-index/mft";
 import { encodeUsnJournal, encodeUsnRecord, UsnReason } from "@/addons/media-games/file-index/usn";
-import { AppError } from "@/lib/app-error";
-import { advanceWindowsLibrary, applyLibraryCommand, emptyLibraryState } from "@/lib/windows-library/adapter";
-import { moveSteamApp, retargetAppManifest } from "@/lib/windows-library/launchers";
-import { MemoryFs } from "@/lib/windows-library/memory-fs";
-import { moveRequest } from "@/lib/windows-library/screen-actions";
-import { encodeReadUsnJournal, encodeUsnJournalData, FSCTL_QUERY_USN_JOURNAL, FSCTL_READ_USN_JOURNAL, parseUsnJournalData, usnJournalLost } from "@/lib/windows-library/usn-journal";
-import type { VolumeIdentity, WinGame } from "@/lib/windows-library/types";
 import { GET, POST } from "@/app/api/windows-library/route";
+import { AppError } from "@/lib/app-error";
+import { evictPreparedGame } from "@/lib/policies/storage-roles";
+import { dispatchOnce } from "@/lib/service/dispatch";
+import { applyLibraryCommand, handleLibraryCommand } from "@/lib/windows-library/adapter";
+import { moveSteamApp, retargetAppManifest } from "@/lib/windows-library/launchers";
+import { moveRequest } from "@/lib/windows-library/screen-actions";
+import { emptyLibraryState, saveLibraryState } from "@/lib/windows-library/store";
+import { encodeReadUsnJournal, encodeUsnJournalData, FSCTL_QUERY_USN_JOURNAL, FSCTL_READ_USN_JOURNAL, parseUsnJournalData, usnJournalLost } from "@/lib/windows-library/usn-journal";
+import type { VolumeIdentity } from "@/lib/windows-library/types";
 
 const dirs: string[] = [];
 afterEach(async () => {
@@ -109,7 +111,7 @@ it("treats a replaced USN journal as one resync walk and keeps a Mac diskutil ca
   expect(forbidden.actions[0]?.type).toBe("refuse");
 });
 
-it("applies a USN create without rereading the MFT and moves a game only after confirm and a matching hash", () => {
+it("applies a USN create without rereading the MFT", () => {
   const state = emptyLibraryState();
   applyLibraryCommand(state, { action: "event", event: { type: "wmi", eventType: 2, identity: disk } });
   applyLibraryCommand(state, { action: "mft", serial: disk.serial, uuid: disk.uuid, fixtureBase64: steamFixture().toString("base64"), texts: [{ relativePath: "Steam/steamapps/appmanifest_424242.acf", text: manifestText() }] });
@@ -121,45 +123,7 @@ it("applies a USN create without rereading the MFT and moves a game only after c
   const applied = applyLibraryCommand(state, { action: "usn", serial: disk.serial, uuid: disk.uuid, journalBase64: Buffer.concat([header, encodeUsnJournal([record])]).toString("base64") }) as { unplaced: number };
   expect(applied.unplaced).toBe(0);
   expect(state.games[0]?.logicalBytes).toBeNull();
-
-  const game = playable(state.games[0]!);
-  state.games = [game];
-  state.settings.fastSsd = { serial: "SSD-1", uuid: "ssd-uuid", root: "S:\\Fast" };
-  expect(() => applyLibraryCommand(state, { action: "play", id: game.id, confirm: false, processes: [] })).toThrow(/confirm/);
-  expect(() => applyLibraryCommand(state, { action: "play", id: game.id, confirm: true, processes: [{ path: "D:\\Steam\\steamapps\\common\\Fixture\\Fixture.exe" }] })).toThrow(/запущена/);
-  const queued = applyLibraryCommand(state, { action: "play", id: game.id, confirm: true, processes: [] }) as { job: { id: string; state: string } };
-  expect(queued.job.state).toBe("queued");
-  const fs = new MemoryFs();
-  fs.writeText("D:/Steam/steamapps/common/Fixture/Fixture.exe", "game");
-  fs.writeText("D:/Steam/steamapps/appmanifest_424242.acf", manifestText());
-  fs.writeText("D:/Steam/steamapps/libraryfolders.vdf", `"libraryfolders"\n{\n"0"\n{\n"path"\t\t"D:\\\\Steam"\n"apps"\n{\n"424242"\t\t"100"\n}\n}\n}\n`);
-  const broken = advanceWindowsLibrary(state, queued.job.id, fs, null, { mutateCopy: (_rel, bytes) => Buffer.concat([bytes, Buffer.from("x")]) });
-  expect(broken.job.state).toBe("error");
-  expect(broken.job.sourceDeleted).toBe(false);
-  expect(fs.readText("D:/Steam/steamapps/common/Fixture/Fixture.exe")).toBe("game");
-
-  const retry = applyLibraryCommand(state, { action: "play", id: game.id, confirm: true, processes: [] }) as { job: { id: string } };
-  const done = advanceWindowsLibrary(state, retry.job.id, fs, null);
-  expect(done.job.state).toBe("done");
-  expect(done.job.verified).toBe(true);
-  expect(done.job.sourceDeleted).toBe(true);
-  expect(done.job.phase).toBe("queue-compact");
-  expect(fs.readText("D:/Steam/steamapps/common/Fixture/Fixture.exe")).toBeNull();
-  expect(fs.readText("S:/Fast/steamapps/common/Fixture/Fixture.exe")).toBe("game");
-  const library = fs.readText("D:/Steam/steamapps/libraryfolders.vdf") ?? "";
-  expect(library).toContain("S:\\Fast");
-  expect(library).not.toMatch(/"424242"\s+"100"/);
-  const nextManifest = fs.readText("S:/Fast/steamapps/appmanifest_424242.acf") ?? "";
-  expect(nextManifest).toContain('"StateFlags"');
-  expect(nextManifest).toContain('"4"');
-  expect(nextManifest).toContain('"FullValidateAfterNextUpdate"');
-  expect(nextManifest).toContain('"0"');
-  const compress = state.jobs.find((job) => job.kind === "compress");
-  expect(compress?.state).toBe("queued");
-  expect(compress?.compactAlgorithm).toBe("XPRESS8K");
-  const held = advanceWindowsLibrary(state, compress!.id, fs, null);
-  expect(held.job.state).toBe("queued");
-  expect(fs.readText("S:/Fast/steamapps/common/Fixture/Fixture.exe")).toBe("game");
+  expect(state.jobs).toEqual([]);
 });
 
 it("rewrites a Steam library entry without asking Steam to download the game again", () => {
@@ -185,6 +149,9 @@ it("keeps the designer games screen on the live API and out of the demo list", a
   expect(games).toContain("s.liveLibrary");
   expect(games).toContain("liveMove");
   expect(games).toContain("globalThis.GameLibrary = GameLibrary");
+  expect(games).toContain("Холодный архив на месте.");
+  expect(live).toContain("Холодная копия на HDD остаётся");
+  expect(live).not.toContain("Источник удаляется");
 });
 
 it("does not enqueue a move from the screen until the dialog is confirmed", () => {
@@ -212,6 +179,123 @@ it("serves an empty library and refuses to run a job inside the request", async 
   delete process.env.SKLAD_DATA_DIR;
 });
 
+it("copies through the shared jobs queue, keeps the HDD source, and removes the pool copy only on an explicit command", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "winlib-play-"));
+  dirs.push(dir);
+  const source = await gameDir(dir);
+  const pool = path.join(dir, "pool");
+  await mkdir(pool);
+  const db = await compactDb(dir);
+  const state = emptyLibraryState();
+  state.settings.fastSsd = { serial: "SSD-1", uuid: "ssd-uuid", root: pool };
+  state.games = [
+    {
+      id: "wg-fixture",
+      title: "Fixture",
+      launcher: "folder",
+      steamAppId: 424242,
+      root: source,
+      installdir: null,
+      manifestPath: null,
+      libraryFoldersPath: null,
+      serial: "WD-1",
+      uuid: disk.uuid,
+      archiveRoot: source,
+      archiveSerial: "WD-1",
+      archiveUuid: disk.uuid,
+      logicalBytes: 13,
+      allocatedBytes: 13,
+      compression: "uncompressed",
+      algorithm: null,
+      cover: { cacheKey: "fixture", source: "name", url: null, cached: false },
+      pool: "archive",
+      online: true,
+    },
+  ];
+  await saveLibraryState(dir, state);
+  const previousData = process.env.SKLAD_DATA_DIR;
+  const previousDb = process.env.SKLAD_COMPACT_DB;
+  process.env.SKLAD_DATA_DIR = dir;
+  process.env.SKLAD_COMPACT_DB = db;
+  try {
+    const poolSource = await readFile("src/lib/windows-library/pool.ts", "utf8");
+    expect(poolSource).not.toContain("delete-source");
+    expect(poolSource).not.toContain("sourceRoot");
+
+    const quiet = await POST(new Request("http://local/api/windows-library", { method: "POST", body: JSON.stringify({ action: "play", id: "wg-fixture", confirm: false, processes: [] }) }));
+    expect(quiet.status).toBe(400);
+    const running = await POST(new Request("http://local/api/windows-library", { method: "POST", body: JSON.stringify({ action: "play", id: "wg-fixture", confirm: true, processes: [{ path: path.join(source, "play.mjs") }] }) }));
+    expect(running.status).toBe(409);
+    await expect(stat(path.join(dir, "jobs.json"))).rejects.toThrow();
+
+    const closed = emptyLibraryState();
+    closed.settings.fastSsd = { serial: "SSD-1", uuid: "ssd-uuid", root: "F:\\Alcohol" };
+    closed.games = [{ ...state.games[0]!, id: "wg-e", root: "E:\\Games\\Fixture", archiveRoot: "E:\\Games\\Fixture" }];
+    await saveLibraryState(dir, closed);
+    await expect(handleLibraryCommand({ action: "play", id: "wg-e", confirm: true, processes: [] }, dir)).rejects.toThrow(/E:/);
+    closed.games = [{ ...state.games[0]!, id: "wg-e", root: source, archiveRoot: source }];
+    await saveLibraryState(dir, closed);
+    await expect(handleLibraryCommand({ action: "play", id: "wg-e", confirm: true, processes: [] }, dir)).rejects.toThrow(/Alcohol/);
+    await saveLibraryState(dir, state);
+    await expect(stat(path.join(dir, "jobs.json"))).rejects.toThrow();
+
+  const played = await POST(new Request("http://local/api/windows-library", { method: "POST", body: JSON.stringify({ action: "play", id: "wg-fixture", confirm: true, processes: [] }) }));
+  expect(played.status).toBe(200);
+  const first = (await played.json()) as { created: boolean; sourceDeleted: boolean; library: { games: { pool: string; job: { sourceDeleted: boolean; state: string } | null }[] } };
+  expect(first.created).toBe(true);
+  expect(first.sourceDeleted).toBe(false);
+  expect(first.library.games[0]?.pool).toBe("archive");
+  expect(first.library.games[0]?.job).toMatchObject({ state: "queued", sourceDeleted: false });
+  const again = await handleLibraryCommand({ action: "play", id: "wg-fixture", confirm: true, processes: [] }, dir);
+  expect(again).toMatchObject({ created: false, sourceDeleted: false });
+  const queued = JSON.parse(await readFile(path.join(dir, "jobs.json"), "utf8")) as { jobs: { kind: string; sourceDeleted: boolean }[] };
+  expect(queued.jobs).toEqual([expect.objectContaining({ kind: "copy", sourceDeleted: false })]);
+  const catalog = JSON.parse(await readFile(path.join(dir, "windows-library.json"), "utf8")) as { jobs: unknown[] };
+  expect(catalog.jobs).toEqual([]);
+
+  const early = await POST(new Request("http://local/api/windows-library", { method: "POST", body: JSON.stringify({ action: "return", id: "wg-fixture", confirm: true, processes: [] }) }));
+  expect(early.status).toBe(400);
+  expect(await readFile(path.join(source, "data.bin"), "utf8")).toBe("payload-bytes");
+
+  expect(evictPreparedGame("game-exit").evict).toBe(false);
+  expect(evictPreparedGame("space-pressure").evict).toBe(false);
+  const dispatched = await dispatchOnce(dir);
+  expect(dispatched.processed).toContain("game");
+  const done = JSON.parse(await readFile(path.join(dir, "jobs.json"), "utf8")) as { jobs: { kind: string; state: string; verified: boolean; sourceDeleted: boolean }[] };
+  expect(done.jobs).toHaveLength(1);
+  expect(done.jobs[0]).toMatchObject({ kind: "copy", state: "done", verified: true, sourceDeleted: false });
+  expect(await readFile(path.join(source, "data.bin"), "utf8")).toBe("payload-bytes");
+  const library = JSON.parse(await readFile(path.join(dir, "library.json"), "utf8")) as { games: { id: string; pinned: string; copyVerified: boolean; destination: string }[] };
+  expect(library.games).toHaveLength(1);
+  expect(library.games[0]).toMatchObject({ pinned: "until-explicit-remove", copyVerified: true });
+  expect((await stat(path.join(library.games[0]!.destination, "data.bin"))).isFile()).toBe(true);
+  const listed = await GET();
+  const view = (await listed.json()) as { games: { pool: string; root: string; compression: string }[] };
+  expect(view.games[0]).toMatchObject({ pool: "playing", root: source, compression: "uncompressed" });
+
+  await writeFile(path.join(source, "data.bin"), "changed");
+  const drifted = await POST(new Request("http://local/api/windows-library", { method: "POST", body: JSON.stringify({ action: "return", id: "wg-fixture", confirm: true, processes: [] }) }));
+  expect(drifted.status).toBe(400);
+  expect((await stat(path.join(library.games[0]!.destination, "data.bin"))).isFile()).toBe(true);
+  await writeFile(path.join(source, "data.bin"), "payload-bytes");
+
+  const removed = await POST(new Request("http://local/api/windows-library", { method: "POST", body: JSON.stringify({ action: "return", id: "wg-fixture", confirm: true, processes: [] }) }));
+  expect(removed.status).toBe(200);
+  const body = (await removed.json()) as { removed: boolean; sourceKept: boolean; sourceDeleted: boolean; library: { games: { pool: string }[] } };
+  expect(body).toMatchObject({ removed: true, sourceKept: true, sourceDeleted: false });
+  expect(body.library.games[0]?.pool).toBe("archive");
+  await expect(stat(library.games[0]!.destination)).rejects.toThrow();
+  expect(await readFile(path.join(source, "data.bin"), "utf8")).toBe("payload-bytes");
+  const still = JSON.parse(await readFile(path.join(dir, "jobs.json"), "utf8")) as { jobs: unknown[] };
+  expect(still.jobs).toHaveLength(1);
+  } finally {
+    if (previousData === undefined) delete process.env.SKLAD_DATA_DIR;
+    else process.env.SKLAD_DATA_DIR = previousData;
+    if (previousDb === undefined) delete process.env.SKLAD_COMPACT_DB;
+    else process.env.SKLAD_COMPACT_DB = previousDb;
+  }
+});
+
 function steamFixture(): Buffer {
   return encodeMftFixture([
     { recordNumber: 5, parentRecord: 5, isDirectory: true, name: "." },
@@ -229,14 +313,20 @@ function manifestText(): string {
   return `"AppState"\n{\n"appid"\t\t"424242"\n"name"\t\t"Fixture"\n"installdir"\t\t"Fixture"\n"StateFlags"\t\t"4"\n}\n`;
 }
 
-function playable(game: WinGame): WinGame {
-  return {
-    ...game,
-    root: "D:\\Steam\\steamapps\\common\\Fixture",
-    archiveRoot: "D:\\Steam\\steamapps\\common\\Fixture",
-    manifestPath: "D:\\Steam\\steamapps\\appmanifest_424242.acf",
-    libraryFoldersPath: "D:\\Steam\\steamapps\\libraryfolders.vdf",
-    installdir: "Fixture",
-    logicalBytes: 4,
-  };
+async function gameDir(dir: string): Promise<string> {
+  const source = path.join(dir, "Fixture");
+  await mkdir(path.join(source, "saves"), { recursive: true });
+  await writeFile(path.join(source, "data.bin"), "payload-bytes");
+  await writeFile(path.join(source, "saves", "slot.txt"), "1");
+  const exe = path.join(source, "play.mjs");
+  await writeFile(exe, "#!/usr/bin/env node\n");
+  await chmod(exe, 0o755);
+  await writeFile(path.join(source, "sklad-game.json"), JSON.stringify({ name: "Fixture", steamAppId: 424242, exe: "play.mjs", args: [], saves: ["saves/slot.txt"] }));
+  return source;
+}
+
+async function compactDb(dir: string): Promise<string> {
+  const file = path.join(dir, "compact.json");
+  await writeFile(file, JSON.stringify([{ SteamID: 424242, GameName: "Fixture", FolderName: "Fixture", Confidence: 2, CompressionResults: [{ CompType: 1, BeforeBytes: 1000, AfterBytes: 950, TotalResults: 2 }], TotalFiles: 1 }]));
+  return file;
 }
