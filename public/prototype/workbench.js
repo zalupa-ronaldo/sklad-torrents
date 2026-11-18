@@ -3,10 +3,14 @@
 // View helpers take a snapshot; they never query or mutate the document.
 const pages = {
   overview: ["Диспетчер", "LayoutDashboard", "Диски, файлы и обработка в локальной сети."],
+  devices: ["Устройства", "Server", "Носители, свободное место и последние снимки каталога."],
   drives: ["Все файлы", "HardDrive", "Поиск по снимкам всех носителей, включая отключённые."],
+  details: ["Детали файла", "File", "Сведения из индекса и размещение копий."],
+  hosts: ["Хосты", "Monitor", "Хосты qBittorrent: проверка, запись, сброс и удаление."],
   torrents: ["Торренты", "ArrowDownUp", "Раздачи qBittorrent на ваших хостах."],
   scheduler: ["Планировщик", "Clock3", "Одна активная загрузка на физический диск."],
-  jobs: ["Задания", "ListChecks", "Ход операций на ваших хостах."],
+  jobs: ["Очередь задач", "ListChecks", "Копирование, задания и ход AV1 на Windows."],
+  tools: ["Инструменты", "Box", "Индекс, перенос на SSD, сжатие и перекодирование."],
   games: ["Игровая полка", "Gamepad2", "Библиотека игр и подготовка копий на SSD."],
   move: ["Перенос и копирование", "ArrowDownUp", "Выберите файл и носитель назначения."],
   integrity: ["Проверка SHA-256", "Check", "Манифесты файлов и сверка копий."],
@@ -682,15 +686,21 @@ function integrityLive(s) {
 }
 function screen(s) {
   const page = s.ui.page;
-  if (page === "overview") return dashboard(s);
-  if (page === "jobs") return queue(s);
+  if ((page === "devices" || page === "details") && globalThis.LivePages) {
+    const html = LivePages.render(s);
+    if (typeof html === "string") return html;
+  }
+  if (!s.demo && globalThis.LivePages && LivePages.handles(page)) {
+    const html = LivePages.render(s);
+    if (typeof html === "string") return html;
+  }
+  if (page === "overview") return dashboard(s) + (!s.demo && globalThis.LivePages ? LivePages.progressExtra(s) : "");
+  if (page === "jobs") return queue(s) + (!s.demo && globalThis.LivePages ? LivePages.av1(s) : "");
   if (s.loading) return skeleton("Загрузка раздела", 4);
-  if (!s.demo && page === "move") return liveCopy(s);
+  if (!s.demo && page === "move") return card("Перенос и копирование", liveCopy(s));
   if (!s.demo && page === "integrity") return integrityLive(s);
-  if (!s.demo && (page === "localsend" || page === "optical"))
-    return card(pages[page][0], empty("Этот раздел не заполняется ответом панели. Прежние экраны открыты на /legacy."));
   if (page === "drives" || page === "index") return fileSearch(s);
-  if (page === "torrents") return torrentsPage(s);
+  if (page === "torrents") return torrentsPage(s) + (!s.demo && globalThis.LivePages ? LivePages.torrentsExtra(s) : "");
   if (page === "games") return gameShelf(s);
   if (page === "scheduler") return scheduler(s);
   if (page === "policies") return policyPage(s);
@@ -698,3 +708,4 @@ function screen(s) {
 }
 
 globalThis.SkladWorkbench = { screen, shelf, queue, torrentsPage, sidebar, dashboard, fileSearch, policyPage };
+Object.assign(globalThis, { esc, button, card, empty, field, byId, available, diskOf, bytes, dateText, pathOf, queue });

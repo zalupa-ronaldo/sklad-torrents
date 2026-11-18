@@ -147,4 +147,43 @@ describe("collection screens", () => {
     expect(legacy.sidebar).toContain('href="/legacy"');
     expect(legacy.sidebar).not.toContain("Деморежим");
   });
+
+  it("renders the move form, devices, file details, and offline AV1 as text", () => {
+    const code = readFileSync(path.join(process.cwd(), "public/prototype/workbench.js"), "utf8");
+    const pages = readFileSync(path.join(process.cwd(), "public/prototype/live-pages.js"), "utf8");
+    const sandbox: {
+      LivePages?: { render: (state: Record<string, unknown>) => string; av1: (state: Record<string, unknown>) => string };
+      SkladWorkbench?: { screen: (state: Record<string, unknown>) => string };
+    } = {};
+    createContext(sandbox);
+    new Script(code).runInContext(sandbox);
+    new Script(pages).runInContext(sandbox);
+    const base = {
+      demo: false,
+      loading: false,
+      hosts: [{ id: "mac-mini", name: "Mac mini", online: true }],
+      disks: [{ id: "disk-1", label: "Vault", host: "mac-mini", online: true, sizeBytes: 100, freeBytes: 40, mount: "/Volumes/vault", fs: "APFS", lastSeen: "2026-11-18T00:00:00Z" }],
+      files: [{ id: "file-1", name: "notes.txt", diskId: "disk-1", path: "/Volumes/vault/notes.txt", sizeBytes: 12, contentId: "file-1" }],
+      destinations: [{ id: "mac-downloads", label: "Загрузки", online: true }],
+      torrents: [],
+      tasks: [],
+      live: { av1: { online: false, started: false, lanes: [] } },
+      ui: ui("move"),
+    };
+    const move = sandbox.SkladWorkbench?.screen(base) || "";
+    expect(move).toContain('id="move-form"');
+    expect(move).toContain("notes.txt");
+    expect(move).not.toContain("[object Promise]");
+    expect(typeof move).toBe("string");
+    const devices = sandbox.SkladWorkbench?.screen({ ...base, ui: ui("devices") }) || "";
+    expect(devices).toContain("Vault");
+    expect(devices).toContain("Пересканировать");
+    const details = sandbox.SkladWorkbench?.screen({ ...base, ui: { ...ui("details"), fileId: "file-1" } }) || "";
+    expect(details).toContain("SHA-256");
+    expect(details).toContain("/Volumes/vault/notes.txt");
+    expect(details).not.toContain("[object Promise]");
+    const jobs = sandbox.SkladWorkbench?.screen({ ...base, ui: ui("jobs") }) || "";
+    expect(jobs).toContain("Агент ПК не в сети");
+    expect(jobs).toContain("Кодирование не запускалось");
+  });
 });

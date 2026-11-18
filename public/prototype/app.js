@@ -322,10 +322,20 @@ let liveFlight = null;
 async function refreshLive() {
   if (state.demo) return;
   if (liveFlight) return liveFlight;
-  liveFlight = PanelAdapter.loadPanel({ fetchImpl: fetch, timeoutMs: 8000 })
-    .then((snapshot) => {
-      const keepFiles = Boolean(state.ui.fileQuery || state.ui.disk);
-      state = { ...snapshot, ui: state.ui, files: keepFiles ? state.files : snapshot.files, demo: false, catalogError: state.catalogError };
+  liveFlight = Promise.all([
+    PanelAdapter.loadPanel({ fetchImpl: fetch, timeoutMs: 8000 }),
+    globalThis.LegacyApi ? LegacyApi.loadSurface(fetch) : Promise.resolve(null),
+  ])
+    .then(([snapshot, live]) => {
+      const keepFiles = Boolean(state.ui.fileQuery || state.ui.disk || state.ui.page === "move" || state.ui.page === "details");
+      state = {
+        ...snapshot,
+        ui: state.ui,
+        files: keepFiles ? state.files : snapshot.files,
+        demo: false,
+        catalogError: state.catalogError,
+        live,
+      };
       render(state);
     })
     .catch((error) => {
@@ -376,7 +386,7 @@ async function liveTask(name, id) {
   }
   if (j.source === "queue") {
     const action = name === "pause" && j.state === "paused" ? "resume" : name;
-    await liveJson(`/api/jobs/${encodeURIComponent(j.id)}/${encodeURIComponent(action)}`, { method: "POST", headers: { accept: "application/json" } });
+    await LegacyApi.jobControl(fetch, j.id, action);
     await refreshLive();
     return;
   }
@@ -554,6 +564,28 @@ function gameAction(id) {
 
 async function act(name, value) {
   const u = state.ui;
+  if (!state.demo && name === "gameLaunch") {
+    u.form.gameId = value;
+    u.form.gameAction = "launch";
+    name = "gameAct";
+  }
+  if (!state.demo && name === "gameWant") {
+    u.form.gameId = value;
+    u.form.gameAction = "want";
+    name = "gameAct";
+  }
+  if (!state.demo && name === "gameReturn") {
+    u.form.gameId = value;
+    u.form.gameAction = "return";
+    name = "gameAct";
+  }
+  if (!state.demo && globalThis.LegacyApi?.actions?.[name]) {
+    if ((name === "rescan" || name === "compact") && value) u.form.diskId = value;
+    const result = await LegacyApi.actions[name](fetch, state);
+    if (result?.message) message(result.message);
+    if (result?.refresh) await refreshLive();
+    return;
+  }
   switch (name) {
     case "page":
       navigate(value);
@@ -593,8 +625,22 @@ async function act(name, value) {
       u.fileQuery = "";
       break;
     case "file":
+      if (!state.demo) {
+        u.fileId = value;
+        navigate("details");
+        break;
+      }
+      u.modal = { kind: name, id: value };
+      break;
     case "torrent":
       u.modal = { kind: name, id: value };
+      if (!state.demo) u.form.torrentId = value;
+      break;
+    case "backToFiles":
+      navigate("drives");
+      break;
+    case "pickHost":
+      u.form.hostId = value;
       break;
     case "close":
       u.modal = null;
@@ -857,6 +903,7 @@ document.addEventListener("pointerdown", inspectGraph);
 render(state);
 if (state.demo) setInterval(() => advanceTasks(1), 1000);
 else {
+  if (globalThis.LegacyApi) LegacyApi.listenJobs(() => void refreshLive());
   void refreshLive();
   setInterval(() => void refreshLive(), 4000);
 }
