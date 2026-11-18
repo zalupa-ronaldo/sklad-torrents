@@ -210,7 +210,7 @@ export function ProgressBoard() {
           <Count label="Пауза" value={counts.paused} />
           <Count label="Завершено" value={counts.done} />
           <Count label="Ошибка" value={counts.error} />
-          <Link href="/" className={buttonVariants({ variant: "outline" })}>
+          <Link href="/legacy" className={buttonVariants({ variant: "outline" })}>
             Раздачи
           </Link>
         </div>
