@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { expect, it } from "vitest";
 
-import { accountReadings, clipDiag, decideCompact, listOwnedFiles, parseCompactListing, parseCompactSummary, readingsFromQuery, reconcileOwnedRoot, type OwnedFile } from "@/lib/games/compact-measure";
+import { accountReadings, clipDiag, compressionProbeScript, decideCompact, decodeCompactOutput, listOwnedFiles, parseCompactListing, parseCompactSummary, readingsFromQuery, reconcileOwnedRoot, windowsPowershellCandidates, type OwnedFile, type WofState } from "@/lib/games/compact-measure";
 import { localJobHost, hostFacts } from "@/lib/jobs/local-host";
 
 const smoke = "    36864 :  1048576 = 28.4 to 1 XPRESS8K payload.bin";
@@ -54,6 +54,124 @@ it("reads the Russian compact /Q summary that has no per-file line", () => {
   expect(clipDiag("fail C:\\Users\\user\\secret\\payload.bin")).toBe("fail <path>");
 });
 
+const RUSSIAN_SUMMARY_CP866 = Buffer.from(
+  "82e1a5a3ae20e4a0a9abaea23a20352c20aaa0e2a0abaea3aea23a20312e0d0a88a720ada8e520e1a6a0e2ae3a20312c20ada520e1a6a0e2ae3a20342e0d0a84a0adadeba520aea1eaa5acaeac2031ff303532ff33353420a1a0a9e220e1aee5e0a0ada5adeb20a2203430ff36343220a1a0a9e22e0d0a",
+  "hex",
+);
+const RUSSIAN_SUMMARY_CP1251 = Buffer.from(
+  "c2f1e5e3ee20f4e0e9ebeee23a20352c20eae0f2e0ebeee3eee23a20312e0d0ac8e720ede8f520f1e6e0f2ee3a20312c20ede520f1e6e0f2ee3a20342e0d0ac4e0ededfbe520eee1fae5eceeec2031a0303532a033353420e1e0e9f220f1eef5f0e0ede5edfb20e2203430a036343220e1e0e9f22e0d0a",
+  "hex",
+);
+const RUSSIAN_LINE_CP866 = Buffer.from(
+  "202020203336383634203a202031303438353736203d2032382c3420aa203120585052455353384b207061796c6f61642e62696e0d0a",
+  "hex",
+);
+
+const ownedRoot: OwnedFile[] = [
+  { relative: "payload.bin", full: "D:\\pool\\payload.bin", logical: 1_048_576 },
+  { relative: "b.bin", full: "D:\\pool\\b.bin", logical: 2_000 },
+  { relative: "c.bin", full: "D:\\pool\\c.bin", logical: 1_000 },
+  { relative: "d.bin", full: "D:\\pool\\d.bin", logical: 742 },
+];
+
+function ownedSizes(): Map<string, number | null> {
+  return new Map([
+    ["D:\\pool\\payload.bin", 36_864],
+    ["D:\\pool\\b.bin", 2_000],
+    ["D:\\pool\\c.bin", 1_000],
+    ["D:\\pool\\d.bin", 742],
+  ]);
+}
+
+function ownedWof(): Map<string, WofState> {
+  return new Map([
+    ["D:\\pool\\payload.bin", { wof: 36_864, algorithm: "XPRESS8K" }],
+    ["D:\\pool\\b.bin", { wof: 0, algorithm: null }],
+    ["D:\\pool\\c.bin", { wof: 0, algorithm: null }],
+    ["D:\\pool\\d.bin", { wof: 0, algorithm: null }],
+  ]);
+}
+
+it("decodes a cp866 Russian compact /Q summary whose thousands separator is NBSP", () => {
+  const decoded = decodeCompactOutput(RUSSIAN_SUMMARY_CP866);
+  expect(decoded).toMatch(/Данные объемом/);
+  expect(decoded).toContain("\u00a0");
+  expect(parseCompactSummary(Buffer.from(RUSSIAN_SUMMARY_CP866).toString("utf8")).logical).toBeNull();
+  expect(parseCompactSummary(decoded)).toEqual({ fileCount: 5, compressedCount: 1, logical: 1_052_354, stored: 40_642 });
+  expect(parseCompactSummary(decodeCompactOutput(RUSSIAN_SUMMARY_CP1251))).toEqual({
+    fileCount: 5,
+    compressedCount: 1,
+    logical: 1_052_354,
+    stored: 40_642,
+  });
+  const line = decodeCompactOutput(RUSSIAN_LINE_CP866);
+  expect(parseCompactListing(line).get("payload.bin")).toEqual({ logical: 1_048_576, stored: 36_864, wof: 36_864 });
+  expect(parseCompactListing("    36864 :  1048576 = 28,4 к 1 XPRESS8K payload.bin").get("payload.bin")?.wof).toBe(36_864);
+});
+
+it("trusts per-file WOF sizes when the compact summary also counts .sklad-managed", () => {
+  const summary = parseCompactSummary(decodeCompactOutput(RUSSIAN_SUMMARY_CP866));
+  const account = reconcileOwnedRoot({
+    files: ownedRoot,
+    sizes: ownedSizes(),
+    wofState: ownedWof(),
+    summary,
+    perFile: new Map(),
+    markerBytes: 36,
+    markerFiles: 1,
+  });
+  expect(account).toMatchObject({
+    known: true,
+    compressed: true,
+    files: 4,
+    logical: 1_052_318,
+    allocated: 40_606,
+    wof: 36_864,
+  });
+  expect(account.reason).toMatch(/GetCompressedFileSizeW/);
+  expect(account.reason).toMatch(/\.sklad-managed/);
+  expect(account.reason).not.toMatch(/не содержит сводку/);
+
+  const unread = reconcileOwnedRoot({
+    files: ownedRoot,
+    sizes: ownedSizes(),
+    wofState: ownedWof(),
+    summary: { fileCount: null, compressedCount: null, logical: null, stored: null },
+    perFile: new Map(),
+  });
+  expect(unread).toMatchObject({ known: true, compressed: true, logical: 1_052_318, allocated: 40_606, wof: 36_864 });
+  expect(unread.reason).not.toMatch(/не содержит сводку/);
+
+  const unknownWof = new Map<string, WofState>(ownedRoot.map((file) => [file.full, { wof: null, algorithm: null }]));
+  const fallback = reconcileOwnedRoot({
+    files: ownedRoot,
+    sizes: ownedSizes(),
+    wofState: unknownWof,
+    summary,
+    perFile: new Map(),
+    markerBytes: 36,
+    markerFiles: 1,
+  });
+  expect(fallback).toMatchObject({ known: true, compressed: true, logical: 1_052_318, allocated: 40_606, wof: 40_606 });
+  expect(fallback.reason).toMatch(/не требуется/);
+});
+
+it("finds powershell.exe under SystemRoot and does not read PATH", () => {
+  expect(windowsPowershellCandidates({ PATH: "", Path: "C:\\missing" } as unknown as NodeJS.ProcessEnv)).toEqual([
+    "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+    "C:\\Windows\\Sysnative\\WindowsPowerShell\\v1.0\\powershell.exe",
+  ]);
+  expect(windowsPowershellCandidates({ SystemRoot: "D:\\WinNT", PATH: "C:\\no-powershell" } as unknown as NodeJS.ProcessEnv)[0]).toBe(
+    "D:\\WinNT\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+  );
+  const script = compressionProbeScript();
+  expect(script).toMatch(/GetCompressedFileSizeW/);
+  expect(script).toMatch(/GetFileInformationByHandleEx/);
+  expect(script).toMatch(/0x90310/);
+  expect(script).toMatch(/0x80000017/);
+  expect(script).not.toMatch(/powershell\.exe/);
+});
+
 it("stops at a symlink and at E: before reading a file", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "sklad-compact-"));
   await writeFile(path.join(root, "payload.bin"), "x");
@@ -65,6 +183,17 @@ it("stops at a symlink and at E: before reading a file", async () => {
   const closed = await listOwnedFiles("E:\\Games\\Owned");
   expect(closed.ok).toBe(false);
   if (!closed.ok) expect(closed.reason).toMatch(/E и Z/);
+
+  const marked = await mkdtemp(path.join(tmpdir(), "sklad-compact-"));
+  await writeFile(path.join(marked, "payload.bin"), Buffer.alloc(8));
+  await writeFile(path.join(marked, ".sklad-managed"), Buffer.alloc(36));
+  const owned = await listOwnedFiles(marked);
+  expect(owned.ok).toBe(true);
+  if (!owned.ok) return;
+  expect(owned.files.map((file) => file.relative)).toEqual(["payload.bin"]);
+  expect(owned.files[0]?.logical).toBe(8);
+  expect(owned.markerBytes).toBe(36);
+  expect(owned.markerFiles).toBe(1);
 });
 
 it("names the process platform and leaves the other hosts unconfigured", () => {
