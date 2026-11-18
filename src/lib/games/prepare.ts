@@ -208,7 +208,7 @@ async function execute(store: ReturnType<typeof createJobStore>, directory: stri
   };
 }
 
-export async function measureGame(id: string, directory = dataDir()): Promise<Record<string, unknown>> {
+export async function measureGame(id: string, directory = dataDir(), options?: { debugProbe?: boolean }): Promise<Record<string, unknown>> {
   const games = await listGames(directory);
   const game = games.find((item) => item.id === id);
   if (!game) return blocked("Игры в библиотеке нет.");
@@ -221,7 +221,8 @@ export async function measureGame(id: string, directory = dataDir()): Promise<Re
   if (process.platform !== "win32") {
     return { ok: false, ready: false, recompressed: false, executed: false, error: "compact /Q только на Windows. Повторное сжатие не запускается.", game: publicGame(game) };
   }
-  const account = await measureWindowsRoot(game.destination);
+  const debugProbe = options?.debugProbe === true || process.env.SKLAD_COMPACT_DEBUG === "1";
+  const account = await measureWindowsRoot(game.destination, { debugProbe });
   const measured = account.compressed && account.logical != null && account.allocated != null && account.allocated < account.logical;
   game.logicalBytes = account.logical;
   game.allocatedBytes = account.allocated;
@@ -245,6 +246,7 @@ export async function measureGame(id: string, directory = dataDir()): Promise<Re
     allocatedBytes: account.allocated,
     wofBytes: account.wof,
     reason: account.reason,
+    ...(account.probe ? { probe: account.probe } : {}),
     game: publicGame(game),
   };
 }

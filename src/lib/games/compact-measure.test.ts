@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { expect, it } from "vitest";
 
-import { accountReadings, clipDiag, compressionProbeScript, decideCompact, decodeCompactOutput, encodePowerShellCommand, finishMeasurement, listOwnedFiles, parseCompactListing, parseCompactSummary, parseSizeProbeOutput, powershellProbeArgs, readingsFromQuery, reconcileOwnedRoot, stripPowerShellNoise, windowsPowershellCandidates, type OwnedFile, type WofState } from "@/lib/games/compact-measure";
+import { accountReadings, buildProbeReport, clipDiag, compressionProbeScript, decideCompact, decodeCompactOutput, encodePowerShellCommand, finishMeasurement, listOwnedFiles, measureDebugRequested, parseCompactListing, parseCompactSummary, parseSizeProbeOutput, powershellProbeArgs, readingsFromQuery, reconcileOwnedRoot, stripPowerShellNoise, windowsPowershellCandidates, type OwnedFile, type WofState } from "@/lib/games/compact-measure";
 import { localJobHost, hostFacts } from "@/lib/jobs/local-host";
 
 const smoke = "    36864 :  1048576 = 28.4 to 1 XPRESS8K payload.bin";
@@ -177,10 +177,10 @@ it("finds powershell.exe under SystemRoot and does not read PATH", () => {
   );
   const script = compressionProbeScript();
   expect(script).toMatch(/GetCompressedFileSizeW/);
-  expect(script).toMatch(/OpenStandardOutput/);
+  expect(script).toMatch(/Write-Output/);
+  expect(script).not.toMatch(/OpenStandardOutput/);
   expect(script).toMatch(/\$ProgressPreference = 'SilentlyContinue'/);
-  expect(script).not.toMatch(/OutputEncoding/);
-  expect(script).not.toMatch(/Write-Output/);
+  expect(script).not.toMatch(/\[Console\]::OutputEncoding/);
   expect(script).toMatch(/GetFileInformationByHandleEx/);
   expect(script).toMatch(/0x90310/);
   expect(script).toMatch(/0x80000017/);
@@ -292,6 +292,47 @@ it("counts only WOF-backed files and drops a PowerShell progress record from the
   expect(account.reason).not.toMatch(/S="progress"/);
   expect(stripPowerShellNoise(`Имя алгоритма в сводке не названо. ${clixml}`)).toBe("Имя алгоритма в сводке не названо.");
   expect(clipDiag(clixml)).toBe("");
+});
+
+it("parses a Windows PowerShell 5.1 stdout capture and ignores CLIXML on stderr", () => {
+  const lines = [
+    '{"path":"C:\\\\pool\\\\game\\\\payload.bin","allocated":36864,"wof":36864,"algorithm":"XPRESS8K"}\r\n',
+    '{"path":"C:\\\\pool\\\\game\\\\sklad-game.json","allocated":97,"wof":0,"algorithm":null}\r\n',
+  ].join("");
+  const utf16 = Buffer.from(lines, "utf16le");
+  const utf8 = Buffer.from(lines, "utf8");
+  const expected = [
+    { path: "C:\\pool\\game\\payload.bin", allocated: 36_864, wof: 36_864, algorithm: "XPRESS8K" },
+    { path: "C:\\pool\\game\\sklad-game.json", allocated: 97, wof: 0, algorithm: null },
+  ];
+  expect(parseSizeProbeOutput(utf16).rows).toEqual(expected);
+  expect(parseSizeProbeOutput(utf8).rows).toEqual(expected);
+  const stderr = '#< CLIXML <Objs Version="1.1.0.1" xmlns="http://schemas.microsoft.com/powershell/2004/04"><Obj S="progress" RefId="0"><TN RefId="0"><T>System.Management.Automation.PSCustomObject</T></TN><MS><I64 N="SourceId">1</I64>';
+  expect(parseSizeProbeOutput(utf16).rows).toEqual(expected);
+  const script = compressionProbeScript();
+  const report = buildProbeReport({
+    exitCode: 0,
+    stdout: utf16,
+    stderr,
+    stderrBytes: Buffer.byteLength(stderr),
+    powershell: "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+    argv: powershellProbeArgs(script),
+    script,
+    rows: parseSizeProbeOutput(utf16).rows.length,
+  });
+  expect(report.exitCode).toBe(0);
+  expect(report.stdoutBytes).toBe(utf16.length);
+  expect(report.rows).toBe(2);
+  expect(report.stderr).toBe("");
+  expect(report.stderrBytes).toBeGreaterThan(0);
+  expect(report.argv[4]).toBe("-EncodedCommand");
+  expect(Buffer.from(report.argv[5]!, "base64").toString("utf16le")).toBe(script);
+  expect(report.script).toContain("Write-Output");
+  expect(report.stdoutPreview).toContain("payload.bin");
+  expect(report.stdoutPreview).not.toMatch(/CLIXML/);
+  expect(measureDebugRequested(["--debug-probe"], {} as unknown as NodeJS.ProcessEnv)).toBe(true);
+  expect(measureDebugRequested([], { SKLAD_COMPACT_DEBUG: "1" } as unknown as NodeJS.ProcessEnv)).toBe(true);
+  expect(measureDebugRequested([], { SKLAD_COMPACT_DEBUG: "0" } as unknown as NodeJS.ProcessEnv)).toBe(false);
 });
 
 it("stops at a symlink and at E: before reading a file", async () => {

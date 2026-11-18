@@ -357,7 +357,7 @@ export async function listOwnedFiles(root: string): Promise<{ ok: true; files: O
   return { ok: true, files, markerBytes, markerFiles };
 }
 
-export async function measureWindowsRoot(root: string): Promise<CompactAccount> {
+export async function measureWindowsRoot(root: string, options?: { debugProbe?: boolean }): Promise<CompactAccount & { probe?: ProbeDiagnostic }> {
   const listed = await listOwnedFiles(root);
   if (!listed.ok) return { ...decideCompact({ files: 0, logical: null, allocated: null, wof: null }), reason: listed.reason };
   if (process.platform !== "win32") {
@@ -367,7 +367,7 @@ export async function measureWindowsRoot(root: string): Promise<CompactAccount> 
     compressedSizes(listed.files.map((file) => file.full)),
     compactQuery(root),
   ]);
-  return finishMeasurement({
+  const account = finishMeasurement({
     files: listed.files,
     markerBytes: listed.markerBytes,
     markerFiles: listed.markerFiles,
@@ -376,6 +376,8 @@ export async function measureWindowsRoot(root: string): Promise<CompactAccount> 
     queryOk: query.ok,
     queryNote: query.note,
   });
+  if (!options?.debugProbe) return account;
+  return { ...account, probe: sizes.probe };
 }
 
 export function finishMeasurement(input: {
@@ -448,18 +450,56 @@ export function powershellProbeArgs(script: string): string[] {
   return ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encodePowerShellCommand(script)];
 }
 
+export function measureDebugRequested(args: readonly string[] = [], env: NodeJS.ProcessEnv = process.env): boolean {
+  return args.includes("--debug-probe") || env.SKLAD_COMPACT_DEBUG === "1";
+}
+
+/** Shown only for `game measure --debug-probe` or SKLAD_COMPACT_DEBUG=1. */
+export interface ProbeDiagnostic {
+  exitCode: number | null;
+  stdoutBytes: number;
+  stdoutPreview: string;
+  stderrBytes: number;
+  stderr: string;
+  powershell: string;
+  argv: string[];
+  script: string;
+  rows: number;
+}
+
+export function buildProbeReport(input: {
+  exitCode: number | null;
+  stdout: Buffer;
+  stderr: string;
+  stderrBytes: number;
+  powershell: string;
+  argv: string[];
+  script: string;
+  rows: number;
+}): ProbeDiagnostic {
+  const preview = stripPowerShellNoise(probeText(input.stdout)).replace(/\s+/g, " ").trim().slice(0, 400);
+  return {
+    exitCode: input.exitCode,
+    stdoutBytes: input.stdout.length,
+    stdoutPreview: preview,
+    stderrBytes: input.stderrBytes,
+    stderr: userFacingDiag(input.stderr),
+    powershell: input.powershell,
+    argv: input.argv,
+    script: input.script,
+    rows: input.rows,
+  };
+}
+
 /** PowerShell probe. Size and WOF are separate types so a WOF compile failure still returns allocated bytes. */
 export function compressionProbeScript(): string {
   return `
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 $InformationPreference = 'SilentlyContinue'
+try { $OutputEncoding = New-Object System.Text.UTF8Encoding $false } catch {}
 function Emit([hashtable]$row) {
-  $json = ($row | ConvertTo-Json -Compress) + [char]10
-  $bytes = [System.Text.Encoding]::UTF8.GetBytes($json)
-  $stream = [Console]::OpenStandardOutput()
-  $stream.Write($bytes, 0, $bytes.Length)
-  $stream.Flush()
+  Write-Output ($row | ConvertTo-Json -Compress)
 }
 Add-Type -TypeDefinition @'
 using System;
@@ -576,13 +616,16 @@ foreach ($item in $paths) {
 `.trim();
 }
 
-async function compressedSizes(files: readonly string[]): Promise<{ ok: boolean; values: Map<string, number | null>; states: Map<string, WofState>; total: number | null; code: number | null; note: string }> {
+async function compressedSizes(files: readonly string[]): Promise<{ ok: boolean; values: Map<string, number | null>; states: Map<string, WofState>; total: number | null; code: number | null; note: string; probe: ProbeDiagnostic }> {
   const empty = new Map<string, number | null>();
   const states = new Map<string, WofState>();
-  if (files.length === 0) return { ok: true, values: empty, states, total: 0, code: 0, note: "" };
-  const bin = await resolveWindowsPowershell();
   const script = compressionProbeScript();
-  const result = await run(bin, powershellProbeArgs(script), { SKLAD_COMPACT_FILES: JSON.stringify(files) });
+  const bin = await resolveWindowsPowershell();
+  const argv = powershellProbeArgs(script);
+  if (files.length === 0) {
+    return { ok: true, values: empty, states, total: 0, code: 0, note: "", probe: buildProbeReport({ exitCode: 0, stdout: Buffer.alloc(0), stderr: "", stderrBytes: 0, powershell: bin, argv, script, rows: 0 }) };
+  }
+  const result = await run(bin, argv, { SKLAD_COMPACT_FILES: JSON.stringify(files) });
   const parsed = parseSizeProbeOutput(result.stdoutBuf);
   const values = new Map<string, number | null>();
   for (const row of parsed.rows) {
@@ -592,14 +635,24 @@ async function compressedSizes(files: readonly string[]): Promise<{ ok: boolean;
   const numbers = files.map((file) => values.get(file) ?? null);
   const complete = numbers.every((value) => value != null);
   const total = complete ? numbers.reduce<number>((sum, value) => sum + (value ?? 0), 0) : null;
-  if (complete) return { ok: true, values, states, total, code: result.code, note: "" };
-  return { ok: false, values, states, total, code: result.code, note: "GetCompressedFileSizeW не вернул размер каждого файла корня." };
+  const probe = buildProbeReport({
+    exitCode: result.code,
+    stdout: result.stdoutBuf,
+    stderr: result.stderr || result.error,
+    stderrBytes: result.stderrBuf.length,
+    powershell: bin,
+    argv,
+    script,
+    rows: parsed.rows.length,
+  });
+  if (complete) return { ok: true, values, states, total, code: result.code, note: "", probe };
+  return { ok: false, values, states, total, code: result.code, note: "GetCompressedFileSizeW не вернул размер каждого файла корня.", probe };
 }
 
 export function parseSizeProbeOutput(buf: Buffer): { ok: boolean; note: string; rows: Array<{ path: string; allocated: number | null; wof: number | null; algorithm: WofAlgorithm | null }> } {
   const rows: Array<{ path: string; allocated: number | null; wof: number | null; algorithm: WofAlgorithm | null }> = [];
-  const text = decodeProcessText(buf);
-  for (const chunk of jsonObjects(text)) {
+  const text = probeText(buf);
+  for (const chunk of parsedRows(text)) {
     try {
       const parsed = JSON.parse(chunk) as { path?: string; allocated?: number | null; wof?: number | null; algorithm?: string | null };
       if (!parsed.path || typeof parsed.path !== "string") continue;
@@ -613,6 +666,25 @@ export function parseSizeProbeOutput(buf: Buffer): { ok: boolean; note: string; 
   }
   if (rows.length === 0) return { ok: false, note: "GetCompressedFileSizeW не вернул ни одной строки.", rows };
   return { ok: true, note: "", rows };
+}
+
+/** Windows PowerShell 5.1 Write-Output to a pipe is often UTF-16LE. Pick the decode that yields JSON rows. */
+function probeText(buf: Buffer): string {
+  if (buf.length === 0) return "";
+  const utf16 = buf.toString("utf16le").replace(/^\uFEFF/, "");
+  const utf8 = buf.toString("utf8").replace(/^\uFEFF/, "");
+  return parsedRows(utf16).length >= parsedRows(utf8).length ? utf16 : utf8;
+}
+
+function parsedRows(text: string): string[] {
+  return jsonObjects(text).filter((chunk) => {
+    try {
+      const parsed = JSON.parse(chunk) as { path?: unknown };
+      return typeof parsed.path === "string" && parsed.path.length > 0;
+    } catch {
+      return false;
+    }
+  });
 }
 
 function jsonObjects(text: string): string[] {
@@ -715,7 +787,7 @@ export function clipDiag(text: string): string {
     .slice(0, 240);
 }
 
-function run(bin: string, args: string[], env: Record<string, string>): Promise<{ code: number | null; stdout: string; stdoutBuf: Buffer; stderr: string; error: string }> {
+function run(bin: string, args: string[], env: Record<string, string>): Promise<{ code: number | null; stdout: string; stdoutBuf: Buffer; stderr: string; stderrBuf: Buffer; error: string }> {
   return new Promise((resolve) => {
     const child = spawn(bin, args, { shell: false, windowsHide: true, env: { ...process.env, ...env }, stdio: ["ignore", "pipe", "pipe"] });
     const out: Buffer[] = [];
@@ -730,11 +802,11 @@ function run(bin: string, args: string[], env: Record<string, string>): Promise<
       if (errLen < 64_000) err.push(chunk);
       errLen += chunk.length;
     });
-    child.on("error", (error) => resolve({ code: null, stdout: "", stdoutBuf: Buffer.alloc(0), stderr: "", error: error.message }));
+    child.on("error", (error) => resolve({ code: null, stdout: "", stdoutBuf: Buffer.alloc(0), stderr: "", stderrBuf: Buffer.alloc(0), error: error.message }));
     child.on("close", (code) => {
       const stdoutBuf = Buffer.concat(out);
       const stderrBuf = Buffer.concat(err);
-      resolve({ code, stdout: decodeProcessText(stdoutBuf), stdoutBuf, stderr: decodeProcessText(stderrBuf), error: "" });
+      resolve({ code, stdout: decodeProcessText(stdoutBuf), stdoutBuf, stderr: decodeProcessText(stderrBuf), stderrBuf, error: "" });
     });
   });
 }
