@@ -97,6 +97,10 @@ docker compose up -d --build
 
 Сеть `lan` не `internal`, поэтому из контейнера открываются `192.168.0.16:4730`, `192.168.0.16:8080` и `192.168.0.16:18080`. Эти порты compose наружу не публикует. `.env`, ключи и пароли в образ и в git не входят.
 
+Виртуальная машина Docker на Mac для этой панели — 1536 МиБ. Сборка на стадии «Running TypeScript» без потолка кучи её убивала. Образ в три стадии. На стадии `build` стоит `NODE_OPTIONS=--max-old-space-size=768`: это потолок кучи V8, не размер всей машины. Не поднимайте 768, пока машина остаётся 1536 МиБ. Сначала `next build` при `SKLAD_DOCKER_BUILD=1`: повторный проход типов внутри Next выключен, чтобы не держать две кучи, и Next записывает типы маршрутов. Затем один `tsc -p tsconfig.docker.json` без плагина Next и без тестов. CI по-прежнему гоняет `npm test`, `npm run build`, полный `tsc` и `docker build` образа панели.
+
+В простое контейнер не крутит таймеры дисков, очереди и анонса. Подробности и замер — в [docs/idle-cpu.md](docs/idle-cpu.md). Игровой режим на Windows — в [docs/game-mode.md](docs/game-mode.md): идея паузы фона взята у Steam и Playnite, их код не копировался.
+
 ### Windows
 
 Тот же корень репозитория. Сборщик `agents/pc-agent/collect.mts` работает только при `process.platform === "win32"` и вызывает `powershell.exe`. Процесс `node` внутри Linux-дистрибутива WSL — это Linux: тома не читаются, ответ «Сборщик Windows запущен не на Windows.» Запускайте Windows-сборку Node (cmd или PowerShell на Windows), не `node` из WSL.

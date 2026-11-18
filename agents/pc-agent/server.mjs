@@ -7,10 +7,12 @@
  */
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
 import http from "node:http";
+import { tmpdir } from "node:os";
 import { register } from "node:module";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 import {
   advanceMock,
@@ -37,6 +39,7 @@ import {
   restoreJob,
   scheduleHolds,
 } from "./load-policy.mjs";
+import { consumeWatchLine, createGameService, watchGameProcesses } from "./game-mode.mjs";
 
 // Lets /v1/index load the TypeScript NTFS indexer. Job routes do not use it.
 try {
@@ -57,6 +60,7 @@ const LOG = process.env.SKLAD_PC_AGENT_LOG || (process.env.SKLAD_PC_AGENT_LOG_DI
 const STARTED = Date.now();
 const VERSION = readVersion();
 let queueUserPaused = false;
+let gameActive = false;
 loadState();
 note(`queue restored paused=${[...jobs.values()].filter((job) => job.state === "paused").length} queued=${[...jobs.values()].filter((job) => job.state === "queued").length}`);
 
@@ -84,6 +88,7 @@ server.listen(PORT, HOST, () => {
   const address = server.address();
   const port = address && typeof address === "object" ? address.port : PORT;
   process.stdout.write(`sklad-pc-agent ${port}\n`);
+  if (!MOCK && process.platform === "win32") void armGameWatch();
 });
 
 async function handle(req, res) {
@@ -192,6 +197,38 @@ async function handle(req, res) {
     if (req.method === "POST" && parts[3] === "confirm") {
       const body = await readBody(req);
       send(res, 200, confirmJob(job, body.deleteSource === true));
+      return;
+    }
+  }
+  if (parts[0] === "v1" && parts[1] === "game-mode") {
+    const service = await gameService();
+    if (req.method === "GET" && parts.length === 2) {
+      send(res, 200, service.view());
+      return;
+    }
+    if (req.method === "GET" && parts[2] === "events") {
+      writeGameEvents(req, res, service);
+      return;
+    }
+    if (req.method === "POST" && parts.length === 2) {
+      const body = await readBody(req);
+      if (body.mode !== "on" && body.mode !== "off" && body.mode !== "auto") {
+        send(res, 400, { error: "Нужен режим on, off или auto." });
+        return;
+      }
+      send(res, 200, await service.sync({ mode: body.mode }));
+      return;
+    }
+    if (req.method === "POST" && parts[2] === "library") {
+      const body = await readBody(req);
+      const entries = Array.isArray(body.entries) ? body.entries.slice(0, 500) : [];
+      service.setLibrary(entries.filter((entry) => entry && typeof entry.name === "string").map((entry) => ({
+        name: String(entry.name).slice(0, 200),
+        exe: typeof entry.exe === "string" ? entry.exe.slice(0, 200) : undefined,
+        root: typeof entry.root === "string" ? entry.root.slice(0, 300) : undefined,
+        source: entry.source === "steam" ? "steam" : "sklad",
+      })));
+      send(res, 200, await service.sync({}));
       return;
     }
   }
@@ -309,19 +346,142 @@ function createJob(body) {
   throw httpError(400, "Неизвестный тип задания.");
 }
 
+let gameServicePromise;
+function gameService() {
+  if (!gameServicePromise) {
+    gameServicePromise = (async () => {
+      const logic = await import("../../src/lib/game-mode/session.ts");
+      return createGameService({
+        empty: logic.emptyHold,
+        reduce: logic.reduceGame,
+        viewOf: (state) => logic.gameView(state, MOCK ? "mock" : "ok"),
+        mock: MOCK,
+        jobs: () => [...jobs.values()].map((job) => ({
+          id: job.id,
+          kind: job.kind,
+          pid: Number.isInteger(job.pid) ? job.pid : null,
+          userPaused: job.userPaused === true,
+        })),
+        holdJobs: holdJobsForGame,
+        apply: async (effects) => {
+          await logic.applyEffects(effects, {
+            pauseQueue() { holdJobsForGame(true); },
+            resumeQueue() { holdJobsForGame(false); },
+            async suspend(pid) { runSoft(logic.suspendArgv(pid, process.platform)); },
+            async resume(pid) { runSoft(logic.continueArgv(pid, process.platform)); },
+            async pauseTorrent() {},
+            async resumeTorrent() {},
+            isSteamPid() { return false; },
+          });
+          rememberPids(logic.nextHeldPids(readPids(), effects));
+        },
+      });
+    })();
+  }
+  return gameServicePromise;
+}
+
+function holdJobsForGame(active) {
+  gameActive = active === true;
+  for (const job of jobs.values()) {
+    if (job.kind !== "transcode" && job.kind !== "compress" && job.kind !== "nsz") continue;
+    if (gameActive) {
+      if (job.userPaused === true) continue;
+      job.gameHeld = true;
+    } else if (job.gameHeld === true) job.gameHeld = false;
+  }
+  persist();
+}
+
+function gameHoldPath() {
+  return process.env.SKLAD_PC_AGENT_GAME_HOLD || path.join(tmpdir(), "sklad-pc-agent-game-hold.json");
+}
+
+function readPids() {
+  try {
+    const parsed = JSON.parse(readFileSync(gameHoldPath(), "utf8"));
+    return Array.isArray(parsed.pids) ? parsed.pids.filter((pid) => Number.isInteger(pid) && pid > 0) : [];
+  } catch {
+    return [];
+  }
+}
+
+function rememberPids(pids) {
+  if (MOCK || process.platform !== "win32") return;
+  const file = gameHoldPath();
+  mkdirSync(path.dirname(file), { recursive: true });
+  const tmp = `${file}.${process.pid}.tmp`;
+  writeFileSync(tmp, JSON.stringify({ pids }), { mode: 0o600 });
+  renameSync(tmp, file);
+}
+
+function runSoft(argv) {
+  if (MOCK || process.platform !== "win32" || !argv || argv.error || !argv.bin) return;
+  if (argv.args.some((arg) => /KILL|taskkill|Stop-Process/i.test(String(arg)))) return;
+  spawn(argv.bin, argv.args, { windowsHide: true, stdio: "ignore" });
+}
+
+function writeGameEvents(req, res, service) {
+  res.writeHead(200, {
+    "Content-Type": "text/event-stream; charset=utf-8",
+    "Cache-Control": "no-cache, no-transform",
+    Connection: "keep-alive",
+  });
+  const send = (view) => {
+    try { res.write(`data: ${JSON.stringify(view)}\n\n`); } catch { /* closed */ }
+  };
+  send(service.view());
+  const stop = service.subscribe(send);
+  req.on("close", stop);
+}
+
+async function armGameWatch() {
+  const logic = await import("../../src/lib/game-mode/session.ts");
+  for (const effect of logic.startupRecovery({ pids: readPids() })) {
+    if (effect.op === "continue") runSoft(logic.continueArgv(effect.pid, process.platform));
+  }
+  rememberPids([]);
+  const service = await gameService();
+  try {
+    const logic = await import("../../src/lib/game-mode/library.ts");
+    const vdf = "C:\\Program Files (x86)\\Steam\\steamapps\\libraryfolders.vdf";
+    if (existsSync(vdf)) {
+      const folders = logic.parseLibraryFolders(readFileSync(vdf, "utf8"));
+      const manifests = [];
+      for (const folder of folders) {
+        const apps = path.win32.join(folder, "steamapps");
+        let names = [];
+        try { names = readdirSync(apps); } catch { continue; }
+        for (const name of names) {
+          if (!/^appmanifest_\d+\.acf$/i.test(name)) continue;
+          try { manifests.push({ folder, text: readFileSync(path.win32.join(apps, name), "utf8") }); } catch { /* skip one */ }
+        }
+      }
+      service.setLibrary(logic.steamLibraryEntries(folders, manifests));
+    }
+  } catch (error) {
+    note(`game-mode library ${error instanceof Error ? error.message : "не прочитана"}`);
+  }
+  watchGameProcesses({
+    spawn,
+    script: fileURLToPath(new URL("./game-watch.ps1", import.meta.url)),
+    onLine: (line) => { void consumeWatchLine(service, line); },
+  });
+}
+
 function tick(job) {
-  if (job.userPaused || job.state === "paused") return job;
+  if (job.userPaused || job.gameHeld || job.state === "paused") return job;
   if (MOCK) return advanceMock(job);
   if (job.kind === "move") return advanceMock(job);
   if (job.spawned) return job;
-  if (job.userPaused || job.state === "paused" || queueUserPaused) return job;
+  if (job.userPaused || job.gameHeld || job.state === "paused" || queueUserPaused || gameActive) return job;
   const load = readLoad();
   const running = [...jobs.values()].filter((item) => item.state === "running").length;
   if (!admitHeavy({
     running,
     maxParallel: effectiveParallel(load.maxParallel),
     userPaused: job.userPaused,
-    queueUserPaused,
+    queueUserPaused: queueUserPaused || gameActive,
     disturb: load.disturb === true,
     scheduleHold: scheduleHolds(load.schedule, new Date().getHours()),
   })) {
@@ -342,9 +502,11 @@ function tick(job) {
   }
   job.spawned = true;
   job.state = "running";
+  job.pid = null;
   job.processPriority = normalizeProcessPriority(load.processPriority);
   const argv = job.spawnArgv || job.plannedArgv;
   const child = spawn(binary, argv.slice(1), { stdio: "ignore" });
+  job.pid = child.pid ?? null;
   child.on("exit", (code) => {
     job.spawned = false;
     job.publishPartial = false;
@@ -441,6 +603,8 @@ function loadState() {
       job.currentFile = decision.currentFile;
       job.publishPartial = false;
       job.spawned = false;
+      job.pid = null;
+      job.gameHeld = false;
       job.pauseRequested = false;
       if (decision.clearError) job.error = null;
       if (decision.becameError === false && job.error && String(job.error).includes("перезапуском")) job.error = null;

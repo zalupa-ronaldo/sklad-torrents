@@ -33,7 +33,7 @@ function form(state) {
 
 const LegacyApi = {
   async loadSurface(fetchImpl) {
-    const [games, policies, policyJobs, auto, queues, opticalDvd, opticalCap, opticalCatalog, devices, localFiles, settings, sendJobs, tools, encodePolicy, progress, transfers, link] =
+    const [games, policies, policyJobs, auto, queues, opticalDvd, opticalCap, opticalCatalog, devices, localFiles, settings, sendJobs, tools, encodePolicy, progress, transfers, link, gameMode] =
       await Promise.all([
         settle(fetchImpl, "/api/games"),
         settle(fetchImpl, "/api/policies"),
@@ -52,6 +52,7 @@ const LegacyApi = {
         settle(fetchImpl, "/api/progress"),
         settle(fetchImpl, "/api/torrents/transfers"),
         settle(fetchImpl, "/api/hosts/link"),
+        settle(fetchImpl, "/api/game-mode"),
       ]);
     let av1 = { online: false, started: false, lanes: [] };
     try {
@@ -59,7 +60,7 @@ const LegacyApi = {
     } catch (error) {
       av1 = { online: false, started: false, lanes: [], error: error instanceof Error ? error.message : "Агент ПК не в сети." };
     }
-    return { games, policies, policyJobs, auto, queues, opticalDvd, opticalCap, opticalCatalog, devices, localFiles, settings, sendJobs, tools, encodePolicy, progress, transfers, link, av1 };
+    return { games, policies, policyJobs, auto, queues, opticalDvd, opticalCap, opticalCatalog, devices, localFiles, settings, sendJobs, tools, encodePolicy, progress, transfers, link, av1, gameMode };
   },
 
   async loadFast(fetchImpl) {
@@ -84,6 +85,19 @@ const LegacyApi = {
     return source;
   },
 
+  listenGameMode(onEvent) {
+    if (typeof EventSource === "undefined") return { close() {} };
+    const source = new EventSource("/api/game-mode/events");
+    source.onmessage = (event) => {
+      try {
+        onEvent(JSON.parse(event.data));
+      } catch {
+        onEvent(null);
+      }
+    };
+    return source;
+  },
+
   downloadFile(diskId, filePath) {
     const url = `/api/files/download?diskId=${encodeURIComponent(diskId)}&path=${encodeURIComponent(filePath)}`;
     if (typeof document === "undefined") return url;
@@ -97,6 +111,13 @@ const LegacyApi = {
   },
 
   actions: {
+    async gameMode(fetchImpl, state) {
+      const mode = state.ui?.form?.gameMode || state.ui?.pending;
+      const value = typeof mode === "string" ? mode : "auto";
+      const data = await request(fetchImpl, "POST", "/api/game-mode", { mode: value === "on" || value === "off" || value === "auto" ? value : "auto" });
+      state.gameMode = data;
+      return { message: data.active ? "Игровой режим: фон на паузе." : "Фон снова работает." };
+    },
     async hostTest(fetchImpl, state) {
       const values = form(state);
       await request(fetchImpl, "POST", "/api/hosts/test", {

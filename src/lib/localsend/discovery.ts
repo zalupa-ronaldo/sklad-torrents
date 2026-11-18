@@ -31,14 +31,13 @@ interface DiscoveryRuntime {
   devices: Map<string, DiscoveredDevice>;
   lastError: string | null;
   socket: dgram.Socket | null;
-  timer: NodeJS.Timeout | null;
   self: (() => DeviceInfo) | null;
 }
 
 function runtime(): DiscoveryRuntime {
   const g = globalThis as { __skladDiscovery?: DiscoveryRuntime };
   if (!g.__skladDiscovery) {
-    g.__skladDiscovery = { devices: new Map(), lastError: null, socket: null, timer: null, self: null };
+    g.__skladDiscovery = { devices: new Map(), lastError: null, socket: null, self: null };
   }
   return g.__skladDiscovery;
 }
@@ -158,7 +157,6 @@ export function startMulticast(getSelf: () => DeviceInfo): void {
       );
     }
   });
-  state.timer = setInterval(announce, 10_000);
 }
 
 function announce(): void {

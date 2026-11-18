@@ -1,18 +1,21 @@
 import { describe, expect, it } from "vitest";
 
-import { confirmSpec, FAST_POLL_MS, flattenShelfGames, HEAVY_POLL_MS, pollPlan, sectionDue, sseDue, SSE_COALESCE_MS } from "../../public/prototype/live-poll.js";
+import { readFileSync } from "node:fs";
+import path from "node:path";
+
+import { confirmSpec, flattenShelfGames, pollPlan, sectionDue, sseDue, SSE_COALESCE_MS } from "../../public/prototype/live-poll.js";
 
 describe("live poll", () => {
-  it("refreshes jobs every 5 seconds, heavy sections every minute, and skips a hidden tab", () => {
-    expect(FAST_POLL_MS).toBe(5_000);
-    expect(HEAVY_POLL_MS).toBe(60_000);
-    expect(pollPlan({ hidden: false, now: 1, lastFast: 0, lastHeavy: 0, fastBusy: false, heavyBusy: false })).toEqual({ fast: false, heavy: true });
-    expect(pollPlan({ hidden: true, now: 1, lastFast: 0, lastHeavy: 0, fastBusy: false, heavyBusy: false })).toEqual({ fast: false, heavy: false });
-    expect(pollPlan({ hidden: false, now: 6_000, lastFast: 0, lastHeavy: 1, fastBusy: false, heavyBusy: false })).toEqual({ fast: true, heavy: false });
-    expect(pollPlan({ hidden: false, now: 61_000, lastFast: 60_000, lastHeavy: 1, fastBusy: false, heavyBusy: false }).heavy).toBe(true);
-    expect(pollPlan({ hidden: false, now: 6_000, lastFast: 0, lastHeavy: 1, fastBusy: true, heavyBusy: false }).fast).toBe(false);
+  it("does not poll on a timer; it refreshes on open, navigation, and job events", () => {
+    expect(pollPlan({ hidden: false, reason: "idle", now: 999_999 })).toEqual({ fast: false, heavy: false });
+    expect(pollPlan({ hidden: true, reason: "open", now: 0 })).toEqual({ fast: false, heavy: false });
+    expect(pollPlan({ hidden: false, reason: "open", now: 0 })).toEqual({ fast: false, heavy: true });
+    expect(pollPlan({ hidden: false, reason: "navigate", now: 0 })).toEqual({ fast: false, heavy: true });
+    expect(pollPlan({ hidden: false, reason: "job", now: 0 })).toEqual({ fast: true, heavy: false });
     expect(sectionDue("games")).toBe(true);
     expect(sectionDue("menu")).toBe(false);
+    const app = readFileSync(path.join(process.cwd(), "public/prototype/app.js"), "utf8");
+    expect(app).not.toMatch(/setInterval\(\s*tick/);
   });
 
   it("coalesces job events to one refresh per 2 seconds", () => {

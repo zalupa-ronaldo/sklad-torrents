@@ -64,6 +64,8 @@ describe("panel container", () => {
 
   it("does not copy the drive-agent, secrets, or /Volumes into the image", () => {
     expect(dockerfile).toContain("--platform=linux/arm64");
+    expect(dockerfile).toContain("NODE_OPTIONS=--max-old-space-size=768");
+    expect(dockerfile).toContain("tsconfig.docker.json");
     expect(dockerfile).toContain("EXPOSE 4317");
     expect(dockerfile).not.toMatch(/drive\.mts/);
     expect(dockerfile).not.toMatch(/\/Volumes/);
@@ -80,5 +82,11 @@ describe("panel container", () => {
     ]) {
       expect(ignore).toContain(excluded);
     }
+    const events = readFileSync(path.join(root, "agents/lib/volume-events.mts"), "utf8");
+    expect(events).not.toContain("mac-agent/collect.mts");
+    expect(events).toContain("mac-agent/mount.mts");
+    expect(events).not.toContain("fs.watch");
+    const workflow = readFileSync(path.join(root, ".github/workflows/windows-emulation.yml"), "utf8");
+    expect(workflow).toContain("docker build");
   });
 });

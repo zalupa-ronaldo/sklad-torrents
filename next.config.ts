@@ -4,6 +4,10 @@ const nextConfig: NextConfig = {
   // Production image runs `node server.js` from this trace. The Mac drive-agent
   // is a host process and must not be copied into the panel image.
   output: "standalone",
+  typescript: {
+    // The image already ran tsc. A second TypeScript heap does not fit in 1536 MiB.
+    ignoreBuildErrors: process.env.SKLAD_DOCKER_BUILD === "1",
+  },
   outputFileTracingExcludes: {
     "/*": [
       "agents/mac-agent/drive.mts",
