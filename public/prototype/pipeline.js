@@ -51,7 +51,7 @@ const Pipeline = (() => {
     const controls = active
       ? button(
           "pause",
-          j.state === "running" ? "Пауза" : "Продолжить",
+          j.state === "running" ? "Пауза" : j.flow?.step === 4 && !j.flow.confirmed ? "Подтвердить удаление" : "Продолжить",
           j.id,
           "secondary-action",
           j.state === "paused" && !taskAvailable(s, j) ? "disabled" : "",

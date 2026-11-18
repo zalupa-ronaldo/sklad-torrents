@@ -12,7 +12,7 @@ const pages = {
   torrents: ["Торренты", "ArrowDownUp", "Раздачи qBittorrent на ваших хостах."],
   scheduler: ["Планировщик", "Clock3", "Одна активная загрузка на физический диск."],
   jobs: ["Очередь задач", "ListChecks", "Ход операций на ваших хостах."],
-  games: ["Игровая полка", "Gamepad2", "Библиотека игр и подготовка копий на SSD."],
+  games: ["Игровая полка", "Gamepad2", "Windows-игры, архивные диски и игровой SSD."],
   move: ["Перенос и копирование", "ArrowDownUp", "Выберите файл и носитель назначения."],
   integrity: ["Проверка SHA-256", "Check", "Манифесты файлов и сверка копий."],
   index: ["Индекс файлов", "Database", "Поиск по снимкам и обновление индекса."],
@@ -133,7 +133,7 @@ function topbar(s) {
 function heading(s) {
   const page = s.ui.page;
   return (
-    `<div><h1 id="title" tabindex="-1">${page === "overview" ? "Диспетчер склада" : pages[page][0]}</h1><p>${pages[page][2]}</p></div>` +
+    `<div><h1 id="title" tabindex="-1">${page === "overview" ? "Диспетчер склада" : page === "games" ? "Игры" : pages[page][0]}</h1><p>${pages[page][2]}</p></div>` +
     (page === "overview"
       ? button("find", icon("Search") + "Найти файл", "", "primary")
       : page === "torrents"
@@ -513,27 +513,6 @@ function scheduler(s) {
       .join("") || empty("Загрузок в очереди нет.")
   );
 }
-function gameShelf(s) {
-  const platforms = ["Все", "Windows", "macOS", "Switch", "PSP", "PS2", "PS4"];
-  const tabs = platforms
-    .map((p) => button("platform", p, p, "secondary-action", `aria-pressed="${s.ui.platform === p}"`))
-    .join("");
-  const library = new Map();
-  for (const f of s.files.filter((f) => f.platform && (s.ui.platform === "Все" || s.ui.platform === f.platform))) {
-    const current = library.get(f.contentId);
-    if (!current || (!available(s, diskOf(s, current)) && available(s, diskOf(s, f)))) library.set(f.contentId, f);
-  }
-  const games = [...library.values()];
-  return `<div class="platforms">${tabs}</div><div class="game-grid">${
-    games
-      .map((f) => {
-        const copy = s.files.find((c) => c.original === f.id),
-          disk = diskOf(s, copy || f);
-        return `<article class="card game-card"><div class="game-cover cover-${esc(f.contentId)}">${icon("Gamepad2")}<b>${esc(f.name)}</b></div><div class="game-meta"><small>${esc(f.platform)} · ${bytes(f.sizeBytes)}</small><p>${esc(disk.label)} · ${available(s, disk) ? "В сети" : "Не в сети"}</p>${button("game", copy ? "Запустить" : f.platform === "macOS" ? "Открыть карточку" : "Подготовить на SSD", f.id, "secondary-action", available(s, disk) ? "" : "disabled")}</div></article>`;
-      })
-      .join("") || empty("Игр для этой платформы пока нет.")
-  }</div>`;
-}
 const operationTitles = {
   move: ["Файлы и раздачи", "Поставить в очередь"],
   integrity: ["Контрольные суммы", "Проверить SHA-256"],
@@ -752,6 +731,7 @@ function policyPage(s) {
   );
 }
 function modalView(s) {
+  if (s.ui.modal.kind.startsWith("win")) return GameLibrary.modal(s);
   if (s.ui.modal.kind === "confirm") {
     const m = s.ui.modal;
     return `<div class="dialog-inner"><div class="dialog-head"><h2 id="dialog-title">${esc(m.title)}</h2></div><p id="confirm-description">${esc(m.description)}</p><div class="confirm-actions">${button("close", "Отмена", "", "secondary-action", 'id="confirm-cancel"')}${button("confirmAction", esc(m.label), "", "danger-action")}</div></div>`;
@@ -816,10 +796,10 @@ function screen(s) {
   if (page === "details") return fileDetails(s);
   if (page === "devices") return devicesPage(s);
   if (page === "jobs") return queue(s);
+  if (page === "games") return GameLibrary.page(s);
   if (s.loading) return skeleton("Загрузка раздела", 4);
   if (page === "drives" || page === "index") return fileSearch(s);
   if (page === "torrents") return torrentsPage(s) + torrentTransfers(s);
-  if (page === "games") return Workshops.games(s) + taskHistory(s, ["game"], "Подготовка игр");
   if (page === "localsend") return Workshops.local(s) + taskHistory(s, ["send", "receive"], "Передачи LocalSend");
   if (page === "optical") return Workshops.optical(s) + taskHistory(s, ["burn", "image"], "Задания привода");
   if (page === "hosts") return Inventory.hosts(s);

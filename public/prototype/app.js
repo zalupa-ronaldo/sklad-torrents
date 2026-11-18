@@ -26,14 +26,13 @@ function createState(scenario, page = "overview") {
       torrentQuery: "",
       period: "60",
       sample: null,
-      platform: "Все",
       taskKind: "",
       category: Object.keys(data.rules)[0],
       form: {},
     },
   };
 }
-let state = createState("normal");
+let state = createState("normal", location.hash === "#games" ? "games" : "overview");
 
 // Update only changed nodes. Ticks and filter changes must not replace a focused input,
 // dismiss a native select, reset a file picker or move the caret.
@@ -413,8 +412,14 @@ function advanceTasks(seconds) {
   Pipeline.tick(state, seconds);
   let changed = state.ui.page === "scheduler" && minute !== Math.floor(state.schedule.clock / 60000);
   // Snapshot the list: completing a copy can enqueue another job.
+  if (GameLibrary.tickCompression(state, seconds) && state.ui.page === "games") changed = true;
   for (const j of [...state.tasks]) {
     if (j.state !== "running") continue;
+    if (j.flow) {
+      GameLibrary.tickMove(state, j, seconds);
+      changed = true;
+      continue;
+    }
     changed = true;
     const milestone = Math.floor(j.progress / 25);
     j.progress = Math.min(100, j.progress + ((seconds * j.bytesPerSec) / Math.max(j.totalBytes, 1)) * 100);
@@ -429,6 +434,7 @@ function advanceTasks(seconds) {
 function taskAction(name, id) {
   const j = byId(state.tasks, id);
   if (!j) return;
+  if (j.flow) return GameLibrary.taskAction(state, j, name);
   if (name === "cancel") {
     j.state = "cancelled";
     j.bytesPerSec = 0;
@@ -553,37 +559,11 @@ function finishTorrent(id) {
   }
   rebalance();
 }
-function gameAction(id) {
-  const f = byId(state.files, id),
-    copy = state.files.find((c) => c.original === id),
-    pool = byId(state.disks, state.gamePool);
-  if (copy || f.platform === "macOS") {
-    if (copy) state.ui.modal = { kind: "launch", id: copy.id };
-    else {
-      navigate("details");
-      state.ui.fileId = id;
-    }
-    return;
-  }
-  if (!available(state, pool) || pool.freeBytes < f.sizeBytes) {
-    message("Игровой SSD недоступен или заполнен.");
-    return;
-  }
-  if (
-    enqueue("copy", "Подготовить игру · " + f.name, pool.host, f.sizeBytes, {
-      type: "game",
-      fileId: id,
-      target: pool.id,
-      dir: "Games/",
-    })
-  )
-    navigate("jobs");
-}
-
 function askConfirm(kind, id, title, description, label) {
   state.ui.modal = { kind: "confirm", action: kind, id, title, description, label };
 }
 async function act(name, value) {
+  if (name.startsWith("win")) return GameLibrary.act(state, name, value);
   if (name.startsWith("inv")) return Inventory.act(name, value);
   if (name.startsWith("pipe")) return Pipeline.act(name, value);
   if (name.startsWith("shop")) return Workshops.act(name, value);
@@ -595,7 +575,11 @@ async function act(name, value) {
     case "confirmAction": {
       const m = u.modal;
       if (m?.kind !== "confirm") break;
-      if (m.action === "pipeDelete") Pipeline.confirmed(m.action, m.id);
+      if (m.action === "winStop") {
+        const g = byId(state.gameLibrary, m.id);
+        if (g) g.running = false;
+      } else if (m.action === "winDelete") GameLibrary.confirm(state, m.id);
+      else if (m.action === "pipeDelete") Pipeline.confirmed(m.action, m.id);
       else Inventory.confirmed(m.action, m.id);
       u.modal = null;
       message("Изменения сохранены.");
@@ -703,12 +687,6 @@ async function act(name, value) {
     case "taskKind":
       u.taskKind = value;
       break;
-    case "platform":
-      u.platform = value;
-      break;
-    case "game":
-      gameAction(value);
-      break;
     case "reindex": {
       const d = byId(state.disks, value);
       if (!available(state, d)) break;
@@ -765,7 +743,6 @@ const simulatedRequests = new Set([
   "run",
   "reindex",
   "copyDetail",
-  "game",
   "toggleTorrent",
   "dry",
   "auto",
@@ -934,13 +911,46 @@ function addTorrent() {
   message("Раздача добавлена.");
   render(state);
 }
+const gameDragType = "application/x-sklad-game";
 document.addEventListener("dragstart", (e) => {
+  const tile = e.target.closest("[data-game-drag]");
+  if (tile && (matchMedia("(max-width:600px)").matches || matchMedia("(pointer:coarse)").matches)) {
+    e.preventDefault();
+    return;
+  }
+  if (tile?.draggable) {
+    e.dataTransfer.setData(gameDragType, tile.dataset.gameDrag);
+    e.dataTransfer.effectAllowed = "move";
+    return;
+  }
   if (e.target.id === "grab-file") e.dataTransfer.setData("text/plain", operationModel(state).file.id);
 });
 document.addEventListener("dragover", (e) => {
+  const zone = e.target.closest("[data-game-drop]");
+  if (zone && e.dataTransfer.types.includes(gameDragType)) {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+    zone.classList.add("wg-over");
+  }
   if (e.target.closest('[data-action="dest"]')) e.preventDefault();
 });
+function clearGameDrop() {
+  document.querySelectorAll(".wg-over").forEach((el) => el.classList.remove("wg-over"));
+}
+document.addEventListener("dragleave", (e) => {
+  const zone = e.target.closest("[data-game-drop]");
+  if (zone && !(e.relatedTarget instanceof Node && zone.contains(e.relatedTarget))) zone.classList.remove("wg-over");
+});
+document.addEventListener("dragend", clearGameDrop);
 document.addEventListener("drop", (e) => {
+  clearGameDrop();
+  const zone = e.target.closest("[data-game-drop]"),
+    game = e.dataTransfer.getData(gameDragType);
+  if (zone && game) {
+    e.preventDefault();
+    void dispatch(zone.dataset.gameDrop === "ssd" ? "winPlay" : "winArchive", game);
+    return;
+  }
   const dest = e.target.closest('[data-action="dest"]');
   if (dest) {
     e.preventDefault();

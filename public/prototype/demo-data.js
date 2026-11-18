@@ -6,6 +6,8 @@ const DemoData = (() => {
   const scenarios = [
     ["normal", "Норма"],
     ["offline", "ПК офлайн"],
+    ["disk-offline", "Диск офлайн"],
+    ["agent-error", "Ошибка агента ПК"],
     ["copying", "Идёт копирование"],
     ["error", "Ошибка"],
     ["empty", "Пусто"],
@@ -71,6 +73,16 @@ const DemoData = (() => {
     debian: "8ca5034e70e3c08b824069f6cbbc3d4c0b4cf0aabba2551204817dc7ccd5ce13",
     audio: "5600053820987c033abe5313c1bae5acb6afcd53cff886d92f1868668f09754b",
     book: "4f18860af4a363e3f56ca35bf06965de253c9d661de896ce0540d60a7e7ffbbb",
+    control: "8b0863e2cbfcee8ddb0e576e2d3ac9501e56e60f507c7a90340cb3c01faf8848",
+    "hollow-windows": "b988e2212c87adcc4d27381fa984434bf71ea33238658c283dde3cd2ad50db85",
+    disco: "8ab31e72869201eae7786c4fea0e3cac35459308f7c9d18200da5eee754a1498",
+    cyberpunk: "2798a5b44445d81a1c27cec561a7bf4fbceb18b1c27b7ed67d8912c95a1c9067",
+    "death-stranding": "ab0df7e93fb45a2f030295c55b0b206ac77071fda11f28516ba6dcbfb4600f7a",
+    satisfactory: "8d66630e6d7853028f647ab7e17f218519c7ba64b54ec3142279f19276132d43",
+    "baldurs-gate": "7cffeeb7227514c4d444beb1cbbcef4bccc8ced4fcbe7d3f47578ea349d17e56",
+    witcher: "7bb766f0071fed6b8710f7e0d5fe7b93885c2014dcf434680c6e38ef764796e7",
+    terraria: "dd5528a65c9bc2aab1e337e3a86248430748f7f3ff70b92c4ca01dcfa2127af4",
+    celeste: "ffdaff15a5274b5692f44f0f83f46787e0fc90baa757029293c6252795abec84",
     "av1:trailer": "ee7e21703df01c00304b5018ebc6a8f9dd29469c3fe61266e1d38811dd625ef5",
     "av1:film": "715fe75929921317644a12804e6a311faf490be2873bc72a07caf41990127268",
   };
@@ -187,6 +199,112 @@ const DemoData = (() => {
     operation: { type: "encode", fileId: "trailer", content: "av1:trailer", size: 737e6, target: "media", dir: "Фильмы/" },
   };
 
+  // Source: IridiumIO/CompactGUI database.json @ 470e294e44d912b89d7f51775e20397dce978efc.
+  const communityEstimates = {
+    hades: { percent: 5.2, samples: 11 },
+    control: { percent: 39.8, samples: 54 },
+    hollow: { percent: 77.4, samples: 75 },
+    disco: { percent: 6.3, samples: 6 },
+    cyberpunk: { percent: 2.6, samples: 108 },
+    gothic: { percent: 17.1, samples: 3 },
+    "death-stranding": { percent: 0.1, samples: 15 },
+    satisfactory: { percent: 45.7, samples: 46 },
+    "baldurs-gate": { percent: 11.5, samples: 131 },
+    witcher: { percent: 3.9, samples: 66 },
+    terraria: { percent: 13.8, samples: 43 },
+    celeste: { percent: 18.8, samples: 8 },
+  };
+  // Local installations; Steam AppIDs identify the matching CompactGUI community records.
+  // id, title, Steam AppID, installed launcher, disk, archive, GB before/allocated,
+  // compression state, algorithm, last launch, flags.
+  const installations = [
+    ["hades", "Hades", 1145360, "Steam", "archive", "archive", 11.1, 8.4, "compressed", "XPRESS8K", "2026-11-16"],
+    ["control", "Control", 870780, "Epic", "pool", "media", 42.6, 35.2, "compressed", "LZX", "2026-11-18", "running"],
+    ["hollow", "Hollow Knight", 367520, "Steam", "pool", "archive", 9.2, 6.4, "compressed", "XPRESS16K", "2026-11-17"],
+    ["disco", "Disco Elysium", 632470, "GOG", "archive", "archive", 19.8, 14.5, "partial", "XPRESS8K", "2026-10-27"],
+    ["cyberpunk", "Cyberpunk 2077", 1091500, "GOG", "media", "media", 88.4, 88.4, "plain", "LZX", "2026-10-12"],
+    ["gothic", "Gothic II", 39510, "Без лаунчера", "archive", "archive", 3.6, 3.6, "plain", "XPRESS4K", "2026-11-03"],
+    [
+      "death-stranding",
+      "Death Stranding Director’s Cut",
+      1850570,
+      "Epic",
+      "media",
+      "media",
+      69.4,
+      65.8,
+      "compressing",
+      "XPRESS16K",
+      "2026-11-14",
+    ],
+    ["satisfactory", "Satisfactory", 526870, "Steam", "archive", "archive", 31.2, 31.2, "queued", "XPRESS8K", "2026-11-08"],
+    [
+      "baldurs-gate",
+      "Baldur’s Gate 3",
+      1086940,
+      "Steam",
+      "archive",
+      "archive",
+      151.3,
+      138.7,
+      "partial",
+      "LZX",
+      "2026-11-12",
+    ],
+    ["witcher", "The Witcher 3", 292030, "GOG", "backup", "backup", 52.1, 46.7, "compressed", "XPRESS16K", "2026-10-18"],
+    ["terraria", "Terraria", 105600, "Без лаунчера", "archive", "archive", 0.73, 0.73, "plain", "XPRESS4K", "2026-10-30"],
+    ["celeste", "Celeste", 504230, "Steam", "media", "media", 1.2, 0.84, "compressed", "XPRESS8K", "2026-11-06"],
+  ];
+
+  function seedLibrary(data, scenario) {
+    data.gameAgentError = ["error", "agent-error"].includes(scenario);
+    data.gameLibrary = [];
+    if (!data.disks.length) return;
+    const pool = data.disks.find((d) => d.id === data.gamePool);
+    pool.freeBytes = 94.8 * GB;
+    if (scenario === "disk-offline") data.disks.find((d) => d.id === "media").online = false;
+    for (const [
+      id,
+      title,
+      appId,
+      launcher,
+      diskId,
+      archiveId,
+      size,
+      allocated,
+      status,
+      algorithm,
+      lastPlayed,
+      flag,
+    ] of installations) {
+      const fileId = id === "hollow" ? "hollow-windows" : id,
+        archivePath = archiveId === "backup" ? "E:/" : data.disks.find((d) => d.id === archiveId).mount;
+      let f = data.files.find((f) => f.id === fileId);
+      if (!f) {
+        f = file(fileId, title, diskId, "Games/", "Игра", size, { platform: "Windows" });
+        data.files.push(f);
+      }
+      Object.assign(f, { allocatedBytes: Math.round(allocated * GB), dir: "Games/", sizeBytes: Math.round(size * GB) });
+      data.gameLibrary.push({
+        id,
+        fileId,
+        title,
+        appId,
+        launcher,
+        archiveId,
+        archivePath,
+        cover: "art/" + id + ".jpg",
+        portrait: ["control", "hollow"].includes(id) ? "art/" + id + "-portrait.jpg" : null,
+        algorithm,
+        status,
+        lastPlayed,
+        running: flag === "running",
+        progress: status === "compressing" ? 42 : 0,
+        community: communityEstimates[id],
+        history: diskId === data.gamePool ? [{ at: lastPlayed, from: archiveId, to: diskId }] : [],
+      });
+    }
+  }
   function snapshot(scenario = "normal") {
     const data = structuredClone({
       hosts,
@@ -419,6 +537,31 @@ const DemoData = (() => {
         j.checksum = data.checksums.film;
         data.manifests[j.copyId] = j.checksum;
       }
+    }
+    seedLibrary(data, scenario);
+    if (scenario === "error") {
+      delete data.faults.games;
+      delete data.failNext.games;
+    }
+    if (scenario === "copying") {
+      const f = data.files.find((f) => f.id === "celeste"),
+        d = data.disks.find((d) => d.id === data.gamePool);
+      d.freeBytes -= f.sizeBytes;
+      data.tasks.unshift({
+        id: "playing-celeste",
+        kind: "copy",
+        title: "Перенос игры · Celeste",
+        host: "pc",
+        progress: 8,
+        bytesPerSec: f.sizeBytes / 5,
+        etaSec: 13,
+        totalBytes: f.sizeBytes,
+        state: "running",
+        error: null,
+        events: [{ time: "2026-11-18T14:30:00Z", text: "Начато копирование на SSD." }],
+        operation: { type: "libraryMove", fileId: f.id, gameId: "celeste", target: d.id },
+        flow: { from: f.diskId, step: 0, percent: 40, reserved: f.sizeBytes, sourceStatus: "compressed", confirmed: false },
+      });
     }
     return data;
   }

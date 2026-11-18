@@ -95,12 +95,6 @@ const Workshops = (() => {
       )
     );
   }
-  function games(s) {
-    const count = new Set(
-      s.files.filter((f) => f.platform && (s.ui.platform === "Все" || s.ui.platform === f.platform)).map((f) => f.contentId),
-    ).size;
-    return `<p class="collection-count">Игр на полке · ${count}</p>` + gameShelf(s);
-  }
   function act(name, id) {
     const s = state,
       form = s.ui.form;
@@ -169,5 +163,5 @@ const Workshops = (() => {
       }
     }
   }
-  return { local, optical, rules, games, act };
+  return { local, optical, rules, act };
 })();
