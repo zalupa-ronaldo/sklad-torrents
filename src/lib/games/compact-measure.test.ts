@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { expect, it } from "vitest";
 
-import { accountReadings, clipDiag, compressionProbeScript, decideCompact, decodeCompactOutput, listOwnedFiles, parseCompactListing, parseCompactSummary, readingsFromQuery, reconcileOwnedRoot, windowsPowershellCandidates, type OwnedFile, type WofState } from "@/lib/games/compact-measure";
+import { accountReadings, clipDiag, compressionProbeScript, decideCompact, decodeCompactOutput, encodePowerShellCommand, finishMeasurement, listOwnedFiles, parseCompactListing, parseCompactSummary, parseSizeProbeOutput, powershellProbeArgs, readingsFromQuery, reconcileOwnedRoot, windowsPowershellCandidates, type OwnedFile, type WofState } from "@/lib/games/compact-measure";
 import { localJobHost, hostFacts } from "@/lib/jobs/local-host";
 
 const smoke = "    36864 :  1048576 = 28.4 to 1 XPRESS8K payload.bin";
@@ -143,10 +143,21 @@ it("trusts per-file WOF sizes when the compact summary also counts .sklad-manage
   expect(unread.reason).not.toMatch(/не содержит сводку/);
 
   const unknownWof = new Map<string, WofState>(ownedRoot.map((file) => [file.full, { wof: null, algorithm: null }]));
-  const fallback = reconcileOwnedRoot({
+  const sized = reconcileOwnedRoot({
     files: ownedRoot,
     sizes: ownedSizes(),
     wofState: unknownWof,
+    summary,
+    perFile: new Map(),
+    markerBytes: 36,
+    markerFiles: 1,
+  });
+  expect(sized).toMatchObject({ known: true, compressed: true, logical: 1_052_318, allocated: 40_606, wof: 36_864 });
+  expect(sized.reason).toMatch(/GetCompressedFileSizeW/);
+
+  const fallback = reconcileOwnedRoot({
+    files: ownedRoot,
+    sizes: new Map(),
     summary,
     perFile: new Map(),
     markerBytes: 36,
@@ -166,10 +177,78 @@ it("finds powershell.exe under SystemRoot and does not read PATH", () => {
   );
   const script = compressionProbeScript();
   expect(script).toMatch(/GetCompressedFileSizeW/);
+  expect(script).toMatch(/OpenStandardOutput/);
+  expect(script).not.toMatch(/OutputEncoding/);
+  expect(script).not.toMatch(/Write-Output/);
   expect(script).toMatch(/GetFileInformationByHandleEx/);
   expect(script).toMatch(/0x90310/);
   expect(script).toMatch(/0x80000017/);
   expect(script).not.toMatch(/powershell\.exe/);
+  const args = powershellProbeArgs(script);
+  expect(args.slice(0, 5)).toEqual(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand"]);
+  expect(args).not.toContain("-Command");
+  expect(Buffer.from(args[5]!, "base64").toString("utf16le")).toBe(script);
+  expect(encodePowerShellCommand("Write-Output 1")).toBe(Buffer.from("Write-Output 1", "utf16le").toString("base64"));
+});
+
+const NATIVE_Q_CP866 = Buffer.from(
+  "0d0a208fe0aee1acaee2e020aaa0e2a0abaea3a020433a5c55736572735c757365725c2e6c6f63616c5c736b6c61642d6d6561737572652d32303236313131382d37656664383537662d31393635656166325c66697874757265735c706f6f6c5c67616d652d3938613462663031396666645c0d0a208daea2eba520e4a0a9abeb2c20a4aea1a0a2abefa5aceba520a220ede2aee220aaa0e2a0abaea32c20ada520a1e3a4e3e220e1a6a0e2eb2e0d0a0d0a0d0a82e1a5a3ae20e4a0a9abaea23a20332c20aaa0e2a0abaea3aea23a20312e0d0a88a720ada8e520e1a6a0e2ae3a20312c20ada520e1a6a0e2ae3a20322e0d0a84a0adadeba520aea1eaa5acaeac2031ff303438ff36393920a1a0a9e220e1aee5e0a0ada5adeb20a2203336ff39383720a1a0a9e22e0d0a91e2a5afa5adec20e1a6a0e2a8ef2032382c3420aa20312e0d0a0d0a",
+  "hex",
+);
+
+const nativeRoot: OwnedFile[] = [
+  { relative: "payload.bin", full: "C:\\pool\\game\\payload.bin", logical: 1_048_576 },
+  { relative: "sklad-game.json", full: "C:\\pool\\game\\sklad-game.json", logical: 97 },
+];
+
+it("accepts the native PR25 compact /Q sample when the marker is 26 bytes and the probe is empty", () => {
+  const text = decodeCompactOutput(NATIVE_Q_CP866);
+  expect(parseCompactSummary(Buffer.from(NATIVE_Q_CP866).toString("utf8")).logical).toBeNull();
+  expect(parseCompactSummary(text)).toEqual({ fileCount: 3, compressedCount: 1, logical: 1_048_699, stored: 36_987 });
+  const summary = parseCompactSummary(text);
+  const missed = reconcileOwnedRoot({
+    files: nativeRoot,
+    sizes: new Map(),
+    summary,
+    perFile: new Map(),
+    markerBytes: 26,
+    markerFiles: 1,
+  });
+  expect(missed).toMatchObject({ known: true, compressed: true, files: 2, logical: 1_048_673, allocated: 36_961, wof: 36_961 });
+  expect(missed.reason).toMatch(/\.sklad-managed/);
+  expect(missed.reason).not.toMatch(/не прочитан/);
+
+  const sized = reconcileOwnedRoot({
+    files: nativeRoot,
+    sizes: new Map([
+      ["C:\\pool\\game\\payload.bin", 36_864],
+      ["C:\\pool\\game\\sklad-game.json", 97],
+    ]),
+    summary,
+    perFile: new Map(),
+    markerBytes: 26,
+    markerFiles: 1,
+  });
+  expect(sized).toMatchObject({ known: true, compressed: true, logical: 1_048_673, allocated: 36_961, wof: 36_864 });
+
+  const probed = finishMeasurement({
+    files: nativeRoot,
+    markerBytes: 26,
+    markerFiles: 1,
+    sizes: { ok: false, values: new Map(), states: new Map(), note: "GetCompressedFileSizeW не вернул ни одной строки." },
+    queryText: text,
+    queryOk: true,
+    queryNote: "",
+  });
+  expect(probed).toMatchObject({ known: true, compressed: true, logical: 1_048_673, allocated: 36_961, wof: 36_961 });
+  expect(probed.reason).not.toMatch(/не совпала/);
+
+  const utf8 = Buffer.from('{"path":"C:\\\\pool\\\\game\\\\payload.bin","allocated":36864,"wof":36864,"algorithm":"XPRESS8K"}\n', "utf8");
+  const utf16 = Buffer.from('{"path":"C:\\\\pool\\\\game\\\\payload.bin","allocated":36864,"wof":36864,"algorithm":"XPRESS8K"}\n', "utf16le");
+  for (const buf of [utf8, utf16]) {
+    expect(parseSizeProbeOutput(buf).rows).toEqual([{ path: "C:\\pool\\game\\payload.bin", allocated: 36_864, wof: 36_864, algorithm: "XPRESS8K" }]);
+  }
+  expect(parseSizeProbeOutput(Buffer.alloc(0)).ok).toBe(false);
 });
 
 it("stops at a symlink and at E: before reading a file", async () => {

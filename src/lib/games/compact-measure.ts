@@ -142,7 +142,11 @@ export function reconcileOwnedRoot(input: {
   const apiKnown = apiValues.every((value) => value != null);
   const allocated = apiKnown ? apiValues.reduce<number>((sum, value) => sum + (value ?? 0), 0) : null;
   const fromApi = input.wofState ? accountFromWofState(input.files, input.sizes, input.wofState) : null;
-  if (fromApi) return fromApi.known ? annotateApi(fromApi, input.summary, input.markerBytes, input.markerFiles) : fromApi;
+  if (fromApi) return fromApi.known ? annotateApi(fromApi, input.summary, input.markerBytes, input.markerFiles, "Источник: GetCompressedFileSizeW и состояние WOF по файлам корня. Сводка compact /Q не требуется.") : fromApi;
+  const fromSizes = accountFromAllocated(input.files, input.sizes);
+  if (fromSizes?.known) {
+    return annotateApi(fromSizes, input.summary, input.markerBytes, input.markerFiles, "Источник: GetCompressedFileSizeW по файлам корня. Сводка compact /Q не требуется.");
+  }
   const perFileReadings = readingsFromQuery(input.files, input.sizes, input.perFile);
   const perFile = accountReadings(perFileReadings);
   if (perFile.known && perFile.logical === logical && perFile.allocated === allocated) return perFile;
@@ -156,29 +160,50 @@ export function reconcileOwnedRoot(input: {
     const agreed = decideCompact({ files: input.files.length, logical, allocated, wof: allocated });
     return { ...agreed, reason: `${agreed.reason} Сводка compact /Q совпала с GetCompressedFileSizeW. Имя алгоритма в сводке не названо.` };
   }
-  const marker = input.markerBytes ?? 0;
-  const markerFiles = input.markerFiles ?? (marker > 0 ? 1 : 0);
-  if (
-    allocated != null
-    && marker > 0
-    && allocated < logical
-    && input.summary.logical != null
-    && input.summary.stored != null
-    && input.summary.logical - logical === marker
-    && input.summary.stored - allocated === marker
-    && (input.summary.fileCount == null || input.summary.fileCount === input.files.length + markerFiles)
-    && (input.summary.compressedCount == null || input.summary.compressedCount > 0)
-  ) {
-    const agreed = decideCompact({ files: input.files.length, logical, allocated, wof: allocated });
-    return {
-      ...agreed,
-      reason: `${agreed.reason} Сводка compact /Q включает .sklad-managed (${marker} байт): logical ${input.summary.logical}, stored ${input.summary.stored}. Совпадение сводки с корнем не требуется. Имя алгоритма в сводке не названо.`,
-    };
-  }
+  const marked = summaryMinusMarker({
+    summary: input.summary,
+    logical,
+    allocated,
+    files: input.files.length,
+    marker: input.markerBytes ?? 0,
+    markerCount: input.markerFiles ?? ((input.markerBytes ?? 0) > 0 ? 1 : 0),
+  });
+  if (marked) return marked;
   const reason = input.summary.logical == null || input.summary.stored == null
     ? "compact /Q не содержит строку stored : logical и не содержит сводку объёма. Неизвестный размер не заменяется нулём."
     : `Сводка compact /Q logical ${input.summary.logical}, stored ${input.summary.stored} не совпала с файлами корня logical ${logical}, GetCompressedFileSizeW ${allocated ?? "не прочитан"}.`;
   return { files: input.files.length, logical, allocated, wof: null, known: false, compressed: false, reason };
+}
+
+/** compact /Q counts `.sklad-managed`; the owned walk does not. The difference is not a failed measurement. */
+function summaryMinusMarker(input: {
+  summary: CompactSummary;
+  logical: number;
+  allocated: number | null;
+  files: number;
+  marker: number;
+  markerCount: number;
+}): CompactAccount | null {
+  if (input.marker <= 0) return null;
+  const summary = input.summary;
+  if (summary.logical == null || summary.stored == null) return null;
+  if (summary.logical - input.logical !== input.marker) return null;
+  if (summary.fileCount != null && summary.fileCount !== input.files + input.markerCount) return null;
+  const implied = summary.stored - input.marker;
+  if (!Number.isSafeInteger(implied) || implied < 0 || implied > input.logical) return null;
+  if (input.allocated != null && input.allocated !== implied) return null;
+  if (implied < input.logical && summary.compressedCount === 0) return null;
+  const agreed = decideCompact({
+    files: input.files,
+    logical: input.logical,
+    allocated: implied,
+    wof: implied < input.logical ? implied : 0,
+  });
+  if (!agreed.known) return null;
+  return {
+    ...agreed,
+    reason: `${agreed.reason} Сводка compact /Q logical ${summary.logical}, stored ${summary.stored} включает .sklad-managed (${input.marker} байт). Совпадение сводки с корнем не требуется. Размер корня ${input.logical} / ${implied}. Имя алгоритма в сводке не названо.`,
+  };
 }
 
 function accountFromWofState(
@@ -201,9 +226,21 @@ function accountFromWofState(
   return accountReadings(readings);
 }
 
-function annotateApi(account: CompactAccount, summary: CompactSummary, markerBytes: number | undefined, markerFiles: number | undefined): CompactAccount {
+function accountFromAllocated(files: readonly OwnedFile[], sizes: ReadonlyMap<string, number | null>): CompactAccount | null {
+  if (files.length === 0) return null;
+  const readings: CompactReading[] = [];
+  for (const file of files) {
+    const allocated = sizes.get(file.full);
+    if (allocated == null || allocated < 0 || allocated > file.logical) return null;
+    if (file.logical > 0 && allocated === 0) return null;
+    readings.push({ relative: file.relative, logical: file.logical, allocated, wof: allocated < file.logical ? allocated : 0 });
+  }
+  const account = accountReadings(readings);
+  return account.known ? account : null;
+}
+
+function annotateApi(account: CompactAccount, summary: CompactSummary, markerBytes: number | undefined, markerFiles: number | undefined, source: string): CompactAccount {
   if (account.logical == null || account.allocated == null) return account;
-  const source = "Источник: GetCompressedFileSizeW и состояние WOF по файлам корня. Сводка compact /Q не требуется.";
   if (summary.logical == null && summary.stored == null) {
     return { ...account, reason: `${account.reason} ${source}` };
   }
@@ -322,45 +359,44 @@ export async function measureWindowsRoot(root: string): Promise<CompactAccount> 
     compressedSizes(listed.files.map((file) => file.full)),
     compactQuery(root),
   ]);
-  const logical = listed.files.reduce((sum, file) => sum + file.logical, 0);
-  if (!sizes.ok) {
-    return {
-      files: listed.files.length,
-      logical,
-      allocated: null,
-      wof: null,
-      known: false,
-      compressed: false,
-      reason: measurementFailure(sizes, query),
-    };
-  }
-  const account = reconcileOwnedRoot({
+  return finishMeasurement({
     files: listed.files,
-    sizes: sizes.values,
-    wofState: sizes.states,
-    summary: parseCompactSummary(query.text),
-    perFile: parseCompactListing(query.text),
     markerBytes: listed.markerBytes,
     markerFiles: listed.markerFiles,
+    sizes,
+    queryText: query.text,
+    queryOk: query.ok,
+    queryNote: query.note,
   });
-  if (account.known && !query.ok) {
-    const note = query.note || `код ${query.code ?? "нет"}`;
-    return { ...account, reason: `${account.reason} compact /Q не прочитан (${note}).`.trim() };
-  }
-  if (!account.known && (sizes.note || query.note)) {
-    return { ...account, reason: `${account.reason} ${[sizes.note, query.note].filter(Boolean).join(" ")}`.trim() };
-  }
-  return account;
 }
 
-function measurementFailure(
-  sizes: { ok: boolean; code: number | null; note: string },
-  query: { ok: boolean; code: number | null; note: string },
-): string {
-  const parts = ["Измерение корня не сошлось. Сжатие заново не запускается."];
-  if (!sizes.ok) parts.push(`GetCompressedFileSizeW код ${sizes.code ?? "нет"}. ${sizes.note}`.trim());
-  if (!query.ok) parts.push(`compact /Q код ${query.code ?? "нет"}. ${query.note}`.trim());
-  return parts.join(" ");
+export function finishMeasurement(input: {
+  files: readonly OwnedFile[];
+  markerBytes: number;
+  markerFiles: number;
+  sizes: { ok: boolean; values: ReadonlyMap<string, number | null>; states: ReadonlyMap<string, WofState>; note: string };
+  queryText: string;
+  queryOk: boolean;
+  queryNote: string;
+}): CompactAccount {
+  const account = reconcileOwnedRoot({
+    files: input.files,
+    sizes: input.sizes.values,
+    wofState: input.sizes.states,
+    summary: parseCompactSummary(input.queryText),
+    perFile: parseCompactListing(input.queryText),
+    markerBytes: input.markerBytes,
+    markerFiles: input.markerFiles,
+  });
+  const extra = [
+    input.sizes.ok ? "" : input.sizes.note,
+    input.queryOk ? "" : (input.queryNote || "compact /Q не прочитан"),
+  ].filter(Boolean);
+  if (!account.known && !input.sizes.ok) {
+    return { ...account, reason: ["Измерение корня не сошлось. Сжатие заново не запускается.", account.reason, input.sizes.note].filter(Boolean).join(" ") };
+  }
+  if (extra.length === 0) return account;
+  return { ...account, reason: `${account.reason} ${extra.join(" ")}`.trim() };
 }
 
 /** Absolute Windows PowerShell paths. PATH is not consulted: an isolated PATH has no powershell.exe. */
@@ -395,12 +431,26 @@ function windowsCompactExe(): string {
   return path.win32.join(root, "System32", "compact.exe");
 }
 
+/** UTF-16LE base64 for powershell.exe -EncodedCommand. Avoids -Command quote stripping and newline splitting. */
+export function encodePowerShellCommand(script: string): string {
+  return Buffer.from(script, "utf16le").toString("base64");
+}
+
+export function powershellProbeArgs(script: string): string[] {
+  return ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encodePowerShellCommand(script)];
+}
+
 /** PowerShell probe. Size and WOF are separate types so a WOF compile failure still returns allocated bytes. */
 export function compressionProbeScript(): string {
   return `
 $ErrorActionPreference = 'Stop'
-[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false
-$OutputEncoding = [Console]::OutputEncoding
+function Emit([hashtable]$row) {
+  $json = ($row | ConvertTo-Json -Compress) + [char]10
+  $bytes = [System.Text.Encoding]::UTF8.GetBytes($json)
+  $stream = [Console]::OpenStandardOutput()
+  $stream.Write($bytes, 0, $bytes.Length)
+  $stream.Flush()
+}
 Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
@@ -491,13 +541,14 @@ $wofReady = $true
 } catch {
 [Console]::Error.WriteLine('WOF state type failed')
 }
-$paths = @(ConvertFrom-Json $env:SKLAD_COMPACT_FILES)
+if ([string]::IsNullOrEmpty($env:SKLAD_COMPACT_FILES)) { [Console]::Error.WriteLine('SKLAD_COMPACT_FILES empty'); exit 1 }
+$paths = @($env:SKLAD_COMPACT_FILES | ConvertFrom-Json)
 foreach ($item in $paths) {
-  $path = [string]$item
-  $size = [SkladSize]::Of($path)
+  $full = [string]$item
+  $size = [SkladSize]::Of($full)
   $code = -1
   if ($wofReady) {
-    try { $code = [SkladWof]::State($path) } catch { $code = -1 }
+    try { $code = [SkladWof]::State($full) } catch { $code = -1 }
   }
   $alloc = $null
   $wof = $null
@@ -510,7 +561,7 @@ foreach ($item in $paths) {
   } elseif ($size -ge 0 -and $code -eq 100) {
     $wof = $size
   }
-  Write-Output (@{ path = $path; allocated = $alloc; wof = $wof; algorithm = $alg } | ConvertTo-Json -Compress)
+  Emit @{ path = $full; allocated = $alloc; wof = $wof; algorithm = $alg }
 }
 `.trim();
 }
@@ -520,26 +571,43 @@ async function compressedSizes(files: readonly string[]): Promise<{ ok: boolean;
   const states = new Map<string, WofState>();
   if (files.length === 0) return { ok: true, values: empty, states, total: 0, code: 0, note: "" };
   const bin = await resolveWindowsPowershell();
-  const result = await run(bin, ["-NoProfile", "-NonInteractive", "-Command", compressionProbeScript()], { SKLAD_COMPACT_FILES: JSON.stringify(files) });
-  if (result.code !== 0) return { ok: false, values: empty, states, total: null, code: result.code, note: clipDiag(result.stderr || result.error || bin) };
+  const script = compressionProbeScript();
+  const result = await run(bin, powershellProbeArgs(script), { SKLAD_COMPACT_FILES: JSON.stringify(files) });
+  const parsed = parseSizeProbeOutput(result.stdoutBuf);
   const values = new Map<string, number | null>();
-  for (const line of decodeProcessText(result.stdoutBuf).split(/\r?\n/)) {
+  for (const row of parsed.rows) {
+    values.set(row.path, row.allocated);
+    states.set(row.path, { wof: row.wof, algorithm: row.algorithm });
+  }
+  const numbers = files.map((file) => values.get(file) ?? null);
+  const complete = numbers.every((value) => value != null);
+  const total = complete ? numbers.reduce<number>((sum, value) => sum + (value ?? 0), 0) : null;
+  if (!parsed.ok || !complete || result.code !== 0) {
+    const note = clipDiag([parsed.note, result.stderr, result.error, result.code !== 0 ? `код ${result.code ?? "нет"}` : ""].filter(Boolean).join(" "));
+    return { ok: false, values, states, total, code: result.code, note: note || "GetCompressedFileSizeW не вернул размеры файлов." };
+  }
+  return { ok: true, values, states, total, code: result.code, note: "" };
+}
+
+export function parseSizeProbeOutput(buf: Buffer): { ok: boolean; note: string; rows: Array<{ path: string; allocated: number | null; wof: number | null; algorithm: WofAlgorithm | null }> } {
+  const rows: Array<{ path: string; allocated: number | null; wof: number | null; algorithm: WofAlgorithm | null }> = [];
+  const text = decodeProcessText(buf);
+  if (text.includes("#< CLIXML") || text.includes("<Objs")) return { ok: false, note: "Ответ PowerShell в CLIXML, не JSON.", rows };
+  for (const line of text.split(/\r?\n/)) {
     if (!line.trim()) continue;
     try {
       const parsed = JSON.parse(line) as { path?: string; allocated?: number | null; wof?: number | null; algorithm?: string | null };
-      if (!parsed.path) return { ok: false, values, states, total: null, code: result.code, note: "Ответ GetCompressedFileSizeW не разобран." };
+      if (!parsed.path) return { ok: false, note: "Ответ GetCompressedFileSizeW не разобран.", rows };
       const allocated = typeof parsed.allocated === "number" && Number.isSafeInteger(parsed.allocated) && parsed.allocated >= 0 ? parsed.allocated : null;
       const wof = typeof parsed.wof === "number" && Number.isSafeInteger(parsed.wof) && parsed.wof >= 0 ? parsed.wof : null;
       const algorithm = typeof parsed.algorithm === "string" && WOF_ALGORITHM.test(parsed.algorithm) ? parsed.algorithm.toUpperCase() as WofAlgorithm : null;
-      values.set(parsed.path, allocated);
-      states.set(parsed.path, { wof, algorithm });
+      rows.push({ path: parsed.path, allocated, wof, algorithm });
     } catch {
-      return { ok: false, values, states, total: null, code: result.code, note: "Ответ GetCompressedFileSizeW не разобран." };
+      return { ok: false, note: "Ответ GetCompressedFileSizeW не разобран.", rows };
     }
   }
-  const numbers = files.map((file) => values.get(file) ?? null);
-  const total = numbers.every((value) => value != null) ? numbers.reduce<number>((sum, value) => sum + (value ?? 0), 0) : null;
-  return { ok: true, values, states, total, code: result.code, note: "" };
+  if (rows.length === 0) return { ok: false, note: "GetCompressedFileSizeW не вернул ни одной строки.", rows };
+  return { ok: true, note: "", rows };
 }
 
 async function compactQuery(root: string): Promise<{ ok: boolean; text: string; code: number | null; note: string }> {
@@ -612,7 +680,8 @@ function run(bin: string, args: string[], env: Record<string, string>): Promise<
     child.on("error", (error) => resolve({ code: null, stdout: "", stdoutBuf: Buffer.alloc(0), stderr: "", error: error.message }));
     child.on("close", (code) => {
       const stdoutBuf = Buffer.concat(out);
-      resolve({ code, stdout: stdoutBuf.toString("utf8"), stdoutBuf, stderr: Buffer.concat(err).toString("utf8"), error: "" });
+      const stderrBuf = Buffer.concat(err);
+      resolve({ code, stdout: decodeProcessText(stdoutBuf), stdoutBuf, stderr: decodeProcessText(stderrBuf), error: "" });
     });
   });
 }
