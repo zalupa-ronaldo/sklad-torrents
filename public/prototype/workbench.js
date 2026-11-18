@@ -5,6 +5,7 @@ const pages = {
   overview: ["Диспетчер", "LayoutDashboard", "Диски, файлы и обработка в локальной сети."],
   devices: ["Устройства", "Server", "Носители, свободное место и последние снимки каталога."],
   drives: ["Все файлы", "HardDrive", "Поиск по снимкам всех носителей, включая отключённые."],
+  details: ["Детали файла", "File", "Сведения из индекса и размещение копий."],
   torrents: ["Торренты", "ArrowDownUp", "Раздачи qBittorrent на ваших хостах."],
   scheduler: ["Планировщик", "Clock3", "Одна активная загрузка на физический диск."],
   jobs: ["Очередь задач", "ListChecks", "Ход операций на ваших хостах."],
@@ -95,8 +96,9 @@ function meter(n, label) {
 function sidebar(s) {
   const groups = { overview: "Рабочее пространство", games: "Библиотека и инструменты", localsend: "Сеть и автоматика" };
   const nav = Object.entries(pages)
+    .filter(([key]) => key !== "details")
     .map(([key, [label, symbol]]) => {
-      const active = s.ui.page === key;
+      const active = s.ui.page === key || (key === "drives" && s.ui.page === "details");
       return (
         (groups[key] ? `<p class="caption">${groups[key]}</p>` : "") +
         button(
@@ -190,42 +192,55 @@ function shelf(s) {
 }
 function scanTime(iso) {
   if (!iso) return "Сканирования ещё не было";
-  return new Date(iso).toLocaleString("ru-RU", {dateStyle:"short", timeStyle:"short"});
+  return new Date(iso).toLocaleString("ru-RU", { dateStyle: "short", timeStyle: "short" });
 }
 function devicesPage(s) {
   if (s.loading) return skeleton("Загрузка устройств", 5);
   if (!s.disks.length) return card("Носители", empty("Устройств в каталоге пока нет."));
-  return s.hosts.map(host => {
-    const devices = s.disks.filter(d => d.host === host.id);
-    if (!devices.length) return "";
-    const rows = devices.map(d => {
-      const online = available(s,d);
-      const scan = s.tasks.find(j => j.operation?.type === "index" && j.operation.target === d.id);
-      const busy = scan && ["running","paused"].includes(scan.state);
-      const used = d.sizeBytes - d.freeBytes;
-      const retry = scan?.state === "error";
-      return `<article class="device-panel card ${online ? "" : "device-offline"}">
+  return s.hosts
+    .map((host) => {
+      const devices = s.disks.filter((d) => d.host === host.id);
+      if (!devices.length) return "";
+      const rows = devices
+        .map((d) => {
+          const online = available(s, d);
+          const scan = s.tasks.find((j) => j.operation?.type === "index" && j.operation.target === d.id);
+          const busy = scan && ["running", "paused"].includes(scan.state);
+          const transfers = s.tasks.filter((j) => {
+            if (j.state !== "running" || !["copy", "av1"].includes(j.kind)) return false;
+            const op = j.operation;
+            return op?.target === d.id || byId(s.files, op?.fileId)?.diskId === d.id;
+          });
+          const used = d.sizeBytes - d.freeBytes;
+          const retry = scan?.state === "error";
+          return `<article class="device-panel card ${online ? "" : "device-offline"}">
         <div class="device-heading"><span class="carrier-type">${families[d.kind][0]}</span><h3>${esc(d.label)}</h3><span class="device-status">${online ? "В сети" : "Не в сети"}</span></div>
         <p class="device-path">${esc(d.mount || d.location)} · ${esc(d.fs)}</p>
-        ${meter(d.sizeBytes ? Math.round(100*used/d.sizeBytes) : 0,"Занято на "+d.label)}
+        ${meter(d.sizeBytes ? Math.round((100 * used) / d.sizeBytes) : 0, "Занято на " + d.label)}
         <div class="device-volume"><span>Занято <b>${bytes(used)}</b></span><span>Свободно <b>${bytes(d.freeBytes)}</b></span></div>
         <p class="scan-time">Последний скан · ${esc(scanTime(d.lastScan))}</p>
-        ${busy ? `<p class="scan-time">${scan.state==="paused"?"Сканирование на паузе":"Идёт сканирование"} · ${num(scan.progress)}%</p>` : ""}
+        ${busy ? `<p class="scan-time">${scan.state === "paused" ? "Сканирование на паузе" : "Идёт сканирование"} · ${num(scan.progress)}%</p>` : ""}
+        ${transfers.map((j) => `<p class="scan-time">${esc(j.title)} · ${num(j.progress)}%</p>`).join("")}
         ${retry ? `<p class="error-message">${esc(scan.error)}</p>` : ""}
-        <div class="device-actions">${button("disk","Открыть в каталоге",d.id)}${button(retry?"retry":"reindex",retry?"Повторить сканирование":"Пересканировать",retry?scan.id:d.id,"secondary-action",!online||busy?"disabled":"")}</div>
+        <div class="device-actions">${button("disk", "Открыть в каталоге", d.id)}${button(retry ? "retry" : "reindex", retry ? "Повторить сканирование" : "Пересканировать", retry ? scan.id : d.id, "secondary-action", !online || busy ? "disabled" : "")}</div>
       </article>`;
-    }).join("");
-    return `<section class="device-host"><h2>${icon(host.id==="pc"?"Monitor":"Laptop")}${esc(host.name)} <span class="count">${devices.length}</span></h2><div class="device-grid">${rows}</div></section>`;
-  }).join("");
+        })
+        .join("");
+      return `<section class="device-host"><h2>${icon(host.id === "pc" ? "Monitor" : "Laptop")}${esc(host.name)} <span class="count">${devices.length}</span></h2><div class="device-grid">${rows}</div></section>`;
+    })
+    .join("");
 }
-function taskAvailable(s,j) {
+function taskAvailable(s, j) {
   const op = j.operation;
   const source = op?.fileId && byId(s.files, op.fileId);
-  return Boolean(byId(s.hosts,j.host)?.online && (!op?.fileId || (source && available(s,diskOf(s,source)))) &&
-    (!op?.target || available(s,byId(s.disks,op.target))));
+  return Boolean(
+    byId(s.hosts, j.host)?.online &&
+    (!op?.fileId || (source && available(s, diskOf(s, source)))) &&
+    (!op?.target || available(s, byId(s.disks, op.target))),
+  );
 }
 function queue(s, compact = false) {
-  const tasks = compact ? s.tasks.slice(0,2) : s.tasks.filter(j=>!s.ui.taskKind || j.kind===s.ui.taskKind);
+  const tasks = compact ? s.tasks.slice(0, 2) : s.tasks.filter((j) => !s.ui.taskKind || j.kind === s.ui.taskKind);
   const rows = tasks
     .map((j) => {
       const label = { running: "Выполняется", paused: "На паузе", error: "Ошибка", done: "Готово" }[j.state];
@@ -234,22 +249,31 @@ function queue(s, compact = false) {
         j.state === "running"
           ? `<span>${bytes(j.bytesPerSec)}/с · осталось ${j.etaSec == null ? "—" : Math.ceil(j.etaSec) + " с"}</span>`
           : "";
-      const op=j.operation;
-      const source=op?.fileId && byId(s.files,op.fileId);
-      const target=op?.target && byId(s.disks,op.target);
-      const online=taskAvailable(s,j);
-      const route=source && target ? esc(diskOf(s,source).label)+" → "+esc(target.label) : "";
-      return `<article class="job-row ${j.state}" data-job="${esc(j.id)}"><div class="job-body"><b>${esc(j.title)}</b>${!compact && route?`<p class="task-route">${route}</p>`:""}<small>${esc(byId(s.hosts, j.host)?.name)} · <strong>${label}</strong></small>
+      const op = j.operation;
+      const source = op?.fileId && byId(s.files, op.fileId);
+      const target = op?.target && byId(s.disks, op.target);
+      const online = taskAvailable(s, j);
+      const route = source && target ? esc(diskOf(s, source).label) + " → " + esc(target.label) : "";
+      return `<article class="job-row ${j.state}" data-job="${esc(j.id)}"><div class="job-body"><b>${esc(j.title)}</b>${!compact && route ? `<p class="task-route">${route}</p>` : ""}<small>${esc(byId(s.hosts, j.host)?.name)} · <strong>${label}</strong></small>
       ${j.state !== "done" ? meter(j.progress, j.title) : ""}<div class="job-metrics">${j.state !== "done" ? num(j.progress) + "%" : ""} ${metrics}</div>
       ${!online && active ? empty("Для продолжения подключите носитель и его хост.") : ""}
-      ${j.state==="done" && j.verified ? '<p class="task-route">SHA-256 совпал</p>' : ""}
-      ${j.error ? `<p class="error-message">${esc(j.error)}</p>` : ""}<div class="job-actions">${active ? button("pause", j.state === "paused" ? "Продолжить" : "Пауза", j.id, "secondary-action", j.state==="paused" && !online?"disabled":"") + button("cancel", "Отмена", j.id) : j.state === "error" ? button("retry", "Повторить", j.id,"secondary-action",online?"":"disabled") : ""}</div></div></article>`;
+      ${j.state === "done" && j.verified ? '<p class="task-route">SHA-256 совпал</p>' : ""}
+      ${j.error ? `<p class="error-message">${esc(j.error)}</p>` : ""}<div class="job-actions">${active ? button("pause", j.state === "paused" ? "Продолжить" : "Пауза", j.id, "secondary-action", j.state === "paused" && !online ? "disabled" : "") + button("cancel", "Отмена", j.id) : j.state === "error" ? button("retry", "Повторить", j.id, "secondary-action", online ? "" : "disabled") : ""}</div></div></article>`;
     })
     .join("");
-  const filters = compact || s.loading ? "" : `<div class="queue-filters">${[["","Все задачи"],["copy","Копирование"],["av1","AV1"]].map(([kind,label])=>
-    button("taskKind",label,kind,"secondary-action",`aria-pressed="${s.ui.taskKind===kind}"`)).join("")}</div>`;
-  return `<section class="card queue-card"><div class="card-heading"><h2>${icon("ListChecks")}${compact?"Очередь задач":"Операции"} ${s.loading?"":`<span class="count">${tasks.length}</span>`}</h2>${compact?button("page","Все задания","jobs"):""}</div>${filters}${s.loading?skeleton("Загрузка очереди",2):rows||empty(s.tasks.length && !compact?"Задач выбранного типа нет.":"В очереди нет задач.")}</section>`;
-
+  const filters =
+    compact || s.loading
+      ? ""
+      : `<div class="queue-filters">${[
+          ["", "Все задачи"],
+          ["copy", "Копирование"],
+          ["av1", "AV1"],
+        ]
+          .map(([kind, label]) =>
+            button("taskKind", label, kind, "secondary-action", `aria-pressed="${s.ui.taskKind === kind}"`),
+          )
+          .join("")}</div>`;
+  return `<section class="card queue-card"><div class="card-heading"><h2>${icon("ListChecks")}${compact ? "Очередь задач" : "Операции"} ${s.loading ? "" : `<span class="count">${tasks.length}</span>`}</h2>${compact ? button("page", "Все задания", "jobs") : ""}</div>${filters}${s.loading ? skeleton("Загрузка очереди", 2) : rows || empty(s.tasks.length && !compact ? "Задач выбранного типа нет." : "В очереди нет задач.")}</section>`;
 }
 function network(s) {
   const u = s.ui,
@@ -327,6 +351,81 @@ function fileSearch(s) {
     ${d ? `<div class="info-strip">${esc(d.label)} · ${available(s, d) ? esc(d.fs) + " · " + (d.fs === "NTFS" ? "снимок MFT" : "обход папок") + (d.lastScan ? " · обновлён " + dateText(d.lastScan) : "") : "Не в сети · " + esc(d.location) + " · " + dateText(d.lastSeen)} ${available(s, d) ? button("reindex", "Обновить индекс", d.id) : ""}</div>` : ""}
     ${s.loading ? skeleton("Загрузка индекса", 4) : rows || empty("Ничего не найдено в каталоге.")}`,
   );
+}
+function copyReason(s, file, target) {
+  const source = diskOf(s, file);
+  if (!available(s, source)) return "Исходный носитель не в сети. Выберите подключённую копию.";
+  if (!target) return "Выберите устройство назначения.";
+  if (!available(s, target)) return "Устройство назначения не в сети.";
+  if (target.id === source.id || target.kind === "optical") return "Выберите другой носитель с возможностью записи.";
+  if (target.id === s.gamePool && !file.platform) return "Игровой SSD предназначен для игр.";
+  if (s.files.some((f) => f.diskId === target.id && f.dir === file.dir && f.name === file.name))
+    return "В этой папке уже есть файл с таким именем.";
+  if (target.freeBytes < file.sizeBytes)
+    return "Недостаточно места. Требуется " + bytes(file.sizeBytes) + ", свободно " + bytes(target.freeBytes) + ".";
+  return "";
+}
+function fileDetails(s) {
+  const back = button("backToFiles", "Вернуться в каталог");
+  if (s.loading) return skeleton("Загрузка деталей файла", 5);
+  const f = byId(s.files, s.ui.fileId);
+  if (!f) return card("Файл отсутствует", empty("В текущем снимке этого файла нет.") + back);
+  const d = diskOf(s, f),
+    online = available(s, d);
+  const copies = s.files.filter((c) => c.contentId === f.contentId);
+  const sum = s.manifests[f.id] || s.checksums[f.contentId];
+  const targets = s.disks.filter((v) => v.id !== d.id && v.kind !== "optical");
+  const target = byId(targets, s.ui.form.copyTarget);
+  const reason = copyReason(s, f, target);
+  const pending = s.tasks.some((j) => ["running", "paused"].includes(j.state) && j.operation?.fileId === f.id);
+  const options = [
+    ["", "Выберите носитель"],
+    ...targets.map((v) => [v.id, v.label + " · " + (available(s, v) ? bytes(v.freeBytes) + " свободно" : "Не в сети")]),
+  ];
+  const tracks = (f.tracks || [])
+    .map(
+      (t) =>
+        `<div class="track-detail"><span>${icon(t.kind === "audio" ? "Music2" : "Film")}${t.kind === "audio" ? "Аудио" : "Видео"}</span><b>${esc(t.codec)}</b><small>${esc(t.details)}</small></div>`,
+    )
+    .join("");
+  const relatedCopy = s.tasks.find(
+    (j) =>
+      j.kind === "copy" &&
+      ["running", "paused"].includes(j.state) &&
+      byId(s.files, j.operation?.fileId)?.contentId === f.contentId,
+  );
+  const related = s.tasks.find((j) => j.state === "error" && byId(s.files, j.operation?.fileId)?.contentId === f.contentId);
+  return `<div class="detail-back">${back}</div><div class="detail-grid"><div>${card(
+    esc(f.name),
+    `<dl class="file-facts"><div><dt>Путь</dt><dd>${esc(pathOf(s, f))}</dd></div><div><dt>Размер</dt><dd>${bytes(f.sizeBytes)}</dd></div><div><dt>Носитель</dt><dd>${esc(d.label)} · ${online ? "В сети" : "Не в сети"}</dd></div></dl>
+    <h3>Контрольная сумма SHA-256</h3>${sum ? `<code class="checksum">${esc(sum)}</code>` : empty("Для этого файла ещё нет манифеста.")}
+    <div class="file-actions">${button("fileOp", "Перенос и копирование", "move", "secondary-action", online ? "" : "disabled")}${button("fileOp", "Проверить SHA-256", "integrity", "secondary-action", online ? "" : "disabled")}${button("fileOp", "Отправить через LocalSend", "localsend", "secondary-action", online ? "" : "disabled")}</div>`,
+  )}
+    ${card("Дорожки", tracks || empty(["Видео", "Музыка"].includes(f.type) ? "Дорожки ещё не проиндексированы." : "У этого типа файла нет медиадорожек."))}</div>
+    <div>${card(
+      "Где лежат копии",
+      `<div class="copy-list">${copies
+        .map((c) => {
+          const v = diskOf(s, c);
+          return button(
+            "file",
+            `<b>${esc(v.label)}</b><span>${available(s, v) ? "В сети · " + esc(hostOf(s, v).name) : "Не в сети · " + esc(v.location)}</span><small>${esc(pathOf(s, c))}</small>`,
+            c.id,
+            "copy-place",
+            `aria-pressed="${c === f}"`,
+          );
+        })
+        .join("")}</div>`,
+    )}
+    ${card(
+      "Скопировать на другое устройство",
+      `${field("copyTarget", "Назначение", options, target?.id || "")}
+      <p class="route-preview ${(target && reason) || !online ? "blocked" : ""}">${esc(pending ? "Для этой копии уже выполняется задание." : reason || "После записи будет выполнена сверка SHA-256.")}</p>
+      ${button("copyDetail", "Скопировать", "", "primary", reason || pending ? "disabled" : "")}
+      ${related ? `<p class="error-message">${esc(related.title)} · ${esc(related.error)}</p>` : ""}
+      ${relatedCopy ? `<p class="task-route">${esc(relatedCopy.title)} · ${relatedCopy.state === "paused" ? "На паузе" : "Выполняется"} · ${num(relatedCopy.progress)}%</p>` : ""}
+      ${pending || related || relatedCopy ? button("page", "Открыть очередь", "jobs") : ""}`,
+    )}</div></div>`;
 }
 function torrentsPage(s) {
   const u = s.ui,
@@ -424,10 +523,11 @@ function operationModel(s) {
     plan = "";
   if (page === "move") {
     if (!target) reason = "Нет подключённого диска назначения.";
+    else if (mode === "Копирование") reason = copyReason(s, file, target);
     else if (mode === "Перенос раздачи" && src.host !== target.host) reason = "Выберите диск на том же хосте.";
     else if (target.id === s.gamePool && !file.platform) reason = "Игровой SSD предназначен для игр.";
     else if (target.freeBytes < (file.allocatedBytes ?? file.sizeBytes)) reason = "Недостаточно свободного места.";
-    else plan = src.label + " → " + target.label + " · " + bytes(file.sizeBytes);
+    if (!reason) plan = src.label + " → " + target.label + " · " + bytes(file.sizeBytes);
   } else if (page === "integrity") plan = other ? file.name + " ↔ " + other.name : "Манифест · " + file.name;
   else if (page === "localsend") {
     if (!peer || (receive && !inbox)) reason = "Устройство назначения недоступно.";
@@ -557,37 +657,10 @@ function modalView(s) {
   const { kind, id } = s.ui.modal;
   let title = "",
     content = "";
-  if (kind === "file" || kind === "launch") {
-    const f = byId(s.files, id),
-      d = diskOf(s, f);
+  if (kind === "launch") {
+    const f = byId(s.files, id);
     title = f.name;
-    content =
-      kind === "launch"
-        ? `<p>Демозапуск · ${esc(pathOf(s, f))}</p>`
-        : `<p>${esc(f.type)} · ${bytes(f.sizeBytes)}${f.allocatedBytes ? " · на диске " + bytes(f.allocatedBytes) : ""}</p><h3 class="copies-heading">Где хранится</h3><div class="copy-list">${s.files
-            .filter((c) => c.contentId === f.contentId)
-            .map((c) => {
-              const v = diskOf(s, c);
-              return button(
-                "file",
-                `<b>${esc(v.label)}</b><span>${available(s, v) ? esc(hostOf(s, v).name) + " · В сети" : "Не в сети · " + esc(v.location) + " · " + dateText(v.lastSeen)}</span><small>${esc(pathOf(s, c))}</small>`,
-                c.id,
-                "copy-place",
-                `aria-pressed="${c.id === id}"`,
-              );
-            })
-            .join("")}</div>
-      ${
-        available(s, d)
-          ? `<div class="file-actions">${[
-              ["move", "Перенести или скопировать"],
-              ["localsend", "Отправить через LocalSend"],
-              ["integrity", "Проверить SHA-256"],
-            ]
-              .map(([key, label]) => button("fileOp", label, key))
-              .join("")}</div>`
-          : empty("Копия недоступна · " + esc(d.label))
-      }`;
+    content = `<p>Демозапуск · ${esc(pathOf(s, f))}</p>`;
   } else if (kind === "torrent") {
     const t = byId(s.torrents, id),
       d = diskOf(s, t);
@@ -638,6 +711,7 @@ function modalView(s) {
 function screen(s) {
   const page = s.ui.page;
   if (page === "overview") return dashboard(s);
+  if (page === "details") return fileDetails(s);
   if (page === "devices") return devicesPage(s);
   if (page === "jobs") return queue(s);
   if (s.loading) return skeleton("Загрузка раздела", 4);

@@ -293,3 +293,12 @@ input::placeholder{color:#aab2a9;opacity:1}
 .queue-filters { display:flex;flex-wrap:wrap;gap:6px;margin:12px 0 }
 .queue-filters button[aria-pressed=true] { background:#2b3525;color:var(--lime);border-color:#70845d }
 .task-route { color:var(--muted);font-size:12px;margin-top:3px;overflow-wrap:anywhere }
+.detail-back { margin-bottom:12px }.detail-grid>div { min-width:0 }
+.detail-grid .work-card { margin-bottom:12px }.detail-grid .work-card h2,.file-facts dd { overflow-wrap:anywhere }
+.detail-grid .work-card h3 { margin:10px 0 5px;font-size:14px }
+.file-facts { margin:4px 0 14px }.file-facts>div { align-items:start }.file-facts dt { flex-shrink:0 }
+.checksum { display:block;color:var(--lime);font:12px/1.6 var(--mono);overflow-wrap:anywhere;user-select:all }
+.track-detail { display:grid;grid-template-columns:1fr auto;gap:5px;border-top:1px solid var(--line);padding:9px 0 }
+.track-detail span { display:flex;align-items:center;gap:7px }.track-detail small { grid-column:1/-1;color:var(--muted) }
+.detail-grid .copy-list { max-height:none }.detail-grid .primary { margin-right:6px }
+@media(min-width:880px){.detail-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}

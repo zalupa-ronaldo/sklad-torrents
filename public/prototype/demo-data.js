@@ -57,6 +57,23 @@ const DemoData = (() => {
     ),
     carrier("sd2", "Камера B", "sd", "mac", 64, 20, null, "exFAT", "Органайзер · слот 2", "2026-11-08T12:00:00Z"),
   ];
+  // SHA-256 of the fixture bytes "sklad-demo/" followed by the content ID.
+  const checksums = {
+    hades: "9d7af62c1bdc432019e3bbc4bd54c574cd958079d523f9a0fd845a3b74fb8dd2",
+    gothic: "6106247d9010f48b39a31da0d76f6bbf3558b382d57cb0e06ef44e9d1c9edd7a",
+    zelda: "61db60ddff3536ba6f917a2db56a72bb6b64e340c5f20b949bfa726832a3c719",
+    gow: "62593ae71da74bfedc06d565f627cf98226a7ff375ef7de68fb5b52a71281a5f",
+    hollow: "32daa58fbd36dc382b57f2317467fb398b56adc1f944f066e4232c223d17158b",
+    film: "ca9e2274dc20d4aa9071353a82c93474227bb4ca7c446301ca787061c61cb52d",
+    trailer: "3ccb2ed72994298d3d1d63195e39bf383d50d32e78ae56cad4b6bd1c12e4702d",
+    osm: "694972e7be88e3f52e05aec23d0c91ad6acb83dacf0066d71cdc88e96b8fd790",
+    blend: "e90edbe2371b8b83f35dd42cf681b4687ecdcc837d9d94633143a43d811fa24a",
+    debian: "8ca5034e70e3c08b824069f6cbbc3d4c0b4cf0aabba2551204817dc7ccd5ce13",
+    audio: "5600053820987c033abe5313c1bae5acb6afcd53cff886d92f1868668f09754b",
+    book: "4f18860af4a363e3f56ca35bf06965de253c9d661de896ce0540d60a7e7ffbbb",
+    "av1:trailer": "ee7e21703df01c00304b5018ebc6a8f9dd29469c3fe61266e1d38811dd625ef5",
+    "av1:film": "715fe75929921317644a12804e6a311faf490be2873bc72a07caf41990127268",
+  };
   function file(id, name, diskId, dir, type, size, extra = {}) {
     return { id, name, diskId, dir, type, sizeBytes: Math.round(size * GB), contentId: id, ...extra };
   }
@@ -66,12 +83,24 @@ const DemoData = (() => {
     file("zelda", "Breath of the Wild", "archive", "Switch/", "Игра", 14.4, { platform: "Switch" }),
     file("gow", "Chains of Olympus", "archive", "PSP/", "Игра", 1.5, { platform: "PSP" }),
     file("hollow", "Hollow Knight.app", "data", "Games/", "Игра", 7.8, { platform: "macOS" }),
-    file("film", "Sintel.mkv", "media", "Movies/", "Видео", 3.5),
-    file("trailer", "Spring.mkv", "vault", "Movies/", "Видео", 1.1),
+    file("film", "Sintel.mkv", "media", "Movies/", "Видео", 3.5, {
+      tracks: [
+        { kind: "video", codec: "H.264", details: "1920 × 1080 · 24 кадр/с" },
+        { kind: "audio", codec: "AAC", details: "Английский · 5.1 · 48 кГц" },
+      ],
+    }),
+    file("trailer", "Spring.mkv", "vault", "Movies/", "Видео", 1.1, {
+      tracks: [
+        { kind: "video", codec: "H.264", details: "1920 × 1080 · 24 кадр/с" },
+        { kind: "audio", codec: "AAC", details: "Стерео · 48 кГц" },
+      ],
+    }),
     file("osm", "OpenStreetMap · Europe", "archive", "Maps/", "Данные", 31.6, { torrentId: "osm" }),
     file("blend", "Blender Demo Files", "vault", "Downloads/", "Архив", 8.4, { torrentId: "blend" }),
     file("debian", "Debian 13 · netinst", "media", "ISO/", "Образ", 0.784, { torrentId: "debian" }),
-    file("audio", "Концерт.flac", "cd", "Audio/", "Музыка", 0.48),
+    file("audio", "Концерт.flac", "cd", "Audio/", "Музыка", 0.48, {
+      tracks: [{ kind: "audio", codec: "FLAC", details: "Стерео · 44,1 кГц" }],
+    }),
     file("book", "Каталог.pdf", "camera", "Documents/", "Документ", 0.024),
   ];
   for (const [source, targets] of [
@@ -135,9 +164,17 @@ const DemoData = (() => {
   };
 
   const av1 = {
-    id: "encode-spring", kind: "av1", title: "AV1 · Spring.mkv", host: "mac",
-    progress: 26, bytesPerSec: 4e6, etaSec: 204, state: "running", error: null, totalBytes: 1.1e9,
-    operation: { type: "encode", fileId: "trailer", content: "av1:trailer", size: 737e6, target: "media", dir: "Фильмы/" }
+    id: "encode-spring",
+    kind: "av1",
+    title: "AV1 · Spring.mkv",
+    host: "mac",
+    progress: 26,
+    bytesPerSec: 4e6,
+    etaSec: 204,
+    state: "running",
+    error: null,
+    totalBytes: 1.1e9,
+    operation: { type: "encode", fileId: "trailer", content: "av1:trailer", size: 737e6, target: "media", dir: "Фильмы/" },
   };
 
   function snapshot(scenario = "normal") {
@@ -145,6 +182,7 @@ const DemoData = (() => {
       hosts,
       disks,
       files,
+      checksums,
       torrents,
       history,
       rules,
@@ -163,7 +201,13 @@ const DemoData = (() => {
       for (const key of ["disks", "files", "torrents", "history"]) data[key] = [];
     } else if (scenario === "offline") {
       data.hosts.find((h) => h.id === "pc").online = false;
-      data.tasks.push({...structuredClone(av1), state:"paused", bytesPerSec:0, resumeRate:av1.bytesPerSec, etaSec:null});
+      data.tasks.push({
+        ...structuredClone(av1),
+        state: "paused",
+        bytesPerSec: 0,
+        resumeRate: av1.bytesPerSec,
+        etaSec: null,
+      });
     } else if (scenario === "copying" || scenario === "error") {
       const task = structuredClone(example);
       if (scenario === "error")
@@ -174,26 +218,53 @@ const DemoData = (() => {
           error: "Диск назначения отключился во время копирования.",
         });
       const encode = structuredClone(av1);
-      if (scenario === "error") Object.assign(encode, {state:"error", bytesPerSec:0, etaSec:null, error:"Выходной контейнер не прошёл проверку дорожек."});
+      if (scenario === "error")
+        Object.assign(encode, {
+          state: "error",
+          bytesPerSec: 0,
+          etaSec: null,
+          error: "Выходной контейнер не прошёл проверку дорожек.",
+        });
       data.tasks.push(task, encode);
-      if (scenario === "error") data.tasks.push({
-        id: "scan-usb", kind: "index", title: "Индексация · Флешка 01", host: "mac",
-        totalBytes: disks.find(d => d.id === "usb").sizeBytes, progress: 14, bytesPerSec: 0, etaSec: null,
-        state: "error", error: "Не удалось прочитать каталог. Сохранён предыдущий снимок.",
-        operation: { type: "index", target: "usb" }
-      });
+      if (scenario === "error")
+        data.tasks.push({
+          id: "scan-usb",
+          kind: "index",
+          title: "Индексация · Флешка 01",
+          host: "mac",
+          totalBytes: disks.find((d) => d.id === "usb").sizeBytes,
+          progress: 14,
+          bytesPerSec: 0,
+          etaSec: null,
+          state: "error",
+          error: "Не удалось прочитать каталог. Сохранён предыдущий снимок.",
+          operation: { type: "index", target: "usb" },
+        });
     } else {
-      data.tasks.push({
-        id: "index-archive",
-        kind: "index",
-        title: "Индекс Archive HDD обновлён",
-        host: "pc",
-        progress: 100,
-        bytesPerSec: 0,
-        etaSec: 0,
-        state: "done",
-        error: null,
-      });
+      data.tasks.push(
+        {
+          ...structuredClone(example),
+          id: "copied-to-usb",
+          host: "pc",
+          progress: 100,
+          bytesPerSec: 0,
+          etaSec: 0,
+          state: "done",
+          verified: true,
+          operation: { type: "copy", fileId: "film", target: "usb" },
+        },
+        {
+          id: "index-archive",
+          kind: "index",
+          title: "Индекс Archive HDD обновлён",
+          host: "pc",
+          progress: 100,
+          bytesPerSec: 0,
+          etaSec: 0,
+          state: "done",
+          error: null,
+        },
+      );
     }
     return data;
   }

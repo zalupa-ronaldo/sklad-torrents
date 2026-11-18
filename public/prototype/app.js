@@ -16,6 +16,7 @@ function createState(scenario, page = "overview") {
       connection: "all",
       limit: 6,
       fileQuery: "",
+      fileId: null,
       disk: "",
       host: "",
       status: "",
@@ -112,6 +113,7 @@ function resetForm() {
 }
 function navigate(page) {
   resetForm();
+  if (page === "jobs") state.ui.taskKind = "";
   Object.assign(state.ui, { page, menu: false, modal: null });
   window.scrollTo(0, 0);
 }
@@ -227,7 +229,15 @@ function completeTask(task) {
         );
       }
       break;
-    case "copy":
+    case "copy": {
+      const reason = copyReason(state, f, target);
+      if (reason) throw new Error(reason);
+      const copy = writeCopy(f, target, op.dir ?? f.dir, { allocatedBytes: f.sizeBytes });
+      state.manifests[copy.id] = task.checksum;
+      task.verified = true;
+      onArrival(copy);
+      break;
+    }
     case "receive":
     case "game": {
       const copy = writeCopy(f, target, op.dir ?? f.dir, op.type === "game" ? { original: f.id } : {});
@@ -254,6 +264,7 @@ function completeTask(task) {
       writeCopy(f, target, op.dir, {
         contentId: op.content,
         optimized: true,
+        tracks: f.tracks?.map((t) => (t.kind === "video" ? { ...t, codec: "AV1" } : { ...t })),
         name: f.name.replace(/\.[^.]+$/, "") + ".sklad-av1.mkv",
         sizeBytes: op.size,
         allocatedBytes: op.size,
@@ -278,10 +289,42 @@ function completeTask(task) {
       break;
     }
     case "image":
-      writeCopy(f, target, "Images/", { contentId: task.id, name: op.name, type: "Образ", platform: null });
+      writeCopy(f, target, "Images/", { contentId: task.id, name: op.name, type: "Образ", platform: null, tracks: [] });
       break;
     case "send":
       break;
+  }
+}
+async function fixtureDigest(contentId) {
+  const hash = await crypto.subtle.digest("SHA-256", new TextEncoder().encode("sklad-demo/" + contentId));
+  return [...new Uint8Array(hash)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+const finishing = new WeakSet();
+async function finishTask(j, snapshot) {
+  if (finishing.has(j)) return;
+  finishing.add(j);
+  try {
+    if (j.operation?.type === "copy") {
+      const f = byId(snapshot.files, j.operation.fileId);
+      const expected = snapshot.manifests[f.id] || snapshot.checksums[f.contentId] || (await fixtureDigest(f.contentId));
+      const actual = await fixtureDigest(f.contentId);
+      if (actual !== expected) throw new Error("SHA-256 не совпал. Копия не добавлена в каталог.");
+      j.checksum = actual;
+    }
+    if (snapshot !== state || !state.tasks.includes(j) || j.state !== "running") return;
+    j.state = "done";
+    j.bytesPerSec = 0;
+    j.etaSec = 0;
+    completeTask(j);
+  } catch (error) {
+    if (snapshot !== state || !state.tasks.includes(j) || j.state === "paused") return;
+    j.state = "error";
+    j.bytesPerSec = 0;
+    j.etaSec = null;
+    j.error = error.message;
+  } finally {
+    finishing.delete(j);
+    if (state === snapshot) render(state);
   }
 }
 function advanceTasks(seconds) {
@@ -293,16 +336,7 @@ function advanceTasks(seconds) {
     j.progress = Math.min(100, j.progress + ((seconds * j.bytesPerSec) / Math.max(j.totalBytes, 1)) * 100);
     j.etaSec = Math.max(0, Math.ceil((((100 - j.progress) / 100) * j.totalBytes) / j.bytesPerSec));
     if (j.progress < 100) continue;
-    j.state = "done";
-    j.bytesPerSec = 0;
-    j.etaSec = 0;
-    try {
-      completeTask(j);
-    } catch (e) {
-      j.state = "error";
-      j.error = e.message;
-      j.etaSec = null;
-    }
+    void finishTask(j, state);
   }
   if (changed) render(state);
 }
@@ -322,7 +356,10 @@ function taskAction(name, id) {
     return;
   }
   if ((name === "pause" && j.state === "paused") || (name === "retry" && j.state === "error")) {
-    if (!taskAvailable(state,j)) { message("Для продолжения подключите носитель и его хост."); return; }
+    if (!taskAvailable(state, j)) {
+      message("Для продолжения подключите носитель и его хост.");
+      return;
+    }
     if (name === "retry") j.progress = 0;
     j.state = "running";
     j.error = null;
@@ -349,8 +386,7 @@ async function runOperation() {
     title = "SHA-256 · " + f.name;
     const entries = await Promise.all(
       [f, m.other].filter(Boolean).map(async (c) => {
-        const hash = await crypto.subtle.digest("SHA-256", new TextEncoder().encode("sklad-demo/" + c.contentId));
-        return [c.id, [...new Uint8Array(hash)].map((b) => b.toString(16).padStart(2, "0")).join("")];
+        return [c.id, await fixtureDigest(c.contentId)];
       }),
     );
     if (state !== s || u.page !== page) return;
@@ -428,7 +464,11 @@ function gameAction(id) {
     copy = state.files.find((c) => c.original === id),
     pool = byId(state.disks, state.gamePool);
   if (copy || f.platform === "macOS") {
-    state.ui.modal = { kind: copy ? "launch" : "file", id: copy?.id || id };
+    if (copy) state.ui.modal = { kind: "launch", id: copy.id };
+    else {
+      navigate("details");
+      state.ui.fileId = id;
+    }
     return;
   }
   if (!available(state, pool) || pool.freeBytes < f.sizeBytes) {
@@ -487,6 +527,29 @@ async function act(name, value) {
       u.fileQuery = "";
       break;
     case "file":
+      if (u.page !== "details") navigate("details");
+      u.fileId = value;
+      delete u.form.copyTarget;
+      break;
+    case "backToFiles":
+      navigate("drives");
+      break;
+    case "copyDetail": {
+      const f = byId(state.files, u.fileId),
+        target = byId(state.disks, u.form.copyTarget);
+      if (!f || copyReason(state, f, target)) break;
+      if (
+        enqueue("copy", "Копирование · " + f.name, diskOf(state, f).host, f.sizeBytes, {
+          type: "copy",
+          fileId: f.id,
+          target: target.id,
+        })
+      ) {
+        navigate("jobs");
+        u.taskKind = "";
+      }
+      break;
+    }
     case "torrent":
       u.modal = { kind: name, id: value };
       break;
@@ -494,7 +557,7 @@ async function act(name, value) {
       u.modal = null;
       break;
     case "fileOp": {
-      const id = u.modal.id;
+      const id = u.fileId;
       navigate(value);
       u.form.source = id;
       break;
@@ -523,7 +586,7 @@ async function act(name, value) {
       u.form.source = state.files.find((f) => f.torrentId === value).id;
       break;
     case "taskKind":
-      u.taskKind=value;
+      u.taskKind = value;
       break;
     case "platform":
       u.platform = value;
@@ -533,9 +596,11 @@ async function act(name, value) {
       break;
     case "reindex": {
       const d = byId(state.disks, value);
-      if (!available(state,d)) break;
-      if (enqueue("index", "Обновить индекс · " + d.label, d.host, d.sizeBytes, { type: "index", target: d.id }))
-        { if(u.page !== "devices") navigate("jobs"); else message("Сканирование началось."); }
+      if (!available(state, d)) break;
+      if (enqueue("index", "Обновить индекс · " + d.label, d.host, d.sizeBytes, { type: "index", target: d.id })) {
+        if (u.page !== "devices") navigate("jobs");
+        else message("Сканирование началось.");
+      }
       break;
     }
     case "run":
@@ -604,6 +669,7 @@ function updateControl(el) {
     resetForm();
     clearTimeout(toastTimer);
     state = createState(v, u.page);
+    state.ui.fileId = u.fileId;
   } else if (id in textFields) {
     u[textFields[id]] = v;
     if (id === "shelf-query") u.limit = 6;
