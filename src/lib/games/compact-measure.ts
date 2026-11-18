@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { constants } from "node:fs";
-import { access, lstat, readdir, stat } from "node:fs/promises";
+import { access, lstat, mkdtemp, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import path from "node:path";
 
 import { assertEncodePaths } from "@/lib/transcode/encode-plan";
@@ -454,6 +455,26 @@ export function measureDebugRequested(args: readonly string[] = [], env: NodeJS.
   return args.includes("--debug-probe") || env.SKLAD_COMPACT_DEBUG === "1";
 }
 
+/** UTF-8 JSON array. One element per file, so spaces, quotes and Cyrillic stay inside the string. */
+export function serializeProbePaths(files: readonly string[]): string {
+  return JSON.stringify(files);
+}
+
+/**
+ * Same branch as the PowerShell probe: a JSON array is one path per element.
+ * A single JSON string stays one path. The array is never joined with a space.
+ */
+export function enumerateProbePaths(parsed: unknown): string[] {
+  if (typeof parsed === "string") return parsed.length > 0 ? [parsed] : [];
+  if (!Array.isArray(parsed)) return [];
+  const paths: string[] = [];
+  for (const item of parsed) {
+    if (typeof item !== "string" || item.length === 0) return [];
+    paths.push(item);
+  }
+  return paths;
+}
+
 /** Shown only for `game measure --debug-probe` or SKLAD_COMPACT_DEBUG=1. */
 export interface ProbeDiagnostic {
   exitCode: number | null;
@@ -591,10 +612,17 @@ $wofReady = $true
 } catch {
 [Console]::Error.WriteLine('WOF state type failed')
 }
-if ([string]::IsNullOrEmpty($env:SKLAD_COMPACT_FILES)) { [Console]::Error.WriteLine('SKLAD_COMPACT_FILES empty'); exit 1 }
-$paths = @($env:SKLAD_COMPACT_FILES | ConvertFrom-Json)
-foreach ($item in $paths) {
-  $full = [string]$item
+if ([string]::IsNullOrEmpty($env:SKLAD_COMPACT_LIST)) { [Console]::Error.WriteLine('SKLAD_COMPACT_LIST empty'); exit 1 }
+$utf8 = New-Object System.Text.UTF8Encoding $false
+$raw = [System.IO.File]::ReadAllText($env:SKLAD_COMPACT_LIST, $utf8)
+$parsed = ConvertFrom-Json -InputObject $raw
+$paths = New-Object System.Collections.Generic.List[string]
+if ($parsed -is [System.Array]) {
+  foreach ($entry in $parsed) { [void]$paths.Add([string]$entry) }
+} else {
+  [void]$paths.Add([string]$parsed)
+}
+foreach ($full in $paths) {
   $size = [SkladSize]::Of($full)
   $code = -1
   if ($wofReady) {
@@ -625,7 +653,15 @@ async function compressedSizes(files: readonly string[]): Promise<{ ok: boolean;
   if (files.length === 0) {
     return { ok: true, values: empty, states, total: 0, code: 0, note: "", probe: buildProbeReport({ exitCode: 0, stdout: Buffer.alloc(0), stderr: "", stderrBytes: 0, powershell: bin, argv, script, rows: 0 }) };
   }
-  const result = await run(bin, argv, { SKLAD_COMPACT_FILES: JSON.stringify(files) });
+  const listDir = await mkdtemp(path.join(tmpdir(), "sklad-compact-"));
+  const listFile = path.join(listDir, "files.json");
+  let result: Awaited<ReturnType<typeof run>>;
+  try {
+    await writeFile(listFile, serializeProbePaths(files), "utf8");
+    result = await run(bin, argv, { SKLAD_COMPACT_LIST: listFile });
+  } finally {
+    await rm(listDir, { recursive: true, force: true });
+  }
   const parsed = parseSizeProbeOutput(result.stdoutBuf);
   const values = new Map<string, number | null>();
   for (const row of parsed.rows) {

@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { expect, it } from "vitest";
 
-import { accountReadings, buildProbeReport, clipDiag, compressionProbeScript, decideCompact, decodeCompactOutput, encodePowerShellCommand, finishMeasurement, listOwnedFiles, measureDebugRequested, parseCompactListing, parseCompactSummary, parseSizeProbeOutput, powershellProbeArgs, readingsFromQuery, reconcileOwnedRoot, stripPowerShellNoise, windowsPowershellCandidates, type OwnedFile, type WofState } from "@/lib/games/compact-measure";
+import { accountReadings, buildProbeReport, clipDiag, compressionProbeScript, decideCompact, decodeCompactOutput, encodePowerShellCommand, enumerateProbePaths, finishMeasurement, listOwnedFiles, measureDebugRequested, parseCompactListing, parseCompactSummary, parseSizeProbeOutput, powershellProbeArgs, readingsFromQuery, reconcileOwnedRoot, serializeProbePaths, stripPowerShellNoise, windowsPowershellCandidates, type OwnedFile, type WofState } from "@/lib/games/compact-measure";
 import { localJobHost, hostFacts } from "@/lib/jobs/local-host";
 
 const smoke = "    36864 :  1048576 = 28.4 to 1 XPRESS8K payload.bin";
@@ -333,6 +333,25 @@ it("parses a Windows PowerShell 5.1 stdout capture and ignores CLIXML on stderr"
   expect(measureDebugRequested(["--debug-probe"], {} as unknown as NodeJS.ProcessEnv)).toBe(true);
   expect(measureDebugRequested([], { SKLAD_COMPACT_DEBUG: "1" } as unknown as NodeJS.ProcessEnv)).toBe(true);
   expect(measureDebugRequested([], { SKLAD_COMPACT_DEBUG: "0" } as unknown as NodeJS.ProcessEnv)).toBe(false);
+});
+
+it("passes each probe path separately, including spaces, quotes and Cyrillic", () => {
+  const files = [
+    "C:\\Games\\Моя игра\\payload.bin",
+    "D:\\Pool\\My Game\\sklad-game.json",
+    "C:\\Games\\file \"1\".bin",
+    "\\\\?\\D:\\Архив\\очень длинный каталог\\data.bin",
+  ];
+  const enumerated = enumerateProbePaths(JSON.parse(serializeProbePaths(files)));
+  expect(enumerated).toEqual(files);
+  expect(enumerated).toHaveLength(4);
+  expect(enumerated).not.toContain(files.join(" "));
+  expect(enumerateProbePaths(files[0])).toEqual([files[0]]);
+  const script = compressionProbeScript();
+  expect(script).toMatch(/ConvertFrom-Json -InputObject/);
+  expect(script).toMatch(/SKLAD_COMPACT_LIST/);
+  expect(script).toMatch(/-is \[System\.Array\]/);
+  expect(script).not.toMatch(/SKLAD_COMPACT_FILES \| ConvertFrom-Json/);
 });
 
 it("stops at a symlink and at E: before reading a file", async () => {
