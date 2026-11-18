@@ -211,12 +211,15 @@ function onArrival(f) {
     state.tasks.some((j) => ["running", "paused"].includes(j.state) && j.operation?.content === content)
   )
     return;
-  const size = Math.round(f.sizeBytes * 0.67),
+  const profile = state.encodingProfiles[state.toolSettings.preset];
+  const size = Math.round(f.sizeBytes * (1 - profile.saveRatio)),
     rule = state.rules["Фильмы"],
     dest = placement(rule, size);
   if (dest)
     enqueue("av1", "AV1 · " + f.name, d.host, f.sizeBytes, {
       type: "encode",
+      preset: state.toolSettings.preset,
+      fps: profile.fps,
       fileId: f.id,
       content,
       size,
@@ -229,6 +232,8 @@ function completeTask(task) {
   if (!op) return;
   const f = byId(state.files, op.fileId),
     target = byId(state.disks, op.target);
+  if ((op.fileId && !f) || (op.target && !target) || (op.other && !byId(state.files, op.other)))
+    throw Error("Источник или назначение отсутствует в снимке.");
   if (
     !byId(state.hosts, task.host)?.online ||
     (f && !available(state, diskOf(state, f))) ||
@@ -300,7 +305,12 @@ function completeTask(task) {
       writeCopy(f, target, op.dir, {
         contentId: op.content,
         optimized: true,
-        tracks: f.tracks?.map((t) => (t.kind === "video" ? { ...t, codec: "AV1" } : { ...t })),
+        tracks: f.tracks?.map((t) => {
+          if (t.kind !== "video") return { ...t };
+          const profile = state.encodingProfiles[op.preset];
+          const details = profile?.height === 720 ? t.details.replace(/1920 × 1080/g, "1280 × 720") : t.details;
+          return { ...t, codec: "AV1", details };
+        }),
         name: f.name.replace(/\.[^.]+$/, "") + ".sklad-av1.mkv",
         sizeBytes: op.size,
         allocatedBytes: op.size,
@@ -388,8 +398,9 @@ async function finishTask(j, snapshot) {
   }
 }
 function advanceTasks(seconds) {
+  const minute = Math.floor(state.schedule.clock / 60000);
   Pipeline.tick(state, seconds);
-  let changed = false;
+  let changed = state.ui.page === "scheduler" && minute !== Math.floor(state.schedule.clock / 60000);
   // Snapshot the list: completing a copy can enqueue another job.
   for (const j of [...state.tasks]) {
     if (j.state !== "running") continue;
@@ -721,45 +732,48 @@ async function act(name, value) {
       break;
   }
 }
+const simulatedRequests = new Set([
+  "invSaveHost",
+  "invProbe",
+  "invCompress",
+  "invDownload",
+  "invManifest",
+  "invMigrate",
+  "confirmAction",
+  "pipeSchedule",
+  "pipeAuto",
+  "pipeSettings",
+  "pipeSSD",
+  "pipeCompress",
+  "pipeEncode",
+  "shopDiscover",
+  "shopTray",
+  "shopBlank",
+  "shopSendSettings",
+  "shopApply",
+  "run",
+  "reindex",
+  "copyDetail",
+  "game",
+  "toggleTorrent",
+  "dry",
+  "auto",
+  "finish",
+  "next",
+  "pause",
+  "cancel",
+  "invHashRun",
+  "retry",
+  "addTorrent",
+]);
 async function dispatch(name, value) {
   const snapshot = state,
     wasPage = state.ui.page,
     modal = state.ui.modal;
-  const writes = new Set([
-    "invSaveHost",
-    "invProbe",
-    "invCompress",
-    "invDownload",
-    "invManifest",
-    "invMigrate",
-    "confirmAction",
-    "pipeSchedule",
-    "pipeAuto",
-    "pipeSettings",
-    "pipeSSD",
-    "pipeCompress",
-    "pipeEncode",
-    "shopDiscover",
-    "shopTray",
-    "shopBlank",
-    "shopSendSettings",
-    "shopApply",
-    "run",
-    "reindex",
-    "copyDetail",
-    "game",
-    "toggleTorrent",
-    "dry",
-    "auto",
-    "finish",
-    "next",
-    "retry",
-    "addTorrent",
-  ]);
-  if (state.ui.pending && writes.has(name)) return;
+  if (state.ui.pending && simulatedRequests.has(name)) return;
   let pending = null;
   try {
-    if (writes.has(name)) {
+    if (simulatedRequests.has(name)) {
       pending = { name, value };
       state.ui.pending = pending;
       render(state);
@@ -843,6 +857,11 @@ function updateControl(el) {
     u.form.artURL = image ? URL.createObjectURL(image) : "";
     u.form.artName = image?.name;
   } else if (id) {
+    if (id === "configHost") {
+      delete u.form.encoderPath;
+      delete u.form.compactPath;
+      delete u.form.agentAddress;
+    }
     if (id === "moveDisk") {
       delete u.form.source;
       delete u.form.dest;

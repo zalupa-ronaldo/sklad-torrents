@@ -215,7 +215,7 @@ const Inventory = (() => {
       case "invHashRun":
         navigate("integrity");
         u.form.source = f.id;
-        break;
+        return runOperation();
       case "invManifest":
         downloadBlob(t.name + ".sha256", (s.manifests[f.id] || s.checksums[f.contentId]) + "  " + f.name + "\n");
         break;

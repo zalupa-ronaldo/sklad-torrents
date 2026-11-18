@@ -120,23 +120,33 @@ const Pipeline = (() => {
     ];
     const tab = form.mediaTab || "av1";
     const selector = `<div class="queue-filters">${nav.map(([id, label]) => button("pipeMediaTab", label, id, "secondary-action", `aria-pressed="${tab === id}"`)).join("")}</div>`;
+    const configHost = byId(s.hosts, form.configHost) || s.hosts[0];
+    const paths = s.toolPaths[configHost?.id] || {};
     if (tab === "settings")
       return (
         selector +
         card(
           "Настройки инструментов",
-          field(
-            "profile",
-            "Профиль HandBrake",
-            ["AV1 1080p", "AV1 720p", "AV1 исходное разрешение"],
-            form.profile || settings.preset,
-          ) +
+          field("profile", "Профиль HandBrake", Object.keys(s.encodingProfiles), form.profile || settings.preset) +
             field(
               "algorithm",
               "Алгоритм NTFS",
               ["XPRESS4K", "XPRESS8K", "XPRESS16K", "LZX"],
               form.algorithm || settings.algorithm,
             ) +
+            (configHost
+              ? field(
+                  "configHost",
+                  "Хост инструментов",
+                  s.hosts.map((h) => [h.id, h.name]),
+                  configHost.id,
+                ) +
+                inputField("encoderPath", "HandBrakeCLI", form.encoderPath ?? paths.encoder ?? "") +
+                (configHost.os === "Windows"
+                  ? inputField("compactPath", "compact.exe", form.compactPath ?? paths.compact ?? "") +
+                    inputField("agentAddress", "Адрес агента", form.agentAddress ?? paths.agent ?? "", "url")
+                  : "")
+              : empty("Для настройки путей добавьте хост.")) +
             button("pipeSettings", "Сохранить настройки", "", "primary"),
         )
       );
@@ -195,7 +205,7 @@ const Pipeline = (() => {
     const stats = active
       ? card(
           "Обработка AV1",
-          `<p>${esc(active.title)} · ${taskLabel(active)}</p>${meter(active.progress, active.title)}<div class="device-volume"><b>${num(active.progress)}%</b><span>${active.state === "running" ? s.toolSettings.fps : 0} fps</span><span>ETA ${active.etaSec == null ? "—" : active.etaSec + " с"}</span></div><p>Готово ${done.length} из ${jobs.length} · экономия объёма ${bytes(saved)}</p><small>Освобождено на носителях · ${bytes(s.reclaimedBytes)}</small><div class="file-actions">${button("pipeTask", "Открыть задачу", active.id)}</div>`,
+          `<p>${esc(active.title)} · ${taskLabel(active)}</p>${meter(active.progress, active.title)}<div class="device-volume"><b>${num(active.progress)}%</b><span>${active.state === "running" ? active.operation.fps || s.encodingProfiles[active.operation.preset || s.toolSettings.preset].fps : 0} fps</span><span>ETA ${active.etaSec == null ? "—" : active.etaSec + " с"}</span></div><p>Готово ${done.length} из ${jobs.length} · экономия объёма ${bytes(saved)}</p><small>Освобождено на носителях · ${bytes(s.reclaimedBytes)}</small><div class="file-actions">${button("pipeTask", "Открыть задачу", active.id)}</div>`,
         )
       : empty("Задач AV1 пока нет.");
     return (
@@ -302,13 +312,24 @@ const Pipeline = (() => {
       case "pipeMediaTab":
         s.ui.form = { mediaTab: id };
         break;
-      case "pipeSettings":
+      case "pipeSettings": {
+        const h = byId(s.hosts, form.configHost) || s.hosts[0],
+          paths = s.toolPaths[h?.id] || {};
+        if (h) {
+          const encoder = (form.encoderPath ?? paths.encoder ?? "").trim(),
+            compact = (form.compactPath ?? paths.compact ?? "").trim(),
+            agent = (form.agentAddress ?? paths.agent ?? "").trim();
+          if (!encoder || (h.os === "Windows" && (!compact || !/^https?:\/\//i.test(agent))))
+            throw Error("Укажите путь к кодировщику, а для Windows — адрес агента и путь к compact.exe.");
+          s.toolPaths[h.id] = { encoder, compact, agent };
+        }
         Object.assign(s.toolSettings, {
           preset: form.profile || s.toolSettings.preset,
           algorithm: form.algorithm || s.toolSettings.algorithm,
         });
         message("Настройки сохранены.");
         break;
+      }
       case "pipeCompress": {
         const d = byId(s.disks, id);
         Inventory.compress(d, form.toolDir || Inventory.folders(s, d)[0]);
@@ -336,7 +357,8 @@ const Pipeline = (() => {
         );
         let count = 0;
         for (const f of files) {
-          const size = Math.round(f.sizeBytes * (1 - s.toolSettings.saveRatio)),
+          const profile = s.encodingProfiles[s.toolSettings.preset],
+            size = Math.round(f.sizeBytes * (1 - profile.saveRatio)),
             d = placement(s.rules["Фильмы"], size);
           if (!d) continue;
           if (
@@ -348,6 +370,7 @@ const Pipeline = (() => {
               target: d.id,
               dir: s.rules["Фильмы"].folder + "/",
               preset: s.toolSettings.preset,
+              fps: profile.fps,
             })
           )
             count++;

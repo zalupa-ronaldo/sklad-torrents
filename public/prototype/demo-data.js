@@ -315,7 +315,12 @@ const DemoData = (() => {
           : { encoder: "/opt/homebrew/bin/HandBrakeCLI", agent: "", compact: "" },
       ]),
     );
-    data.toolSettings = { preset: "AV1 1080p", fps: 24, algorithm: "XPRESS8K", saveRatio: 0.33 };
+    data.encodingProfiles = {
+      "AV1 1080p": { fps: 24, saveRatio: 0.33, height: 1080 },
+      "AV1 720p": { fps: 38, saveRatio: 0.49, height: 720 },
+      "AV1 исходное разрешение": { fps: 18, saveRatio: 0.27, height: null },
+    };
+    data.toolSettings = { preset: "AV1 1080p", algorithm: "XPRESS8K" };
     data.sendSettings = { alias: "Склад", port: 53317, discovery: true, inbox: "vault" };
     data.opticalDrive = blank
       ? null
