@@ -29,7 +29,7 @@ export function ToolsShell({ children }: { children: React.ReactNode }) {
             <p className="truncate text-xs text-muted-foreground">HandBrake, перенос папок и NTFS на своих машинах</p>
           </div>
         </div>
-        <Link href="/" className="text-sm text-primary hover:underline sm:ml-auto">
+        <Link href="/legacy" className="text-sm text-primary hover:underline sm:ml-auto">
           Раздачи
         </Link>
       </header>

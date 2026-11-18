@@ -3,10 +3,12 @@ import { gzipSync } from "node:zlib";
 import os from "node:os";
 import path from "node:path";
 import { once } from "node:events";
+import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterEach, expect, it, vi } from "vitest";
 import { startAgent } from "../../../agents/lib/agent.mts";
 import { executeIndexPlan } from "@/addons/drives/execute-index";
+import type { VolumeWatchEvent } from "@/addons/drives/index-mode";
 import { pollAgent } from "@/addons/drives/agent-client";
 import { buildMockCatalog } from "@/addons/drives/mock-source";
 
@@ -25,6 +27,36 @@ afterEach(() => {
 });
 const volume = { serial: "test", volumeUuid: "abc", filesystem: "NTFS", volumeName: "test", mountPaths: ["C:\\"], totalBytes: 100, freeBytes: 10, busy: false, letter: "C" };
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+async function stopAgent(server: Server) {
+  if (server.listening) {
+    await new Promise<void>((resolve, reject) => {
+      server.close((error) => (error ? reject(error) : resolve()));
+    });
+  }
+  await vi.waitFor(() => expect(server.listening).toBe(false));
+}
+
+async function removeAgentDir(directory: string) {
+  let last: unknown;
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    try {
+      await rm(directory, { recursive: true, force: true });
+      return;
+    } catch (error) {
+      last = error;
+      const code = error && typeof error === "object" && "code" in error ? error.code : "";
+      if (code !== "ENOTEMPTY") throw error;
+      await sleep(20);
+    }
+  }
+  throw last;
+}
+
+async function stopAndRemove(server: Server, directory: string) {
+  await stopAgent(server);
+  await removeAgentDir(directory);
+}
 
 it("retains an in-flight volume across collection ticks, publishes pages, and never expires a ready tree", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "sklad-agent-test-"));
@@ -49,7 +81,7 @@ it("retains an in-flight volume across collection ticks, publishes pages, and ne
     const page = await (await fetch(`${base}/v1/files?serial=test&uuid=abc&revision=${index.revision}&offset=0&limit=1`)).json();
     expect(page.files[0].name).toBe("a.txt");
     expect((await fetch(`${base}/v1/files?serial=test&uuid=abc&revision=old`)).status).toBe(409);
-  } finally { await new Promise<void>((resolve) => server.close(() => resolve())); await sleep(30); await rm(directory, { recursive: true, force: true }); }
+  } finally { await stopAndRemove(server, directory); }
 });
 
 it("rebuilds a saved NTFS snapshot once when every file size is zero", async () => {
@@ -93,9 +125,7 @@ it("rebuilds a saved NTFS snapshot once when every file size is zero", async () 
     expect(metadata.volumes[0].index.recordCount).toBe(1);
     expect(metadata.volumes[0].index.state).toBe("complete");
   } finally {
-    await new Promise<void>((resolve) => server.close(() => resolve()));
-    await sleep(30);
-    await rm(directory, { recursive: true, force: true });
+    await stopAndRemove(server, directory);
   }
 });
 
@@ -124,9 +154,7 @@ it("does not list or index Z even when config calls it manual-only", async () =>
     expect(rescan.status).toBe(404);
     expect(executeIndexPlan).toHaveBeenCalledOnce();
   } finally {
-    await new Promise<void>((resolve) => server.close(() => resolve()));
-    await sleep(30);
-    await rm(directory, { recursive: true, force: true });
+    await stopAndRemove(server, directory);
   }
 });
 
@@ -178,9 +206,7 @@ it("pauses a running index on restart and resumes from the MFT cursor", async ()
     expect(plan?.cursor?.recordsDone).toBe(3);
     expect(plan?.cursor?.nextUsn).toBe("15");
   } finally {
-    await new Promise<void>((resolve) => server.close(() => resolve()));
-    await sleep(30);
-    await rm(directory, { recursive: true, force: true });
+    await stopAndRemove(server, directory);
   }
 });
 
@@ -260,9 +286,7 @@ it("drops excluded Z before resume and does not index C/D/E/F/S again when their
     expect(files.status).toBe(404);
     expect(executeIndexPlan).not.toHaveBeenCalled();
   } finally {
-    await new Promise<void>((resolve) => server.close(() => resolve()));
-    await sleep(30);
-    await rm(directory, { recursive: true, force: true });
+    await stopAndRemove(server, directory);
   }
 });
 
@@ -313,9 +337,7 @@ it("keeps manual-only D listed and rescannable while Z stays excluded", async ()
     expect(blocked.status).toBe(404);
     expect(executeIndexPlan).toHaveBeenCalledTimes(2);
   } finally {
-    await new Promise<void>((resolve) => server.close(() => resolve()));
-    await sleep(30);
-    await rm(directory, { recursive: true, force: true });
+    await stopAndRemove(server, directory);
   }
 });
 
@@ -339,9 +361,58 @@ it("does not launch compact.exe when the process is not Windows", async () => {
     expect(await response.json()).toMatchObject({ error: expect.stringMatching(/Сжатие Windows/) });
     expect(vi.mocked(executeIndexPlan).mock.calls.length).toBe(calls);
   } finally {
-    await new Promise<void>((resolve) => server.close(() => resolve()));
-    await sleep(30);
-    await rm(directory, { recursive: true, force: true });
+    await stopAndRemove(server, directory);
+  }
+});
+
+it("does not collect volumes again on a timer and catches up USN without a second MFT", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "sklad-agent-usn-"));
+  process.env.SKLAD_AGENT_SNAPSHOT = path.join(directory, "snapshot.gz");
+  await writeFile(process.env.SKLAD_AGENT_SNAPSHOT, gzipSync(JSON.stringify({
+    volumes: [{
+      ...volume,
+      usnStart: "15",
+      lastEventId: null,
+      index: {
+        state: "complete",
+        progress: 1,
+        strategy: "mft-usn",
+        files: [{ relativePath: "keep/a.txt", name: "a.txt", kind: "file", size: 8, mtimeMs: 0 }],
+      },
+    }],
+  })));
+  vi.mocked(executeIndexPlan).mockResolvedValue({
+    called: ["readUsn"],
+    payload: {
+      state: "complete",
+      progress: 1,
+      strategy: "mft-usn",
+      delta: { upserts: [], deletes: [], complete: true },
+    },
+  });
+  const collect = vi.fn(async () => ({ elevated: true, note: "", volumes: [{ ...volume }] }));
+  let emit: (event: VolumeWatchEvent) => void = () => undefined;
+  const server = startAgent({
+    port: 0,
+    hostId: "test",
+    hostName: "test",
+    os: "win32",
+    collect,
+    intervalMs: 10,
+    watch: { start(on) { emit = on; }, stop() {} },
+  });
+  await once(server, "listening");
+  try {
+    await vi.waitFor(() => expect(executeIndexPlan).toHaveBeenCalledOnce());
+    expect(vi.mocked(executeIndexPlan).mock.calls[0]?.[0]).toMatchObject({ incremental: "usn" });
+    await sleep(40);
+    expect(collect).toHaveBeenCalledOnce();
+    expect(executeIndexPlan).toHaveBeenCalledOnce();
+    emit({ type: "journal", serial: volume.serial, volumeUuid: volume.volumeUuid, cursor: "16" });
+    await vi.waitFor(() => expect(executeIndexPlan).toHaveBeenCalledTimes(2));
+    expect(vi.mocked(executeIndexPlan).mock.calls[1]?.[0]).toMatchObject({ incremental: "usn" });
+  } finally {
+    await stopAndRemove(server, directory);
   }
 });
 

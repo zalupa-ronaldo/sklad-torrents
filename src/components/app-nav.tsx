@@ -5,7 +5,7 @@ import Link from "next/link";
 import { cn } from "@/lib/utils";
 
 const LINKS = [
-  { href: "/", id: "torrents", label: "Склад" },
+  { href: "/legacy", id: "torrents", label: "Склад" },
   { href: "/optical", id: "optical", label: "DVD" },
   { href: "/drives", id: "drives", label: "Полка" },
   { href: "/localsend", id: "localsend", label: "LocalSend" },

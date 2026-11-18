@@ -21,6 +21,7 @@ import {
   httpError,
 } from "./commands.mjs";
 import { collectChannel, ensureLanForward } from "./channel-probe.mjs";
+import { readAv1Status } from "./av1-status.mjs";
 import { readLogTail, redactLine } from "./log-redact.mjs";
 import {
   admitHeavy,
@@ -94,6 +95,10 @@ async function handle(req, res) {
   }
   if (req.method === "GET" && parts.length === 2 && parts[0] === "v1" && parts[1] === "channel") {
     send(res, 200, await collectChannel());
+    return;
+  }
+  if (req.method === "GET" && parts.length === 2 && parts[0] === "v1" && parts[1] === "av1-status") {
+    send(res, 200, await readAv1Status());
     return;
   }
   if (req.method === "GET" && parts.length === 2 && parts[0] === "v1" && parts[1] === "logs") {

@@ -12,7 +12,15 @@ export async function GET(request: Request) {
     const path = url.searchParams.get("path") ?? "";
     const cursor = Number(url.searchParams.get("cursor") || "0");
     const limit = Number(url.searchParams.get("limit") || "200");
-    return json(await browseShelf(diskId, path, cursor, limit));
+    const work = browseShelf(diskId, path, cursor, limit);
+    if (diskId) return json(await work);
+    const result = await Promise.race([
+      work,
+      new Promise<never>((_, reject) => {
+        setTimeout(() => reject(new DriveError(503, "Обзор корня не уложился во время.")), 8_000);
+      }),
+    ]);
+    return json(result);
   } catch (error) {
     if (error instanceof DriveError) return json({ error: error.message }, error.status);
     return json({ error: "Обзор каталога не выполнился." }, 500);

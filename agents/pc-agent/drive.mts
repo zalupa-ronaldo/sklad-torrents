@@ -1,6 +1,7 @@
 import { MOCK_GAMES } from "../../src/addons/drives/mock-ids.ts";
 import type { IndexPayload } from "../../src/addons/drives/types.ts";
 import { startAgent } from "../lib/agent.mts";
+import { openVolumeWatch } from "../lib/volume-events.mts";
 import { collectWindows } from "./collect.mts";
 
 function arg(name: string, fallback: string): string {
@@ -23,6 +24,7 @@ startAgent({
   hostName: arg("--name", "Windows PC"),
   os: "win32",
   mockIndex: mock ? ready : null,
+  watch: openVolumeWatch(process.platform) ?? undefined,
   collect: mock
     ? async () => ({
         elevated: false,

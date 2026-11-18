@@ -58,7 +58,7 @@ export function JobProgress() {
           <h1 className="text-2xl font-semibold tracking-tight">Прогресс</h1>
         </div>
         <nav className="flex gap-3 text-sm">
-          <Link href="/" className="text-muted-foreground underline-offset-4 hover:underline">
+          <Link href="/legacy" className="text-muted-foreground underline-offset-4 hover:underline">
             Раздачи
           </Link>
           <Link href="/optical" className="text-muted-foreground underline-offset-4 hover:underline">

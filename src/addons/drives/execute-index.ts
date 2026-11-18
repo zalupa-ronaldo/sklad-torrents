@@ -19,13 +19,17 @@ export interface IndexHandlers {
   readMft: (cursor?: IndexCheckpoint) => Promise<MftChunk>;
   readUsn: () => Promise<{ delta: IndexDelta | null }>;
   walk: () => Promise<{ files: RawIndexedFile[]; complete: boolean }>;
+  readEvents?: () => Promise<{ delta: IndexDelta | null; cursor: string | null; lost: boolean }>;
 }
 
 export interface ExecuteResult {
   payload: IndexPayload;
-  called: Array<"readMft" | "readUsn" | "walk">;
+  called: Array<"readMft" | "readUsn" | "walk" | "readEvents">;
   /** Directory stubs for the next resume. Not part of the published catalog. */
   dirs?: DirStub[];
+  /** The journal could not be continued. The caller may take one full snapshot. */
+  journalLost?: boolean;
+  cursor?: string | null;
 }
 
 function unfinished(message: string, strategy: IndexPayload["strategy"]): IndexPayload {
@@ -49,6 +53,67 @@ export async function executeIndexPlan(input: PlanInput, handlers: IndexHandlers
         strategy: "mft-usn",
         message:
           "NTFS читается только дампом MFT. Нет прав администратора, обход папок не запускался. Запустите drive-agent от администратора и повторите чтение MFT.",
+      },
+    };
+  }
+  if (input.incremental === "usn") {
+    called.push("readUsn");
+    try {
+      const journal = await handlers.readUsn();
+      if (!journal.delta?.complete) {
+        return {
+          called,
+          journalLost: true,
+          payload: {
+            state: "error",
+            progress: 0,
+            strategy: "mft-usn",
+            message: "Журнал USN потерян. Нужен один новый снимок MFT. Обход папок не запускался.",
+          },
+        };
+      }
+      return {
+        called,
+        payload: { state: "complete", progress: 1, strategy: "mft-usn", delta: journal.delta, message: "Индекс обновлён по журналу USN. MFT заново не читалась." },
+      };
+    } catch {
+      return {
+        called,
+        journalLost: true,
+        payload: {
+          state: "error",
+          progress: 0,
+          strategy: "mft-usn",
+          message: "Журнал USN не прочитался. Обход папок не запускался.",
+        },
+      };
+    }
+  }
+  if (input.incremental === "fsevents") {
+    called.push("readEvents");
+    const events = await handlers.readEvents?.();
+    if (!events || events.lost || !events.delta?.complete) {
+      return {
+        called,
+        journalLost: true,
+        cursor: events?.cursor ?? null,
+        payload: {
+          state: "error",
+          progress: 0,
+          strategy: "walk",
+          message: "История FSEvents оборвалась. Нужен один обход тома.",
+        },
+      };
+    }
+    return {
+      called,
+      cursor: events.cursor,
+      payload: {
+        state: "complete",
+        progress: 1,
+        strategy: "walk",
+        delta: events.delta,
+        message: "Индекс обновлён по FSEvents. Полный обход не запускался.",
       },
     };
   }

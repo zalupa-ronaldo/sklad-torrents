@@ -1,6 +1,6 @@
 import type { HostOs, IndexCheckpoint, IndexStrategy } from "@/addons/drives/types";
 import { isNtfs, selectIndexStrategy } from "@/addons/drives/strategy";
-import { WINDOWS_VOLUME_SCRIPT } from "@/addons/drives/win-script";
+import { WINDOWS_VOLUME_EVENT_SCRIPT, WINDOWS_VOLUME_SCRIPT } from "@/addons/drives/win-script";
 
 export const READ_ONLY_OPS = [
   "identify-volume",
@@ -8,6 +8,7 @@ export const READ_ONLY_OPS = [
   "walk",
   "read-mft",
   "read-usn",
+  "read-fsevents",
   "pause",
   "resume",
 ] as const;
@@ -26,6 +27,8 @@ export interface PlanInput {
   busy: boolean;
   usnCheckpoint: boolean;
   cursor?: IndexCheckpoint;
+  /** Set only after a catalog exists. Omitting it keeps the first-attach plan. */
+  incremental?: "usn" | "fsevents";
 }
 
 const ALLOWED = new Set<string>(READ_ONLY_OPS);
@@ -40,7 +43,11 @@ export function planIndexCommands(input: PlanInput): IndexCommand[] {
     { op: "identify-volume", reason: "read-identity" },
     { op: "stat-volume", reason: "read-capacity" },
   ];
-  if (isNtfs(input.filesystem) && input.platform === "win32") {
+  if (input.incremental === "usn") {
+    commands.push({ op: "read-usn", reason: "incremental-usn" });
+  } else if (input.incremental === "fsevents") {
+    commands.push({ op: "read-fsevents", reason: "fsevents-since" });
+  } else if (isNtfs(input.filesystem) && input.platform === "win32") {
     commands.push({ op: "read-mft", reason: input.elevated ? "ntfs-mft" : "ntfs-mft-needs-admin" });
     if (input.elevated) commands.push({ op: "read-usn", reason: input.usnCheckpoint ? "incremental-usn" : "usn-checkpoint" });
   } else if (decision.strategy === "mft-usn") {
@@ -77,8 +84,11 @@ export function assertSpawnAllowed(request: SpawnRequest): void {
     throw new Error("Индексатор отказался запускать эту команду.");
   }
   if (bin === "diskutil") {
-    if (args.length !== 2 || args[0] !== "info" || args[1] !== "-all") {
-      throw new Error("Индексатор на macOS читает только diskutil info -all.");
+    const target = args[1] ?? "";
+    const all = args.length === 2 && args[0] === "info" && target === "-all";
+    const one = args.length === 2 && args[0] === "info" && target !== "-all" && !target.startsWith("-") && !target.includes("..");
+    if (!all && !one) {
+      throw new Error("Индексатор на macOS читает только diskutil info одного тома.");
     }
     return;
   }
@@ -98,8 +108,10 @@ export function assertSpawnAllowed(request: SpawnRequest): void {
     return;
   }
   if (bin === "powershell" || bin === "powershell.exe") {
-    const expected = ["-NoProfile", "-NonInteractive", "-Command", WINDOWS_VOLUME_SCRIPT];
-    if (args.length !== expected.length || args.some((arg, index) => arg !== expected[index])) {
+    const scripts = [WINDOWS_VOLUME_SCRIPT, WINDOWS_VOLUME_EVENT_SCRIPT];
+    const expected = scripts.map((script) => ["-NoProfile", "-NonInteractive", "-Command", script]);
+    const allowed = expected.some((row) => args.length === row.length && args.every((arg, index) => arg === row[index]));
+    if (!allowed) {
       throw new Error("Индексатор запускает только чтение сведений о томах.");
     }
     return;

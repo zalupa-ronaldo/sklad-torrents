@@ -22,7 +22,7 @@ export function AppShell({
             <HardDrive className="size-4" />
           </span>
           <div className="min-w-0">
-            <Link href="/" className="text-base font-semibold tracking-tight">
+            <Link href="/legacy" className="text-base font-semibold tracking-tight">
               Склад
             </Link>
             <p className="text-xs text-muted-foreground">{subtitle}</p>

@@ -315,7 +315,7 @@ function listChildren(disk: DiskRecord, relativePath: string): BrowseEntry[] {
   return all;
 }
 
-export function browseRoots(disks: readonly DiskRecord[], limit = 200, cursor = 0): BrowseResponse {
+export function browseRoots(disks: readonly DiskRecord[], limit = 200, cursor = 0, walkTrees = true): BrowseResponse {
   const entries: BrowseEntry[] = [];
   for (const disk of disks) {
     if (!isBrowsableRecord(disk, disks)) continue;
@@ -330,7 +330,7 @@ export function browseRoots(disks: readonly DiskRecord[], limit = 200, cursor = 
       (disk.reportedRecords ?? 0) > 0
     );
     const summarized = !waiting && Boolean(disk.summary) && disk.files.length === 0 && (disk.summary?.fileCount ?? 0) > 0;
-    const tree = summarized || waiting ? null : buildDiskTree(disk);
+    const tree = !walkTrees || summarized || waiting ? null : buildDiskTree(disk);
     const strip = diskStrip({
       label: disk.label,
       volumeName: disk.volumeName,
@@ -354,7 +354,7 @@ export function browseRoots(disks: readonly DiskRecord[], limit = 200, cursor = 
       relativePath: "",
       displayPath: mount || name,
       kind: "dir",
-      size: waiting ? null : tree ? tree.root.size : disk.summary && (disk.summary.unknownSizes ?? 0) > 0 && disk.summary.indexedBytes === 0 ? null : (disk.summary?.indexedBytes ?? 0),
+      size: waiting ? null : tree ? tree.root.size : disk.summary && (disk.summary.unknownSizes ?? 0) > 0 && disk.summary.indexedBytes === 0 ? null : (disk.summary?.indexedBytes ?? (walkTrees ? 0 : null)),
       allocated: tree ? tree.root.allocated : null,
       onDisk: tree ? tree.root.onDisk : null,
       compression: tree ? tree.root.compression : null,
@@ -363,7 +363,7 @@ export function browseRoots(disks: readonly DiskRecord[], limit = 200, cursor = 
       categories: tree ? [...tree.root.categories].slice(0, 6) : [],
       fileCount: tree ? tree.root.fileCount : (disk.summary?.fileCount ?? disk.reportedRecords ?? 0),
       dirCount: tree ? tree.root.dirCount : 0,
-      sizesReady: waiting ? false : Boolean(tree) || Boolean(disk.summary && (disk.summary.fileCount > 0 || disk.files.length > 0)),
+      sizesReady: waiting ? false : walkTrees ? Boolean(tree) || Boolean(disk.summary && (disk.summary.fileCount > 0 || disk.files.length > 0)) : Boolean(disk.summary && disk.summary.fileCount > 0),
       strip,
     });
   }

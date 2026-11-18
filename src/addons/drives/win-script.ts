@@ -98,3 +98,20 @@ foreach ($letter in $allowed) {
   admin = [bool]$admin
 } | ConvertTo-Json -Depth 4
 `.trim();
+
+/** Blocks on Win32_VolumeChangeEvent. It does not poll volumes and does not read a file tree. */
+export const WINDOWS_VOLUME_EVENT_SCRIPT = `
+$ErrorActionPreference = 'Continue'
+Register-WmiEvent -Query "SELECT * FROM Win32_VolumeChangeEvent" -SourceIdentifier SkladVolumeWatch | Out-Null
+while ($true) {
+  $arrived = Wait-Event -SourceIdentifier SkladVolumeWatch
+  $kindCode = [int]$arrived.SourceEventArgs.NewEvent.EventType
+  $drive = [string]$arrived.SourceEventArgs.NewEvent.DriveName
+  $kind = 'change'
+  if ($kindCode -eq 2) { $kind = 'attach' }
+  if ($kindCode -eq 3) { $kind = 'detach' }
+  @{ type = $kind; drive = $drive } | ConvertTo-Json -Compress
+  [Console]::Out.Flush()
+  Remove-Event -EventIdentifier $arrived.EventIdentifier
+}
+`.trim();

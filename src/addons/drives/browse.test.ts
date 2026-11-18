@@ -191,4 +191,23 @@ describe("browse aggregates", () => {
     expect(lost?.size).toBeNull();
     expect(page.entries.find((entry) => entry.name === "Archives")).toBeUndefined();
   });
+
+  it("lists roots without walking the file tree", () => {
+    const files: IndexedFile[] = Array.from({ length: 4000 }, (_, index) => ({
+      relativePath: `dir/${index}.bin`,
+      name: `${index}.bin`,
+      kind: "file" as const,
+      size: 10,
+      mtimeMs: 1,
+      sidecarCategory: null,
+      categories: [],
+    }));
+    const started = performance.now();
+    const page = browseRoots([disk({ id: "disk-big", label: "Big", files })], 40, 0, false);
+    expect(performance.now() - started).toBeLessThan(100);
+    expect(page.entries).toHaveLength(1);
+    expect(page.entries[0]?.size).toBeNull();
+    expect(page.entries[0]?.fileCount).toBe(0);
+    expect(page.total).toBe(1);
+  });
 });
