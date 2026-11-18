@@ -32,10 +32,19 @@ export interface CompactReading {
   wof: number | null;
 }
 
+/**
+ * allocated is the on-disk total of owned files (GetCompressedFileSizeW), without `.sklad-managed`.
+ * wof is only the on-disk bytes of files that actually carry WOF backing.
+ * A file that did not shrink, and a file the WOF tag says is not external, contributes 0.
+ * The folder allocated total is never copied into wof. For the PR25 fixture that is
+ * allocated 36961 (36864 + 97) and wof 36864 (payload.bin only).
+ */
 export interface CompactAccount {
   files: number;
   logical: number | null;
+  /** Sum of compressed sizes of owned files. Not the same number as `wof`. */
   allocated: number | null;
+  /** Sum of compressed sizes of WOF-backed files only. */
   wof: number | null;
   known: boolean;
   compressed: boolean;
@@ -193,16 +202,14 @@ function summaryMinusMarker(input: {
   if (!Number.isSafeInteger(implied) || implied < 0 || implied > input.logical) return null;
   if (input.allocated != null && input.allocated !== implied) return null;
   if (implied < input.logical && summary.compressedCount === 0) return null;
-  const agreed = decideCompact({
+  return {
     files: input.files,
     logical: input.logical,
     allocated: implied,
-    wof: implied < input.logical ? implied : 0,
-  });
-  if (!agreed.known) return null;
-  return {
-    ...agreed,
-    reason: `${agreed.reason} Сводка compact /Q logical ${summary.logical}, stored ${summary.stored} включает .sklad-managed (${input.marker} байт). Совпадение сводки с корнем не требуется. Размер корня ${input.logical} / ${implied}. Имя алгоритма в сводке не названо.`,
+    wof: null,
+    known: false,
+    compressed: false,
+    reason: `allocated корня ${implied}: сводка compact /Q stored ${summary.stored} без .sklad-managed (${input.marker} байт). wofBytes считает только файлы с подложкой WOF, а не весь allocated ${implied}. Пофайловое состояние WOF не прочитано.`,
   };
 }
 
@@ -226,6 +233,7 @@ function accountFromWofState(
   return accountReadings(readings);
 }
 
+/** Tag was not read. A file that did not shrink is not WOF. A smaller file contributes only its stored size. */
 function accountFromAllocated(files: readonly OwnedFile[], sizes: ReadonlyMap<string, number | null>): CompactAccount | null {
   if (files.length === 0) return null;
   const readings: CompactReading[] = [];
@@ -389,14 +397,14 @@ export function finishMeasurement(input: {
     markerFiles: input.markerFiles,
   });
   const extra = [
-    input.sizes.ok ? "" : input.sizes.note,
-    input.queryOk ? "" : (input.queryNote || "compact /Q не прочитан"),
+    input.sizes.ok ? "" : userFacingDiag(input.sizes.note),
+    input.queryOk ? "" : userFacingDiag(input.queryNote || "compact /Q не прочитан"),
   ].filter(Boolean);
+  const reason = stripPowerShellNoise([account.reason, ...extra].filter(Boolean).join(" "));
   if (!account.known && !input.sizes.ok) {
-    return { ...account, reason: ["Измерение корня не сошлось. Сжатие заново не запускается.", account.reason, input.sizes.note].filter(Boolean).join(" ") };
+    return { ...account, reason: stripPowerShellNoise(["Измерение корня не сошлось. Сжатие заново не запускается.", reason].filter(Boolean).join(" ")) };
   }
-  if (extra.length === 0) return account;
-  return { ...account, reason: `${account.reason} ${extra.join(" ")}`.trim() };
+  return { ...account, reason };
 }
 
 /** Absolute Windows PowerShell paths. PATH is not consulted: an isolated PATH has no powershell.exe. */
@@ -444,6 +452,8 @@ export function powershellProbeArgs(script: string): string[] {
 export function compressionProbeScript(): string {
   return `
 $ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+$InformationPreference = 'SilentlyContinue'
 function Emit([hashtable]$row) {
   $json = ($row | ConvertTo-Json -Compress) + [char]10
   $bytes = [System.Text.Encoding]::UTF8.GetBytes($json)
@@ -582,32 +592,59 @@ async function compressedSizes(files: readonly string[]): Promise<{ ok: boolean;
   const numbers = files.map((file) => values.get(file) ?? null);
   const complete = numbers.every((value) => value != null);
   const total = complete ? numbers.reduce<number>((sum, value) => sum + (value ?? 0), 0) : null;
-  if (!parsed.ok || !complete || result.code !== 0) {
-    const note = clipDiag([parsed.note, result.stderr, result.error, result.code !== 0 ? `код ${result.code ?? "нет"}` : ""].filter(Boolean).join(" "));
-    return { ok: false, values, states, total, code: result.code, note: note || "GetCompressedFileSizeW не вернул размеры файлов." };
-  }
-  return { ok: true, values, states, total, code: result.code, note: "" };
+  if (complete) return { ok: true, values, states, total, code: result.code, note: "" };
+  return { ok: false, values, states, total, code: result.code, note: "GetCompressedFileSizeW не вернул размер каждого файла корня." };
 }
 
 export function parseSizeProbeOutput(buf: Buffer): { ok: boolean; note: string; rows: Array<{ path: string; allocated: number | null; wof: number | null; algorithm: WofAlgorithm | null }> } {
   const rows: Array<{ path: string; allocated: number | null; wof: number | null; algorithm: WofAlgorithm | null }> = [];
   const text = decodeProcessText(buf);
-  if (text.includes("#< CLIXML") || text.includes("<Objs")) return { ok: false, note: "Ответ PowerShell в CLIXML, не JSON.", rows };
-  for (const line of text.split(/\r?\n/)) {
-    if (!line.trim()) continue;
+  for (const chunk of jsonObjects(text)) {
     try {
-      const parsed = JSON.parse(line) as { path?: string; allocated?: number | null; wof?: number | null; algorithm?: string | null };
-      if (!parsed.path) return { ok: false, note: "Ответ GetCompressedFileSizeW не разобран.", rows };
+      const parsed = JSON.parse(chunk) as { path?: string; allocated?: number | null; wof?: number | null; algorithm?: string | null };
+      if (!parsed.path || typeof parsed.path !== "string") continue;
       const allocated = typeof parsed.allocated === "number" && Number.isSafeInteger(parsed.allocated) && parsed.allocated >= 0 ? parsed.allocated : null;
       const wof = typeof parsed.wof === "number" && Number.isSafeInteger(parsed.wof) && parsed.wof >= 0 ? parsed.wof : null;
       const algorithm = typeof parsed.algorithm === "string" && WOF_ALGORITHM.test(parsed.algorithm) ? parsed.algorithm.toUpperCase() as WofAlgorithm : null;
       rows.push({ path: parsed.path, allocated, wof, algorithm });
     } catch {
-      return { ok: false, note: "Ответ GetCompressedFileSizeW не разобран.", rows };
+      continue;
     }
   }
   if (rows.length === 0) return { ok: false, note: "GetCompressedFileSizeW не вернул ни одной строки.", rows };
   return { ok: true, note: "", rows };
+}
+
+function jsonObjects(text: string): string[] {
+  const found: string[] = [];
+  let depth = 0;
+  let start = -1;
+  let inString = false;
+  let escape = false;
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i];
+    if (inString) {
+      if (escape) escape = false;
+      else if (ch === "\\") escape = true;
+      else if (ch === "\"") inString = false;
+      continue;
+    }
+    if (ch === "\"") {
+      inString = true;
+      continue;
+    }
+    if (ch === "{") {
+      if (depth === 0) start = i;
+      depth += 1;
+    } else if (ch === "}" && depth > 0) {
+      depth -= 1;
+      if (depth === 0 && start >= 0) {
+        found.push(text.slice(start, i + 1));
+        start = -1;
+      }
+    }
+  }
+  return found;
 }
 
 async function compactQuery(root: string): Promise<{ ok: boolean; text: string; code: number | null; note: string }> {
@@ -652,8 +689,24 @@ function compactTextUseful(text: string): boolean {
   return summary.logical != null || summary.fileCount != null || parseCompactListing(text).size > 0;
 }
 
-export function clipDiag(text: string): string {
+/** Drops PowerShell progress CLIXML. The raw stream is not a user-facing reason. */
+export function stripPowerShellNoise(text: string): string {
   return text
+    .replace(/#<\s*CLIXML[\s\S]*$/gi, "")
+    .replace(/<Objs[\s\S]*$/gi, "")
+    .replace(/\u0000/g, "")
+    .trim();
+}
+
+export function userFacingDiag(text: string): string {
+  const clean = stripPowerShellNoise(text);
+  if (!clean) return "";
+  if (/CLIXML/i.test(clean) || /S="progress"/i.test(clean)) return "";
+  return clipDiag(clean);
+}
+
+export function clipDiag(text: string): string {
+  return stripPowerShellNoise(text)
     .replace(/\uFEFF/g, "")
     .replace(/[A-Za-z]:\\[^\s"']+/g, "<path>")
     .replace(/\/(?:Users|home)\/[^\s"']+/g, "<path>")
