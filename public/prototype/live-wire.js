@@ -84,6 +84,7 @@ function shell() {
     reclaimedBytes: null,
     schedule: { enabled: false, days: "", start: "", end: "", clock: Date.now() },
     failNext: {},
+    faults: {},
     live: { av1: { online: false, started: false, lanes: [] } },
     scenario: "live",
     scenarioOptions: [],

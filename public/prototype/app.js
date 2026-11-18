@@ -86,7 +86,7 @@ function render(s) {
       )
       .join(""),
   );
-  const pageFault = s.faults[s.ui.page];
+  const pageFault = s.faults?.[s.ui.page];
   const feedback = pageFault ? `<p class="action-fault" role="alert">${icon("Activity")}${esc(pageFault)}</p>` : "";
   const busy = s.ui.pending ? '<p class="busy-line" role="status">Выполняется операция…</p>' : "";
   region("action-status", s.ui.modal || s.loading ? "" : feedback + busy);
@@ -815,11 +815,14 @@ async function dispatch(name, value) {
         delete state.failNext[wasPage];
         throw Error(reason + " Повторите действие.");
       }
-      delete state.faults[wasPage];
+      if (state.faults) delete state.faults[wasPage];
     }
     await act(name, value);
   } catch (e) {
-    if (snapshot === state) state.faults[wasPage] = e.message;
+    if (snapshot === state) {
+      state.faults = state.faults || {};
+      state.faults[wasPage] = e.message;
+    }
   } finally {
     if (snapshot.ui.pending === pending) snapshot.ui.pending = null;
     if (snapshot === state) render(state);

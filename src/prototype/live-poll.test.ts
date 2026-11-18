@@ -28,6 +28,7 @@ describe("live poll", () => {
       { id: "rim", contentId: "rim", name: "RimWorld", platform: "Windows", placement: "HDD", sizeBytes: null },
     ]);
     expect(flattenShelfGames({ games: [{ name: "Invented" }] })).toEqual([]);
+    expect(flattenShelfGames({ showingSamples: true, platforms: [{ id: "windows", games: [{ id: "sample", name: "Sample Game" }] }] })).toEqual([]);
     expect(flattenShelfGames(null)).toEqual([]);
   });
 

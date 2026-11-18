@@ -34,7 +34,7 @@ const PLATFORM_LABEL = {
 
 /** The shelf API returns platforms[].games. An empty list stays empty. */
 export function flattenShelfGames(payload) {
-  if (!payload || !Array.isArray(payload.platforms)) return [];
+  if (!payload || payload.showingSamples === true || !Array.isArray(payload.platforms)) return [];
   const games = [];
   for (const platform of payload.platforms) {
     if (!platform || !Array.isArray(platform.games)) continue;
