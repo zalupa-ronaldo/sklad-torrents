@@ -1,0 +1,18 @@
+{
+  "standard_commit": "65e79e587717c8ad6f7265ea8b3275d8ab52cf59",
+  "standard_hash": "b8a84d4147e973634f4d5453a21488c80806be86dde7dcde2a9cf2223f8f03ff",
+  "standard_hash_subject": "SHA-256 of STANDARD.yaml at that commit",
+  "copied_fragments": [],
+  "checks": {
+    "npm_test": "pass",
+    "npm_test_passed": 529,
+    "npm_test_skipped": 11,
+    "npm_test_skipped_note": "not_run. Existing skipIf cases. Not counted as pass.",
+    "next_build": "pass",
+    "tsc_after_build": "pass",
+    "git_diff_check": "pass",
+    "docker_compose": "not_run",
+    "browser_click": "not_run",
+    "curl_games_and_api": "pass"
+  }
+}
