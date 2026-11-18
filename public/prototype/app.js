@@ -153,6 +153,9 @@ function placement(rule, size, host) {
   );
   return candidates.sort((a, b) => b.freeBytes - a.freeBytes)[0];
 }
+function canCompressFile(f) {
+  return f.sizeBytes > 0 && (f.allocatedBytes ?? f.sizeBytes) >= f.sizeBytes;
+}
 function writeCopy(file, disk, dir, changes = {}) {
   const copy = { ...file, ...changes, id: crypto.randomUUID(), diskId: disk.id, dir };
   delete copy.torrentId;
@@ -187,7 +190,11 @@ function enqueue(kind, title, host, totalBytes, operation) {
     progress: 0,
     error: null,
   });
-  recordEvent(state.tasks[0], "Задача поставлена в очередь.");
+  const job = state.tasks[0],
+    paths = state.toolPaths[host];
+  if (operation.type === "encode" && paths?.encoder) recordEvent(job, paths.encoder + " · " + operation.preset);
+  if (operation.type === "folderCompress" && paths?.compact) recordEvent(job, paths.compact + " · " + operation.algorithm);
+  recordEvent(job, "Задача поставлена в очередь.");
   return true;
 }
 function onArrival(f) {
@@ -199,7 +206,7 @@ function onArrival(f) {
     d.host === "pc" &&
     d.fs === "NTFS" &&
     f.expectedSaving >= 0.1 &&
-    !f.allocatedBytes &&
+    canCompressFile(f) &&
     state.rules["Игры"]?.after === "Сжатие NTFS"
   ) {
     enqueue("copy", "Подготовка игры · " + f.name, d.host, f.sizeBytes, { type: "compress", fileId: f.id });
@@ -285,7 +292,7 @@ function completeTask(task) {
     }
     case "folderCompress": {
       let saved = 0;
-      for (const file of state.files.filter((c) => c.diskId === target.id && c.dir === op.dir && !c.allocatedBytes)) {
+      for (const file of state.files.filter((c) => c.diskId === target.id && c.dir === op.dir && canCompressFile(c))) {
         file.allocatedBytes = Math.round(file.sizeBytes * (1 - state.compressionRatios[op.algorithm]));
         saved += file.sizeBytes - file.allocatedBytes;
       }
@@ -296,6 +303,10 @@ function completeTask(task) {
       break;
     }
     case "compress":
+      if (!canCompressFile(f)) {
+        recordEvent(task, "Файл уже сжат.");
+        break;
+      }
       f.allocatedBytes = Math.round(f.sizeBytes * (1 - f.expectedSaving));
       diskOf(state, f).freeBytes += f.sizeBytes - f.allocatedBytes;
       state.reclaimedBytes += f.sizeBytes - f.allocatedBytes;

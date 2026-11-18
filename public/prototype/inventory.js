@@ -40,7 +40,7 @@ const Inventory = (() => {
     return `<div class="file-actions">${button("invHashes", "Посмотреть хеши", t.id)}${button("invRules", "Правила раскладки", t.id)}${button("invMigration", "Перенести на другой хост", t.id, "secondary-action", online && f && t.progress === 100 ? "" : "disabled")}${button("invRemoveTorrent", "Удалить раздачу", t.id, "danger-action", online ? "" : "disabled")}</div>${t.progress < 100 ? empty("Для переноса дождитесь завершения загрузки.") : ""}`;
   }
   function folders(s, d) {
-    return [...new Set(s.files.filter((f) => f.diskId === d?.id && !f.allocatedBytes).map((f) => f.dir))];
+    return [...new Set(s.files.filter((f) => f.diskId === d?.id && canCompressFile(f)).map((f) => f.dir))];
   }
   function modal(s) {
     const { kind, id } = s.ui.modal,
