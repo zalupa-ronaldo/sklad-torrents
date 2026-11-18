@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { createDiskutilCache, DISKUTIL_CACHE_MS } from "@/addons/drives/collect-cache";
+import { createDiskutilCache, createVolumeInfoCache, DISKUTIL_CACHE_MS } from "@/addons/drives/collect-cache";
 
 describe("diskutil cache", () => {
   it("stays inside 30–60 seconds and never runs two collects at once", async () => {
@@ -37,5 +37,29 @@ describe("diskutil cache", () => {
       return "again";
     })).resolves.toBe("again");
     expect(calls).toBe(2);
+  });
+
+  it("calls diskutil info once per mount and never in parallel", async () => {
+    const cache = createVolumeInfoCache();
+    let active = 0;
+    let peak = 0;
+    const run = (name: string) => async () => {
+      active += 1;
+      peak = Math.max(peak, active);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      active -= 1;
+      return name;
+    };
+    const [first, second, third] = await Promise.all([
+      cache.once("vault", run("vault")),
+      cache.once("vault", run("other")),
+      cache.once("games", run("games")),
+    ]);
+    expect(first).toBe("vault");
+    expect(second).toBe("vault");
+    expect(third).toBe("games");
+    expect(peak).toBe(1);
+    cache.forget("vault");
+    await expect(cache.once("vault", async () => "again")).resolves.toBe("again");
   });
 });

@@ -133,6 +133,7 @@ function resetForm() {
   if (state.ui.form.artURL) URL.revokeObjectURL(state.ui.form.artURL);
   state.ui.form = {};
 }
+let requestHeavy = () => {};
 function navigate(page) {
   resetForm();
   if (["media", "index", "integrity", "policies", "hosts", "scheduler", "localsend", "optical"].includes(page))
@@ -140,6 +141,7 @@ function navigate(page) {
   if (page === "jobs") state.ui.taskKind = "";
   Object.assign(state.ui, { page, menu: false, modal: null });
   window.scrollTo(0, 0);
+  requestHeavy();
 }
 function openSearch() {
   Object.assign(state.ui, { fileQuery: "", disk: "" });
@@ -980,23 +982,68 @@ document.addEventListener("pointerdown", inspectGraph);
 render(state);
 if (state.demo) setInterval(() => advanceTasks(1), 1000);
 else {
-  let lastPoll = 0;
-  const tick = () => {
-    const hidden = typeof document !== "undefined" && document.hidden;
-    if (!LivePoll.pollDue({ hidden, inFlight: false, lastAt: lastPoll, now: Date.now() })) return;
-    lastPoll = Date.now();
-    void LiveWire.refresh(state)
-      .then((next) => {
-        state = next;
-        render(state);
-      })
-      .catch((error) => {
-        state.loading = false;
-        state.error = error instanceof Error ? error.message : "Панель не ответила.";
-        render(state);
+  let lastFast = 0;
+  let lastHeavy = 0;
+  let lastSse = 0;
+  let fastBusy = false;
+  let heavyBusy = false;
+  const paint = (next) => {
+    state = next;
+    render(state);
+  };
+  const fail = (error) => {
+    state.loading = false;
+    state.error = error instanceof Error ? error.message : "Панель не ответила.";
+    render(state);
+  };
+  const runFast = () => {
+    if (fastBusy) return;
+    fastBusy = true;
+    void LiveWire.refreshFast(state)
+      .then(paint)
+      .catch(fail)
+      .finally(() => {
+        fastBusy = false;
       });
   };
+  const runHeavy = () => {
+    if (heavyBusy) return;
+    heavyBusy = true;
+    lastFast = Date.now();
+    void LiveWire.refresh(state)
+      .then(paint)
+      .catch(fail)
+      .finally(() => {
+        heavyBusy = false;
+      });
+  };
+  const tick = () => {
+    const hidden = typeof document !== "undefined" && document.hidden;
+    const now = Date.now();
+    const plan = LivePoll.pollPlan({ hidden, now, lastFast, lastHeavy, fastBusy, heavyBusy });
+    if (plan.heavy) {
+      lastHeavy = now;
+      runHeavy();
+    } else if (plan.fast) {
+      lastFast = now;
+      runFast();
+    }
+  };
+  requestHeavy = () => {
+    const hidden = typeof document !== "undefined" && document.hidden;
+    if (hidden || !LivePoll.sectionDue(state.ui.page)) return;
+    const now = Date.now();
+    if (lastHeavy && now - lastHeavy < 5_000) return;
+    lastHeavy = now;
+    runHeavy();
+  };
   document.addEventListener("visibilitychange", tick);
+  LegacyApi.listenJobs(() => {
+    const now = Date.now();
+    if (!LivePoll.sseDue({ hidden: document.hidden, lastAt: lastSse, now })) return;
+    lastSse = now;
+    runFast();
+  });
   tick();
-  setInterval(tick, LivePoll.LIVE_POLL_MS);
+  setInterval(tick, LivePoll.FAST_POLL_MS);
 }

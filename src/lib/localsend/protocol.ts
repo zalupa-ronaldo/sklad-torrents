@@ -1,8 +1,7 @@
 /**
- * LocalSend protocol v2.
- * Source: https://github.com/localsend/protocol/blob/main/README.md
- *
- * Defaults: UDP multicast 224.0.0.167:53317, HTTP(S) TCP 53317.
+ * Sklad's own LocalSend v2 types. The localsend/protocol repository has no
+ * license and was not copied. These names are the fields this panel sends.
+ * UDP multicast 224.0.0.167:53317, HTTP(S) TCP 53317.
  * Upload: POST /api/localsend/v2/prepare-upload, then
  * POST /api/localsend/v2/upload?sessionId&fileId&token, cancel on
  * POST /api/localsend/v2/cancel?sessionId.

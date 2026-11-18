@@ -203,7 +203,10 @@ export async function browseShelf(diskId: string | null, relativePath = "", curs
     }
   }
   const { browseDisk, browseRoots } = await import("@/addons/drives/browse");
-  if (!diskId) return browseRoots(disks, limit, cursor);
+  if (!diskId) {
+    const cap = Math.min(80, Math.max(1, Math.floor(limit) || 40));
+    return browseRoots(disks, cap, cursor, false);
+  }
   return browseDisk(disks, diskId, relativePath, limit, cursor);
 }
 

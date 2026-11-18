@@ -13,6 +13,7 @@ import { systemCompactReason } from "../../src/addons/drives/compact-target.ts";
 import { executeIndexPlan } from "../../src/addons/drives/execute-index.ts";
 import { buildCompactArgv, DEFAULT_COMPACT_EXE } from "../../src/addons/media-games/compact.ts";
 import { isCompactAlgorithm } from "../../src/addons/media-games/presets.ts";
+import { applyRawDelta, indexMode, type VolumeWatch, type VolumeWatchEvent } from "../../src/addons/drives/index-mode.ts";
 import { selectIndexStrategy } from "../../src/addons/drives/strategy.ts";
 import { normalizeSerial, normalizeUuid } from "../../src/addons/drives/identity.ts";
 import { isServiceVolume } from "../../src/addons/drives/inventory.ts";
@@ -32,6 +33,10 @@ interface TrackedVolume extends CollectedVolume {
   index: IndexPayload | null;
   indexedAt: number;
   usnStart: string | null;
+  lastEventId: string | null;
+  journalLost?: boolean;
+  pendingDelta?: IndexPayload["delta"];
+  pendingCursor?: string | null;
   freeAtIndex: number;
   priority?: number;
   signal?: { pause: boolean; cancel: boolean; reason: IndexPauseReason | null };
@@ -171,7 +176,9 @@ export function startAgent(options: {
   os: HostOs;
   collect: () => Promise<AgentCollectResult>;
   mockIndex?: IndexPayload | null;
+  /** Ignored. Disk indexing is not on a timer. */
   intervalMs?: number;
+  watch?: VolumeWatch;
 }) {
   let elevated = false;
   let note = "";
@@ -218,6 +225,7 @@ export function startAgent(options: {
             indexedAt: volume.indexedAt || Date.now(),
             freeAtIndex: volume.freeBytes,
             usnStart: volume.usnStart ?? null,
+            lastEventId: typeof volume.lastEventId === "string" ? volume.lastEventId : null,
             partialFiles: volume.partialFiles ?? [],
             dirStubs: volume.dirStubs ?? [],
             signal: { pause: false, cancel: false, reason: null },
@@ -241,7 +249,7 @@ export function startAgent(options: {
     if (events.length > 400) events.shift();
   }
 
-  async function indexVolume(volume: TrackedVolume, sizeRebuild = false, manual = false, fresh = manual || sizeRebuild) {
+  async function indexVolume(volume: TrackedVolume, sizeRebuild = false, manual = false, fresh = manual || sizeRebuild, mode: "catalog" | "usn" | "fsevents" = "catalog") {
     const key = volumeKey(volume);
     if (running.has(key) || isExcludedVolume(volume) || isIgnoredVolume(volume)) return;
     if (!manual && isManualVolume(volume)) return;
@@ -250,7 +258,10 @@ export function startAgent(options: {
       volume.partialFiles = [];
       volume.dirStubs = [];
       volume.usnStart = null;
+      volume.lastEventId = null;
+      volume.journalLost = false;
     }
+    let redoFull = false;
     running.add(key);
     const signal = volume.signal ?? { pause: false, cancel: false, reason: null };
     signal.pause = false;
@@ -278,9 +289,8 @@ export function startAgent(options: {
           platform: options.os,
           elevated,
           busy: volume.busy,
-          // fsutil text has leaf names, not reliable full paths. Do not publish it
-          // as a complete delta; explicit manual refresh uses a complete tree.
-          usnCheckpoint: false,
+          usnCheckpoint: mode === "usn",
+          incremental: mode === "catalog" ? undefined : mode,
           cursor: { ...cursor, nextUsn: volume.usnStart },
         },
         {
@@ -296,8 +306,22 @@ export function startAgent(options: {
             return { delta: journal.delta };
           },
           walk: () => walkTree(volume.mountPaths[0] ?? ""),
+          readEvents: async () => ({
+            delta: volume.pendingDelta ?? { upserts: [], deletes: [], complete: true },
+            cursor: volume.pendingCursor ?? volume.lastEventId,
+            lost: volume.journalLost === true,
+          }),
         },
       );
+      if (result.cursor) volume.lastEventId = result.cursor;
+      if (result.journalLost) {
+        volume.journalLost = true;
+        volume.usnStart = null;
+        volume.lastEventId = null;
+        redoFull = mode !== "catalog";
+      } else if (result.payload.state === "complete" && result.payload.delta && !result.payload.files) {
+        result.payload.files = applyRawDelta(previousIndex?.files ?? [], result.payload.delta);
+      }
       const cancelled = signaled(volume.signal, "cancel");
       const pausedByUser = signaled(volume.signal, "pause");
       const reason: IndexPauseReason | null = cancelled
@@ -357,10 +381,12 @@ export function startAgent(options: {
       volume.index = { ...previousIndex, state: "error", progress: previousIndex?.progress ?? 0, message: String(error), files: previousIndex?.files };
     } finally {
       running.delete(key);
+      volume.pendingDelta = undefined;
       if (volume.signal) {
         volume.signal.pause = false;
         volume.signal.cancel = false;
       }
+      if (redoFull) void indexVolume(volume, false, true, true, "catalog");
     }
   }
 
@@ -397,7 +423,7 @@ export function startAgent(options: {
         });
       }
       // Keep object identity while an asynchronous index job owns this volume.
-      const tracked = prior ?? { ...volume, index: options.mockIndex ?? null, indexedAt: 0, usnStart: null, freeAtIndex: -1 };
+      const tracked = prior ?? { ...volume, index: options.mockIndex ?? null, indexedAt: 0, usnStart: null, lastEventId: null, freeAtIndex: -1 };
       Object.assign(tracked, volume);
       next.push(tracked);
       previous.delete(key);
@@ -411,7 +437,7 @@ export function startAgent(options: {
       const hour = new Date().getHours();
       return window.startHour < window.endHour ? hour >= window.startHour && hour < window.endHour : hour >= window.startHour || hour < window.endHour;
     });
-    const candidates: Array<{ volume: TrackedVolume; rebuildSizes: boolean; fresh: boolean }> = [];
+    const candidates: Array<{ volume: TrackedVolume; rebuildSizes: boolean; fresh: boolean; mode: "catalog" | "usn" | "fsevents" }> = [];
     for (const volume of volumes) {
       // Complete snapshots do not expire. Free-space changes are not proof of a
       // pathname change; never turn a UI refresh into another full MFT read.
@@ -434,7 +460,19 @@ export function startAgent(options: {
       const continueHeld = reason === "quiet" || reason === "busy";
       const needs = !restoreFailed && !isManualVolume(volume) && !isServiceVolume(volume) && !volume.busy &&
         (rebuildSizes || !volume.index || (volume.index.state === "paused" && !volume.index.files) || continueHeld);
-      if (needs) candidates.push({ volume, rebuildSizes, fresh: rebuildSizes });
+      if (needs) candidates.push({ volume, rebuildSizes, fresh: rebuildSizes, mode: "catalog" });
+      else if (!restoreFailed && !isManualVolume(volume) && !isServiceVolume(volume)) {
+        const mode = indexMode({
+          filesystem: volume.filesystem,
+          platform: options.os,
+          hasCatalog: volume.index?.state === "complete" && (volume.index.files?.length ?? 0) > 0,
+          usnCursor: volume.usnStart,
+          lastEventId: volume.lastEventId,
+          journalLost: volume.journalLost === true,
+          reason: "restart",
+        });
+        if (mode === "usn" || mode === "fsevents") candidates.push({ volume, rebuildSizes: false, fresh: false, mode });
+      }
     }
     candidates.sort((left, right) => (right.volume.priority ?? 0) - (left.volume.priority ?? 0));
     let slots = running.size;
@@ -443,7 +481,57 @@ export function startAgent(options: {
       if (slots >= limit) break;
       if (running.has(volumeKey(item.volume))) continue;
       slots += 1;
-      void indexVolume(item.volume, item.rebuildSizes, false, item.fresh);
+      void indexVolume(item.volume, item.rebuildSizes, false, item.fresh, item.mode);
+    }
+  }
+
+  function volumeMatches(volume: TrackedVolume, event: VolumeWatchEvent): boolean {
+    if (event.serial && event.volumeUuid) return volume.serial === event.serial && volume.volumeUuid === event.volumeUuid;
+    if (event.letter && volume.letter && volume.letter === event.letter) return true;
+    if (event.mount) return volume.mountPaths.some((mount) => mount === event.mount || event.mount?.startsWith(`${mount.replace(/[\\/]+$/, "")}/`) || event.mount?.startsWith(mount));
+    return false;
+  }
+
+  async function applyWatch(event: VolumeWatchEvent) {
+    await ready;
+    const match = volumes.find((volume) => volumeMatches(volume, event));
+    if (event.type === "detach") {
+      if (!match) return;
+      volumes = volumes.filter((volume) => volume !== match);
+      pushEvent({ type: "detach", serial: match.serial, volumeUuid: match.volumeUuid, filesystem: match.filesystem });
+      persist();
+      return;
+    }
+    if (event.type === "cursor" && event.cursor) {
+      const targets = match ? [match] : volumes;
+      for (const volume of targets) volume.lastEventId = event.cursor;
+      if (targets.length) persist();
+      return;
+    }
+    if (event.type === "attach") {
+      await collectAndIndex();
+      return;
+    }
+    if (!match) return;
+    if (event.type === "journal-lost") {
+      match.journalLost = true;
+      void indexVolume(match, false, true, true, "catalog");
+      return;
+    }
+    if (event.type === "journal") {
+      match.pendingDelta = event.delta ?? { upserts: [], deletes: [], complete: true };
+      match.pendingCursor = event.cursor ?? match.lastEventId;
+      const mode = indexMode({
+        filesystem: match.filesystem,
+        platform: options.os,
+        hasCatalog: match.index?.state === "complete" && (match.index.files?.length ?? 0) > 0,
+        usnCursor: match.usnStart,
+        lastEventId: event.cursor ?? match.lastEventId,
+        journalLost: false,
+        reason: "change",
+      });
+      if (mode === "usn" || mode === "fsevents") void indexVolume(match, false, false, false, mode);
+      else if (mode === "mft" || mode === "walk") void indexVolume(match, false, true, true, "catalog");
     }
   }
 
@@ -782,9 +870,9 @@ export function startAgent(options: {
   server.listen(options.port, "0.0.0.0", () => {
     console.log(`${options.hostName} слушает 0.0.0.0:${options.port}`);
   });
+  void options.intervalMs;
   void tick();
-  const timer = setInterval(() => void tick(), options.intervalMs ?? 4000);
-  timer.unref?.();
-  server.once("close", () => clearInterval(timer));
+  options.watch?.start((event) => { void applyWatch(event); });
+  server.once("close", () => options.watch?.stop());
   return server;
 }

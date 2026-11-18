@@ -62,6 +62,11 @@ const LegacyApi = {
     return { games, policies, policyJobs, auto, queues, opticalDvd, opticalCap, opticalCatalog, devices, localFiles, settings, sendJobs, tools, encodePolicy, progress, transfers, link, av1 };
   },
 
+  async loadFast(fetchImpl) {
+    const [jobs, progress] = await Promise.all([settle(fetchImpl, "/api/jobs?limit=100"), settle(fetchImpl, "/api/progress")]);
+    return { jobs, progress };
+  },
+
   async jobControl(fetchImpl, id, action) {
     const paths = {
       pause: `/api/jobs/${encodeURIComponent(id)}/pause`,
@@ -133,7 +138,12 @@ const LegacyApi = {
       return { message: "Полка перечитывает агентов.", refresh: true };
     },
     async compact(fetchImpl, state) {
-      await request(fetchImpl, "POST", "/api/drives/compact", { diskId: form(state).diskId || state.ui.disk || "" });
+      await request(fetchImpl, "POST", "/api/drives/compact", {
+        diskId: form(state).diskId || state.ui.disk || "",
+        path: form(state).path || form(state).compressDir || "",
+        algorithm: form(state).algorithm || "xpress16k",
+        confirm: true,
+      });
       return { message: "Сжатие поставлено в очередь.", refresh: true };
     },
     async download(fetchImpl, state) {

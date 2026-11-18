@@ -519,7 +519,21 @@ function scheduler(s) {
       .join("") || empty("Загрузок в очереди нет.")
   );
 }
+function liveGameShelf(s) {
+  const platforms = ["Все", "Windows", "macOS", "Switch", "PSP", "PS2", "PS4"];
+  const tabs = platforms.map((p) => button("platform", p, p, "secondary-action", `aria-pressed="${s.ui.platform === p}"`)).join("");
+  const games = (s.shelfGames || []).filter((game) => s.ui.platform === "Все" || game.platform === s.ui.platform);
+  return `<div class="platforms">${tabs}</div><div class="game-grid">${
+    games
+      .map(
+        (game) =>
+          `<article class="card game-card"><div class="game-cover">${icon("Gamepad2")}<b>${esc(game.name)}</b></div><div class="game-meta"><small>${esc(game.platform)}</small><p>${esc(game.placement || "Место не сообщено")}</p>${game.id ? button("game", "Открыть", game.id, "secondary-action") : ""}</div></article>`,
+      )
+      .join("") || empty("Игр для этой платформы пока нет.")
+  }</div>`;
+}
 function gameShelf(s) {
+  if (!s.demo && Array.isArray(s.shelfGames)) return liveGameShelf(s);
   const platforms = ["Все", "Windows", "macOS", "Switch", "PSP", "PS2", "PS4"];
   const tabs = platforms
     .map((p) => button("platform", p, p, "secondary-action", `aria-pressed="${s.ui.platform === p}"`))
@@ -758,6 +772,12 @@ function policyPage(s) {
   );
 }
 function modalView(s) {
+  if (s.ui.modal.kind === "renameDisk") {
+    return `<div class="dialog-inner"><div class="dialog-head"><h2 id="dialog-title">Переименовать диск</h2></div><label class="field">Новое имя<input id="diskLabel" value="${esc(s.ui.form.diskLabel || "")}"></label><div class="confirm-actions">${button("close", "Отмена", "", "secondary-action")}${button("renameDiskSave", "Переименовать диск", s.ui.modal.id, "primary")}</div></div>`;
+  }
+  if (s.ui.modal.kind === "compactDisk") {
+    return `<div class="dialog-inner"><div class="dialog-head"><h2 id="dialog-title">Сжать каталог</h2></div><label class="field">Путь на диске<input id="compressPath" value="${esc(s.ui.form.compressPath || "")}"></label><div class="confirm-actions">${button("close", "Отмена", "", "secondary-action")}${button("compactDisk", "Сжать каталог", s.ui.modal.id, "primary")}</div></div>`;
+  }
   if (s.ui.modal.kind === "confirm") {
     const m = s.ui.modal;
     return `<div class="dialog-inner"><div class="dialog-head"><h2 id="dialog-title">${esc(m.title)}</h2></div><p id="confirm-description">${esc(m.description)}</p><div class="confirm-actions">${button("close", "Отмена", "", "secondary-action", 'id="confirm-cancel"')}${button("confirmAction", esc(m.label), "", "danger-action")}</div></div>`;

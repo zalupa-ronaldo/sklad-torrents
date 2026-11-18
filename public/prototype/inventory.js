@@ -30,6 +30,7 @@ const Inventory = (() => {
   }
   const diskActions = (s, d) =>
     button("invFolder", "Сжать каталог", d.id, "secondary-action", available(s, d) && d.fs === "NTFS" ? "" : "disabled") +
+    button("renameDisk", "Переименовать диск", d.id, "secondary-action", available(s, d) ? "" : "disabled") +
     button("invPickFile", "Скачать файл", d.id, "secondary-action", available(s, d) ? "" : "disabled");
   const fileActions = (s, f) =>
     button("invDownload", "Скачать файл", f.id, "secondary-action", available(s, diskOf(s, f)) ? "" : "disabled");

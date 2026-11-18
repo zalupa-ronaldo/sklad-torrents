@@ -21,3 +21,27 @@ export function createDiskutilCache(ttlMs = DISKUTIL_CACHE_MS, now = () => Date.
     return pending;
   };
 }
+
+/** One diskutil info per mount, never two at once. Forgotten when the volume detaches. */
+export function createVolumeInfoCache() {
+  const values = new Map<string, unknown>();
+  let tail: Promise<void> = Promise.resolve();
+  return {
+    async once<T>(key: string, run: () => Promise<T>): Promise<T> {
+      const pending = tail.then(async () => {
+        if (values.has(key)) return values.get(key) as T;
+        const value = await run();
+        values.set(key, value);
+        return value;
+      });
+      tail = pending.then(
+        () => undefined,
+        () => undefined,
+      );
+      return pending;
+    },
+    forget(key: string) {
+      values.delete(key);
+    },
+  };
+}

@@ -1,6 +1,7 @@
 import { MOCK_BACKUP, MOCK_VAULT } from "../../src/addons/drives/mock-ids.ts";
 import type { IndexPayload } from "../../src/addons/drives/types.ts";
 import { startAgent } from "../lib/agent.mts";
+import { openVolumeWatch } from "../lib/volume-events.mts";
 import { collectMac } from "./collect.mts";
 
 function arg(name: string, fallback: string): string {
@@ -18,6 +19,7 @@ startAgent({
   hostName: arg("--name", "Mac mini"),
   os: "darwin",
   mockIndex: mock ? ready : null,
+  watch: openVolumeWatch(process.platform) ?? undefined,
   collect: mock
     ? async () => ({
         elevated: true,

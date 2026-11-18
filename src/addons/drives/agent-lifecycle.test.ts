@@ -8,6 +8,7 @@ import type { AddressInfo } from "node:net";
 import { afterEach, expect, it, vi } from "vitest";
 import { startAgent } from "../../../agents/lib/agent.mts";
 import { executeIndexPlan } from "@/addons/drives/execute-index";
+import type { VolumeWatchEvent } from "@/addons/drives/index-mode";
 import { pollAgent } from "@/addons/drives/agent-client";
 import { buildMockCatalog } from "@/addons/drives/mock-source";
 
@@ -359,6 +360,57 @@ it("does not launch compact.exe when the process is not Windows", async () => {
     expect(response.status).toBe(400);
     expect(await response.json()).toMatchObject({ error: expect.stringMatching(/Сжатие Windows/) });
     expect(vi.mocked(executeIndexPlan).mock.calls.length).toBe(calls);
+  } finally {
+    await stopAndRemove(server, directory);
+  }
+});
+
+it("does not collect volumes again on a timer and catches up USN without a second MFT", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "sklad-agent-usn-"));
+  process.env.SKLAD_AGENT_SNAPSHOT = path.join(directory, "snapshot.gz");
+  await writeFile(process.env.SKLAD_AGENT_SNAPSHOT, gzipSync(JSON.stringify({
+    volumes: [{
+      ...volume,
+      usnStart: "15",
+      lastEventId: null,
+      index: {
+        state: "complete",
+        progress: 1,
+        strategy: "mft-usn",
+        files: [{ relativePath: "keep/a.txt", name: "a.txt", kind: "file", size: 8, mtimeMs: 0 }],
+      },
+    }],
+  })));
+  vi.mocked(executeIndexPlan).mockResolvedValue({
+    called: ["readUsn"],
+    payload: {
+      state: "complete",
+      progress: 1,
+      strategy: "mft-usn",
+      delta: { upserts: [], deletes: [], complete: true },
+    },
+  });
+  const collect = vi.fn(async () => ({ elevated: true, note: "", volumes: [{ ...volume }] }));
+  let emit: (event: VolumeWatchEvent) => void = () => undefined;
+  const server = startAgent({
+    port: 0,
+    hostId: "test",
+    hostName: "test",
+    os: "win32",
+    collect,
+    intervalMs: 10,
+    watch: { start(on) { emit = on; }, stop() {} },
+  });
+  await once(server, "listening");
+  try {
+    await vi.waitFor(() => expect(executeIndexPlan).toHaveBeenCalledOnce());
+    expect(vi.mocked(executeIndexPlan).mock.calls[0]?.[0]).toMatchObject({ incremental: "usn" });
+    await sleep(40);
+    expect(collect).toHaveBeenCalledOnce();
+    expect(executeIndexPlan).toHaveBeenCalledOnce();
+    emit({ type: "journal", serial: volume.serial, volumeUuid: volume.volumeUuid, cursor: "16" });
+    await vi.waitFor(() => expect(executeIndexPlan).toHaveBeenCalledTimes(2));
+    expect(vi.mocked(executeIndexPlan).mock.calls[1]?.[0]).toMatchObject({ incremental: "usn" });
   } finally {
     await stopAndRemove(server, directory);
   }
