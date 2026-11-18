@@ -473,3 +473,4 @@ const GameLibrary = (() => {
   }
   return { page, modal, act, confirm, taskAction, tickMove, tickCompression };
 })();
+globalThis.GameLibrary = GameLibrary;

@@ -184,6 +184,7 @@ it("keeps the designer games screen on the live API and out of the demo list", a
   expect(seed).toContain('get("demo") !== "1"');
   expect(games).toContain("s.liveLibrary");
   expect(games).toContain("liveMove");
+  expect(games).toContain("globalThis.GameLibrary = GameLibrary");
 });
 
 it("does not enqueue a move from the screen until the dialog is confirmed", () => {
