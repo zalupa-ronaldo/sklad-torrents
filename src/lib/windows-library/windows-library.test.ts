@@ -170,6 +170,22 @@ it("rewrites a Steam library entry without asking Steam to download the game aga
   expect(manifest).toContain('"FullValidateAfterNextUpdate"\t\t"0"');
 });
 
+it("keeps the designer games screen on the live API and out of the demo list", async () => {
+  const live = await readFile("public/prototype/library-live.js", "utf8");
+  const seed = await readFile("public/prototype/demo-data.js", "utf8");
+  const games = await readFile("public/prototype/games.js", "utf8");
+  const app = await readFile("public/prototype/app.js", "utf8");
+  expect(live).toContain("/api/windows-library");
+  expect(live).toContain("confirm: true");
+  expect(live).toContain("liveMoveConfirm");
+  expect(live).not.toMatch(/setInterval\s*\(|diskutil/);
+  expect(app).toContain("winLiveMove");
+  expect(seed).toContain('location.hash === "#games"');
+  expect(seed).toContain('get("demo") !== "1"');
+  expect(games).toContain("s.liveLibrary");
+  expect(games).toContain("liveMove");
+});
+
 it("does not enqueue a move from the screen until the dialog is confirmed", () => {
   expect(moveRequest({ id: "wg-1", kind: "play", confirmed: false, notRunning: true }).ok).toBe(false);
   expect(moveRequest({ id: "wg-1", kind: "play", confirmed: true, notRunning: false }).ok).toBe(false);

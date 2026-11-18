@@ -51,8 +51,7 @@ const Pipeline = (() => {
     const controls = active
       ? button(
           "pause",
-          j.state === "running" ? "Пауза" : "Продолжить",
-          j.id,
+          j.state === "running" ? "Пауза" : j.flow?.step === 4 && !j.flow.confirmed ? "Подтвердить удаление" : "Продолжить",          j.id,
           "secondary-action",
           j.state === "paused" && !taskAvailable(s, j) ? "disabled" : "",
         ) + button("cancel", "Отмена", j.id)
@@ -197,8 +196,7 @@ const Pipeline = (() => {
         )
       );
     }
-    if (!s.demo && s.live && s.live.av1) return selector + av1LiveCard(s);
-    const videos = encodeCandidates(s),
+    if (!s.demo && s.live && s.live.av1) return selector + av1LiveCard(s);    const videos = encodeCandidates(s),
       jobs = s.tasks.filter((j) => j.kind === "av1"),
       active = jobs.find((j) => j.state === "running") || jobs[0],
       done = jobs.filter((j) => j.state === "done"),

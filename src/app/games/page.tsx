@@ -1,5 +1,4 @@
-import { AppShell } from "@/components/app-shell";
-import { WindowsLibraryScreen } from "@/app/games/windows-library-screen";
+import { GamesRedirect } from "@/app/games/games-redirect";
 
 export const dynamic = "force-dynamic";
 
@@ -10,9 +9,5 @@ export const metadata = {
 
 export default async function GamesPage({ searchParams }: { searchParams: Promise<{ demo?: string }> }) {
   const query = await searchParams;
-  return (
-    <AppShell current="games" subtitle="Windows">
-      <WindowsLibraryScreen demo={query.demo === "1"} />
-    </AppShell>
-  );
+  return <GamesRedirect demo={query.demo === "1"} />;
 }
