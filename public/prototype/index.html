@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#101311">
+  <title>Склад — обзор системы</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="style.css?v=collection-2">
+  <script src="app.js?v=collection-2" defer></script>
+  <script src="workbench.js?v=collection-2" defer></script>
+</head>
+<body>
+  <svg width="0" height="0" aria-hidden="true" style="position:absolute"><defs>
+<symbol id="i-Layers3" viewBox="0 0 24 24"><path d="M12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83z"></path><path d="M2 12a1 1 0 0 0 .58.91l8.6 3.91a2 2 0 0 0 1.65 0l8.58-3.9A1 1 0 0 0 22 12"></path><path d="M2 17a1 1 0 0 0 .58.91l8.6 3.91a2 2 0 0 0 1.65 0l8.58-3.9A1 1 0 0 0 22 17"></path></symbol>
+<symbol id="i-LayoutDashboard" viewBox="0 0 24 24"><rect width="7" height="9" x="3" y="3" rx="1"></rect><rect width="7" height="5" x="14" y="3" rx="1"></rect><rect width="7" height="9" x="14" y="12" rx="1"></rect><rect width="7" height="5" x="3" y="16" rx="1"></rect></symbol>
+<symbol id="i-ArrowDownUp" viewBox="0 0 24 24"><path d="m3 16 4 4 4-4"></path><path d="M7 20V4"></path><path d="m21 8-4-4-4 4"></path><path d="M17 4v16"></path></symbol>
+<symbol id="i-HardDrive" viewBox="0 0 24 24"><path d="M10 16h.01"></path><path d="M2.212 11.577a2 2 0 0 0-.212.896V18a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-5.527a2 2 0 0 0-.212-.896L18.55 5.11A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"></path><path d="M21.946 12.013H2.054"></path><path d="M6 16h.01"></path></symbol>
+<symbol id="i-ListChecks" viewBox="0 0 24 24"><path d="M13 5h8"></path><path d="M13 12h8"></path><path d="M13 19h8"></path><path d="m3 17 2 2 4-4"></path><path d="m3 7 2 2 4-4"></path></symbol>
+<symbol id="i-Monitor" viewBox="0 0 24 24"><rect width="20" height="14" x="2" y="3" rx="2"></rect><line x1="8" x2="16" y1="21" y2="21"></line><line x1="12" x2="12" y1="17" y2="21"></line></symbol>
+<symbol id="i-Laptop" viewBox="0 0 24 24"><path d="M18 5a2 2 0 0 1 2 2v8.526a2 2 0 0 0 .212.897l1.068 2.127a1 1 0 0 1-.9 1.45H3.62a1 1 0 0 1-.9-1.45l1.068-2.127A2 2 0 0 0 4 15.526V7a2 2 0 0 1 2-2z"></path><path d="M20.054 15.987H3.946"></path></symbol>
+<symbol id="i-ChevronRight" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"></path></symbol>
+<symbol id="i-Plus" viewBox="0 0 24 24"><path d="M5 12h14"></path><path d="M12 5v14"></path></symbol>
+<symbol id="i-Activity" viewBox="0 0 24 24"><path d="M22 12h-2.48a2 2 0 0 0-1.93 1.46l-2.35 8.36a.25.25 0 0 1-.48 0L9.24 2.18a.25.25 0 0 0-.48 0l-2.35 8.36A2 2 0 0 1 4.49 12H2"></path></symbol>
+<symbol id="i-ArrowDownLeft" viewBox="0 0 24 24"><path d="M17 7 7 17"></path><path d="M17 17H7V7"></path></symbol>
+<symbol id="i-ArrowUpRight" viewBox="0 0 24 24"><path d="M7 7h10v10"></path><path d="M7 17 17 7"></path></symbol>
+<symbol id="i-Search" viewBox="0 0 24 24"><path d="m21 21-4.34-4.34"></path><circle cx="11" cy="11" r="8"></circle></symbol>
+<symbol id="i-Box" viewBox="0 0 24 24"><path d="M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z"></path><path d="m3.3 7 8.7 5 8.7-5"></path><path d="M12 22V12"></path></symbol>
+<symbol id="i-Disc3" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"></circle><path d="M6 12c0-1.7.7-3.2 1.8-4.2"></path><circle cx="12" cy="12" r="2"></circle><path d="M18 12c0 1.7-.7 3.2-1.8 4.2"></path></symbol>
+<symbol id="i-Film" viewBox="0 0 24 24"><rect width="18" height="18" x="3" y="3" rx="2"></rect><path d="M7 3v18"></path><path d="M3 7.5h4"></path><path d="M3 12h18"></path><path d="M3 16.5h4"></path><path d="M17 3v18"></path><path d="M17 7.5h4"></path><path d="M17 16.5h4"></path></symbol>
+<symbol id="i-FileArchive" viewBox="0 0 24 24"><path d="M13.659 22H18a2 2 0 0 0 2-2V8a2.4 2.4 0 0 0-.706-1.706l-3.588-3.588A2.4 2.4 0 0 0 14 2H6a2 2 0 0 0-2 2v11.5"></path><path d="M14 2v5a1 1 0 0 0 1 1h5"></path><path d="M8 12v-1"></path><path d="M8 18v-2"></path><path d="M8 7V6"></path><circle cx="8" cy="20" r="2"></circle></symbol>
+<symbol id="i-Music2" viewBox="0 0 24 24"><path d="m19 6-5.2-3.9a.5.5 0 0 0-.8.4V18"></path><circle cx="9" cy="18" r="4"></circle></symbol>
+<symbol id="i-Gamepad2" viewBox="0 0 24 24"><line x1="6" x2="10" y1="11" y2="11"></line><line x1="8" x2="8" y1="9" y2="13"></line><line x1="15" x2="15.01" y1="12" y2="12"></line><line x1="18" x2="18.01" y1="10" y2="10"></line><path d="M17.32 5H6.68a4 4 0 0 0-3.978 3.59c-.006.052-.01.101-.017.152C2.604 9.416 2 14.456 2 16a3 3 0 0 0 3 3c1 0 1.5-.5 2-1l1.414-1.414A2 2 0 0 1 9.828 16h4.344a2 2 0 0 1 1.414.586L17 18c.5.5 1 1 2 1a3 3 0 0 0 3-3c0-1.545-.604-6.584-.685-7.258-.007-.05-.011-.1-.017-.151A4 4 0 0 0 17.32 5z"></path></symbol>
+<symbol id="i-X" viewBox="0 0 24 24"><path d="M18 6 6 18"></path><path d="m6 6 12 12"></path></symbol>
+<symbol id="i-Menu" viewBox="0 0 24 24"><path d="M4 5h16"></path><path d="M4 12h16"></path><path d="M4 19h16"></path></symbol>
+<symbol id="i-Database" viewBox="0 0 24 24"><ellipse cx="12" cy="5" rx="9" ry="3"></ellipse><path d="M3 5V19A9 3 0 0 0 21 19V5"></path><path d="M3 12A9 3 0 0 0 21 12"></path></symbol>
+<symbol id="i-Check" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"></path></symbol>
+<symbol id="i-Pause" viewBox="0 0 24 24"><rect x="14" y="3" width="5" height="18" rx="1"></rect><rect x="5" y="3" width="5" height="18" rx="1"></rect></symbol>
+<symbol id="i-Play" viewBox="0 0 24 24"><path d="M5 5a2 2 0 0 1 3.008-1.728l11.997 6.998a2 2 0 0 1 .003 3.458l-12 7A2 2 0 0 1 5 19z"></path></symbol>
+<symbol id="i-Network" viewBox="0 0 24 24"><rect x="16" y="16" width="6" height="6" rx="1"></rect><rect x="2" y="16" width="6" height="6" rx="1"></rect><rect x="9" y="2" width="6" height="6" rx="1"></rect><path d="M5 16v-3a1 1 0 0 1 1-1h12a1 1 0 0 1 1 1v3"></path><path d="M12 12V8"></path></symbol>
+<symbol id="i-File" viewBox="0 0 24 24"><path d="M6 22a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h8a2.4 2.4 0 0 1 1.704.706l3.588 3.588A2.4 2.4 0 0 1 20 8v12a2 2 0 0 1-2 2z"></path><path d="M14 2v5a1 1 0 0 0 1 1h5"></path></symbol>
+<symbol id="i-Clock3" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"></circle><path d="M12 6v6h4"></path></symbol>
+<symbol id="i-Server" viewBox="0 0 24 24"><rect width="20" height="8" x="2" y="2" rx="2" ry="2"></rect><rect width="20" height="8" x="2" y="14" rx="2" ry="2"></rect><line x1="6" x2="6.01" y1="6" y2="6"></line><line x1="6" x2="6.01" y1="18" y2="18"></line></symbol>
+</defs></svg>
+  <aside id="sidebar">
+    <div class="brand"><span class="brand-icon" data-icon="Layers3"></span>Склад<span class="brand-period">.</span></div>
+    <div class="side-inner">
+      <nav aria-label="Разделы" id="module-nav"></nav>
+      <div class="host-head"><p class="caption">Хосты</p><span class="count">02</span></div>
+      <nav aria-label="Хосты">
+        <button data-host="Mac mini"><i data-icon="Laptop"></i>Mac mini<span class="dot"></span></button>
+        <button data-host="Windows PC"><i data-icon="Monitor"></i>Windows PC<span class="dot"></span></button>
+      </nav>
+    </div>
+    <div class="side-foot"><i data-icon="Network"></i><div>Локальная сеть<small>Деморежим</small></div></div>
+  </aside>
+  <button id="backdrop" aria-label="Закрыть навигацию" hidden></button>
+  <main>
+    <header><button class="icon-button" id="menu" aria-label="Открыть навигацию" aria-controls="sidebar" aria-expanded="false"><i data-icon="Menu"></i></button><span>Рабочее пространство</span><i data-icon="ChevronRight"></i><strong id="crumb">Обзор</strong><span class="online"><b class="dot"></b><span class="mobile-demo">Демо · </span>2 хоста в сети</span></header>
+    <div class="content">
+      <div class="page-head"><div><h1 id="title">Обзор системы</h1><p id="subtitle">Сеть, хранилище и раздачи на ваших хостах.</p></div><button class="primary" id="add"><i data-icon="Plus"></i>Добавить торрент</button></div>
+      <div id="desk"></div>
+      <div id="overview" class="top-grid">
+        <section class="card network-card"><div class="card-heading"><h2><i data-icon="Activity"></i>Сетевая активность</h2><select id="period" aria-label="Период графика"><option value="60">За час</option><option value="15">За 15 мин</option></select></div>
+          <div class="metrics"><div><span class="metric-label"><i class="lime" data-icon="ArrowDownLeft"></i> Загрузка</span><div class="number"><b id="down"></b> <small>МБ/с</small></div></div><div><span class="metric-label"><i class="aqua" data-icon="ArrowUpRight"></i> Отдача</span><div class="number"><b id="up"></b> <small>МБ/с</small></div></div></div>
+          <div class="chart"><div class="axis"><span>80</span><span>40</span><span>0</span></div><div><svg id="graph" role="img" aria-label="История скорости загрузки и отдачи, МБ/с" viewBox="0 0 580 104" preserveAspectRatio="none"></svg><input type="range" id="scrub" min="0" max="180" value="180" aria-label="Момент на графике"><div id="ticks"></div><output id="sample-time">Сейчас</output></div></div>
+        </section>
+        <section class="card" id="queue-preview"></section>
+      </div>
+      <section id="transfers" class="card">
+        <div class="card-heading"><h2><i data-icon="ArrowDownUp"></i>Раздачи <span class="count" id="total"></span></h2><label class="search"><i data-icon="Search"></i><input id="query" placeholder="Поиск по имени" aria-label="Поиск раздач по имени" type="search"></label></div>
+        <div class="filters"><div class="tabs" aria-label="Состояние раздачи"></div><select id="host" aria-label="Хост"><option value="">Все хосты</option><option>Mac mini</option><option>Windows PC</option></select></div>
+        <div class="table-scroll"><table><thead><tr><th>Название</th><th>Хост</th><th>Статус</th><th>Прогресс</th><th class="rate-cell">Скорость</th><th aria-label="Подробности"></th></tr></thead><tbody id="rows"></tbody></table></div>
+        <p id="empty" hidden>Раздач по этим условиям нет. <button id="reset">Сбросить фильтры</button></p>
+      </section>
+      <section id="secondary" hidden></section>
+    </div>
+  </main>
+  <dialog id="dialog"><div class="dialog-inner"><div class="dialog-head"><h2 id="dialog-title"></h2><button class="icon-button" id="close" aria-label="Закрыть"><i data-icon="X"></i></button></div><div id="dialog-content"></div></div></dialog>
+  <div id="notice" role="status"></div>
+</body>
+</html>
