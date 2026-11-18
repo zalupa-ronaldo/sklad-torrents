@@ -8,6 +8,11 @@ const nextConfig: NextConfig = {
     // The image already ran tsc. A second TypeScript heap does not fit in 1536 MiB.
     ignoreBuildErrors: process.env.SKLAD_DOCKER_BUILD === "1",
   },
+  // One static worker. Three workers on a 1536 MiB VM exceeded 60s and exited.
+  staticPageGenerationTimeout: 180,
+  experimental: {
+    cpus: 1,
+  },
   outputFileTracingExcludes: {
     "/*": [
       "agents/mac-agent/drive.mts",

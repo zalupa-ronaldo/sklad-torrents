@@ -15,6 +15,8 @@ const mono = IBM_Plex_Mono({
   variable: "--font-mono",
 });
 
+export const dynamic = "force-dynamic";
+
 export const metadata: Metadata = {
   title: "Склад — торренты на своих машинах",
   description: "Локальная панель для qBittorrent на Mac mini и Windows: где лежат файлы, куда сохранять и что перенести.",

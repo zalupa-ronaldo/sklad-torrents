@@ -85,9 +85,8 @@ export function assertSpawnAllowed(request: SpawnRequest): void {
   }
   if (bin === "diskutil") {
     const target = args[1] ?? "";
-    const all = args.length === 2 && args[0] === "info" && target === "-all";
-    const one = args.length === 2 && args[0] === "info" && target !== "-all" && !target.startsWith("-") && !target.includes("..");
-    if (!all && !one) {
+    const one = args.length === 2 && args[0] === "info" && target.length > 0 && target !== "-all" && !target.startsWith("-") && !target.includes("..");
+    if (!one) {
       throw new Error("Индексатор на macOS читает только diskutil info одного тома.");
     }
     return;

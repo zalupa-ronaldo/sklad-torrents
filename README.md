@@ -80,13 +80,32 @@ SKLAD_DRIVE_MODE=agents SKLAD_MAC_AGENT_URL=http://127.0.0.1:4371 npm run dev
 node --import ./agents/register.mjs agents/mac-agent/drive.mts --port 4371
 ```
 
-Потом панель, из того же корня:
+Потом панель. На Mac её не собирают: CI публикует образ `linux/arm64` в `ghcr.io/zalupa-ronaldo/sklad-torrents`. Тег — полный SHA коммита или `sha-<SHA>`. После мержа в `main` тот же образ ещё получает тег `main`.
 
 ```bash
-docker compose up -d --build
+export SKLAD_PANEL_TAG=<полный SHA>
+docker compose pull
+docker compose up -d
 ```
 
 Панель: [http://127.0.0.1:4317](http://127.0.0.1:4317). Остановка: `docker compose down`. Второй `npm run dev` на порту `4317` не нужен.
+
+Откат — тот же файл, предыдущий тег:
+
+```bash
+export SKLAD_PANEL_TAG=<SHA предыдущего образа>
+docker compose pull
+docker compose up -d
+```
+
+Пакет GHCR для этого репозитория может быть закрытым. Тогда на Mac один раз выполняют `docker login ghcr.io` тем доступом, который уже есть у владельца. Новый секрет в репозиторий не добавляется: CI входит через `GITHUB_TOKEN`.
+
+Если GHCR недоступен, локальная сборка — запасной путь, не обычный деплой. Она не пререндерит живые страницы, ждёт статику до 180 секунд и держит один воркер:
+
+```bash
+docker build -t ghcr.io/zalupa-ronaldo/sklad-torrents:local .
+SKLAD_PANEL_TAG=local docker compose up -d --pull never
+```
 
 `compose.yaml` задаёт адреса, не ключи:
 

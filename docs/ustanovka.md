@@ -60,9 +60,15 @@ SKLAD_DRIVE_MODE=agents SKLAD_MAC_AGENT_URL=http://127.0.0.1:4371 npm run dev
 
 Панель можно запустить в Docker, образ `linux/arm64`. Агент дисков при этом остаётся командой выше, на хосте. Из контейнера панель ходит на `http://host.docker.internal:4371`. Данные — bind-mount `/Users/uzer/.local/sklad-data-clean`, не копия volume. Агент ПК: `http://192.168.0.16:4730` (`GET /v1/channel`). qBittorrent этого ПК на `192.168.0.16:8080` и `192.168.0.16:18080` доступен из контейнера, эти порты наружу не публикуются.
 
+Образ публикует CI в `ghcr.io/zalupa-ronaldo/sklad-torrents`. На Mac его не собирают. `SKLAD_PANEL_TAG` — полный SHA или `sha-<SHA>`, после мержа ещё тег `main`.
+
 ```bash
-docker compose up -d --build
+export SKLAD_PANEL_TAG=<полный SHA>
+docker compose pull
+docker compose up -d
 ```
+
+Откат: та же пара команд с SHA предыдущего образа. Локальная сборка только если GHCR недоступен: `docker build -t ghcr.io/zalupa-ronaldo/sklad-torrents:local .` и `SKLAD_PANEL_TAG=local docker compose up -d --pull never`.
 
 Адрес панели тот же: http://127.0.0.1:4317. Прежний интерфейс: http://127.0.0.1:4317/legacy. Остановка: `docker compose down`. Пока контейнер запущен, второй `npm run dev` на порту `4317` не поднимайте.
 

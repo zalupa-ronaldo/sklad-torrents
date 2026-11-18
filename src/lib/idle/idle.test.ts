@@ -19,6 +19,20 @@ describe("idle work", () => {
     expect(discovery).not.toMatch(/setInterval/);
     const worker = readFileSync(path.join(root, "src/lib/jobs/mock-worker.ts"), "utf8");
     expect(worker).not.toMatch(/schedule\(claimed/);
+    for (const name of [
+      "agents/mac-agent/collect.mts",
+      "agents/mac-agent/mount.mts",
+      "agents/mac-agent/drive.mts",
+      "agents/lib/agent.mts",
+      "agents/lib/volume-events.mts",
+    ]) {
+      const source = readFileSync(path.join(root, name), "utf8");
+      expect(source, name).not.toContain('"-all"');
+      expect(source, name).not.toContain("info -all");
+      expect(source, name).not.toMatch(/setInterval/);
+    }
+    expect(readFileSync(path.join(root, "agents/mac-agent/mount.mts"), "utf8")).toContain('args: ["info", mount]');
+    expect(readFileSync(path.join(root, "agents/lib/agent.mts"), "utf8")).toContain("void tick()");
   });
 
   it("accepts a DiskArbitration mount and drops a path that leaves /Volumes", () => {

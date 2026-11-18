@@ -38,6 +38,8 @@ describe("panel container", () => {
 
   it("publishes only the panel on loopback 4317 for linux/arm64", () => {
     expect(serviceNames(compose)).toEqual(["panel"]);
+    expect(compose).toContain("ghcr.io/zalupa-ronaldo/sklad-torrents:${SKLAD_PANEL_TAG:-main}");
+    expect(compose).not.toMatch(/dockerfile:/);
     expect(compose).toContain("platform: linux/arm64");
     expect(compose).toContain("127.0.0.1:4317:4317");
     expect(compose).toContain("restart: unless-stopped");
@@ -87,6 +89,10 @@ describe("panel container", () => {
     expect(events).toContain("mac-agent/mount.mts");
     expect(events).not.toContain("fs.watch");
     const workflow = readFileSync(path.join(root, ".github/workflows/windows-emulation.yml"), "utf8");
-    expect(workflow).toContain("docker build");
+    expect(workflow).toContain("docker buildx build");
+    expect(workflow).toContain("ghcr.io/zalupa-ronaldo/sklad-torrents");
+    expect(workflow).toContain("secrets.GITHUB_TOKEN");
+    expect(workflow).not.toContain("GHCR_TOKEN");
+    expect(workflow).not.toContain("CR_PAT");
   });
 });
