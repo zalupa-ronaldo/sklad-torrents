@@ -3,6 +3,7 @@
 // View helpers take a snapshot; they never query or mutate the document.
 const pages = {
   overview: ["Диспетчер", "LayoutDashboard", "Диски, файлы и обработка в локальной сети."],
+  devices: ["Устройства", "Server", "Носители, свободное место и последние снимки каталога."],
   drives: ["Все файлы", "HardDrive", "Поиск по снимкам всех носителей, включая отключённые."],
   torrents: ["Торренты", "ArrowDownUp", "Раздачи qBittorrent на ваших хостах."],
   scheduler: ["Планировщик", "Clock3", "Одна активная загрузка на физический диск."],
@@ -186,6 +187,36 @@ function shelf(s) {
     )}</div>
     <div class="inventory" id="rack">${s.loading ? skeleton("Загрузка списка дисков", 6) : rows || empty(s.disks.length ? "Ничего не найдено." : "Носителей пока нет.")}</div>
     ${s.loading ? "" : `<div class="inventory-foot"><span>Показано ${Math.min(matches.length, u.limit)} из ${matches.length} ${filters ? button("clearShelf", "Сбросить фильтры", "", "clear-shelf") : ""}</span>${matches.length > u.limit ? button("more", "Показать ещё") : ""}</div>`}</section>`;
+}
+function scanTime(iso) {
+  if (!iso) return "Сканирования ещё не было";
+  return new Date(iso).toLocaleString("ru-RU", {dateStyle:"short", timeStyle:"short"});
+}
+function devicesPage(s) {
+  if (s.loading) return skeleton("Загрузка устройств", 5);
+  if (!s.disks.length) return card("Носители", empty("Устройств в каталоге пока нет."));
+  return s.hosts.map(host => {
+    const devices = s.disks.filter(d => d.host === host.id);
+    if (!devices.length) return "";
+    const rows = devices.map(d => {
+      const online = available(s,d);
+      const scan = s.tasks.find(j => j.operation?.type === "index" && j.operation.target === d.id);
+      const busy = scan && ["running","paused"].includes(scan.state);
+      const used = d.sizeBytes - d.freeBytes;
+      const retry = scan?.state === "error";
+      return `<article class="device-panel card ${online ? "" : "device-offline"}">
+        <div class="device-heading"><span class="carrier-type">${families[d.kind][0]}</span><h3>${esc(d.label)}</h3><span class="device-status">${online ? "В сети" : "Не в сети"}</span></div>
+        <p class="device-path">${esc(d.mount || d.location)} · ${esc(d.fs)}</p>
+        ${meter(d.sizeBytes ? Math.round(100*used/d.sizeBytes) : 0,"Занято на "+d.label)}
+        <div class="device-volume"><span>Занято <b>${bytes(used)}</b></span><span>Свободно <b>${bytes(d.freeBytes)}</b></span></div>
+        <p class="scan-time">Последний скан · ${esc(scanTime(d.lastScan))}</p>
+        ${busy ? `<p class="scan-time">${scan.state==="paused"?"Сканирование на паузе":"Идёт сканирование"} · ${num(scan.progress)}%</p>` : ""}
+        ${retry ? `<p class="error-message">${esc(scan.error)}</p>` : ""}
+        <div class="device-actions">${button("disk","Открыть в каталоге",d.id)}${button(retry?"retry":"reindex",retry?"Повторить сканирование":"Пересканировать",retry?scan.id:d.id,"secondary-action",!online||busy?"disabled":"")}</div>
+      </article>`;
+    }).join("");
+    return `<section class="device-host"><h2>${icon(host.id==="pc"?"Monitor":"Laptop")}${esc(host.name)} <span class="count">${devices.length}</span></h2><div class="device-grid">${rows}</div></section>`;
+  }).join("");
 }
 function queue(s, compact = false) {
   const rows = (compact ? s.tasks.slice(0, 2) : s.tasks)
@@ -590,6 +621,7 @@ function modalView(s) {
 function screen(s) {
   const page = s.ui.page;
   if (page === "overview") return dashboard(s);
+  if (page === "devices") return devicesPage(s);
   if (page === "jobs") return queue(s);
   if (s.loading) return skeleton("Загрузка раздела", 4);
   if (page === "drives" || page === "index") return fileSearch(s);

@@ -26,6 +26,7 @@ const DemoData = (() => {
       freeBytes: free * GB,
       online: Boolean(mount),
       lastSeen,
+      lastScan: new Date(Date.parse(lastSeen) - 37 * 60_000).toISOString(),
       mount,
       fs,
       location,
@@ -35,7 +36,7 @@ const DemoData = (() => {
     carrier("archive", "Archive HDD", "hdd", "pc", 8000, 3620, "D:/", "NTFS", "Холодный архив"),
     carrier("pool", "Game SSD", "ssd", "pc", 1000, 292, "C:/", "NTFS", "Игровой пул"),
     carrier("usb", "Флешка 01", "usb", "mac", 64, 31, "/Volumes/Flash/", "exFAT", "Рабочий стол"),
-    carrier("camera", "Камера SD", "sd", "mac", 128, 74, "/Volumes/Camera/", "exFAT", "Картридер"),
+    carrier("camera", "Камера SD", "sd", "mac", 128, 0.75, "/Volumes/Camera/", "exFAT", "Картридер"),
     carrier("dvd", "DVD-R 07", "optical", "pc", 4.7, 0.5, null, "UDF", "Альбом · карман 7", "2026-11-04T15:00:00Z"),
     carrier("backup", "Архив 02", "hdd", "pc", 4000, 900, null, "NTFS", "Стеллаж A · ячейка 2", "2026-11-12T12:00:00Z"),
     carrier("media", "Media HDD", "hdd", "pc", 4000, 1590, "S:/", "NTFS", "Медиатека"),
@@ -166,6 +167,12 @@ const DemoData = (() => {
           error: "Диск назначения отключился во время копирования.",
         });
       data.tasks.push(task);
+      if (scenario === "error") data.tasks.push({
+        id: "scan-usb", kind: "index", title: "Индексация · Флешка 01", host: "mac",
+        totalBytes: disks.find(d => d.id === "usb").sizeBytes, progress: 14, bytesPerSec: 0, etaSec: null,
+        state: "error", error: "Не удалось прочитать каталог. Сохранён предыдущий снимок.",
+        operation: { type: "index", target: "usb" }
+      });
     } else {
       data.tasks.push({
         id: "index-archive",

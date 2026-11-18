@@ -528,8 +528,9 @@ async function act(name, value) {
       break;
     case "reindex": {
       const d = byId(state.disks, value);
+      if (!available(state,d)) break;
       if (enqueue("index", "Обновить индекс · " + d.label, d.host, d.sizeBytes, { type: "index", target: d.id }))
-        navigate("jobs");
+        { if(u.page !== "devices") navigate("jobs"); else message("Сканирование началось."); }
       break;
     }
     case "run":
