@@ -1,252 +1,703 @@
 "use strict";
-
 const $ = (id) => document.getElementById(id);
-const icon = (name) => `<svg class="ico" aria-hidden="true"><use href="#i-${name}"></use></svg>`;
-const escapeHtml = (value) => String(value).replace(/[&<>"']/g, (c) =>
-  ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
-const num = (n) => n.toLocaleString("ru-RU", { maximumFractionDigits: 1 });
-const states = {
-  down: ["Загрузка", "ArrowDownLeft"], seed: ["Раздача", "ArrowUpRight"], pause: ["Пауза", "Pause"]
-};
-const kinds = {
-  image: ["Образ диска", "Disc3", "#303623", "#ccdc94"],
-  video: ["Видео", "Film", "#302c39", "#c7aedf"],
-  data: ["Данные", "Database", "#26343b", "#97c6da"],
-  audio: ["Аудио", "Music2", "#372e27", "#deba94"],
-  archive: ["Архив", "FileArchive", "#2b3430", "#a7c7b7"]
-};
-const seeds = [
-  ["Ubuntu 24.04.2 Desktop", "image", "5,9 ГБ", "Mac mini", "down", 68, 28.4, 0],
-  ["Big Buck Bunny · 4K", "video", "3,2 ГБ", "Windows PC", "down", 42, 20.2, 0],
-  ["OpenStreetMap · Europe", "data", "31,6 ГБ", "Windows PC", "seed", 100, 0, 8.6],
-  ["Blender Demo Files", "archive", "8,4 ГБ", "Mac mini", "seed", 100, 0, 4.2],
-  ["Musopen Collection", "audio", "2,8 ГБ", "Mac mini", "pause", 36, 0, 0],
-  ["Debian 13 · netinst", "image", "784 МБ", "Windows PC", "seed", 100, 0, 2.4]
-];
-const torrents = seeds.map(([name, kind, size, host, state, percent, down, up], id) =>
-  ({ id, name, kind, size, host, state, percent, down, up }));
-const pages = {
-  overview: ["Диспетчер", "Диспетчер склада", "Диски, файлы и обработка в локальной сети."],
-  torrents: ["Торренты", "Торренты", "Раздачи qBittorrent на Mac mini и Windows PC."],
-  drives: ["Полка дисков", "Полка дисков", "Ёмкость и свободное место на подключённых томах."],
-  jobs: ["Очередь задач", "Очередь задач", "Фоновые операции на ваших хостах."]
-};
-let page = "overview";
-let filter = "";
-let noticeTimer;
-let returnFocus;
-
-function tile(kind) {
-  const [, symbol, bg, fg] = kinds[kind];
-  return `<span class="tile" style="--tile-bg:${bg};--tile-fg:${fg}">${icon(symbol)}</span>`;
-}
-function pill(state) {
-  const [label, symbol] = states[state];
-  return `<span class="pill ${state}">${icon(symbol)}${label}</span>`;
-}
-function track(percent, color = "var(--lime)") {
-  return `<div class="track"><span style="width:${percent}%;background:${color}"></span></div>`;
-}
-function renderRows() {
-  const host = $("host").value;
-  const query = $("query").value.trim().toLocaleLowerCase("ru");
-  const items = torrents.filter((item) => (!filter || item.state === filter) &&
-    (!host || item.host === host) && item.name.toLocaleLowerCase("ru").includes(query));
-  $("rows").innerHTML = items.map((item) => {
-    const name = escapeHtml(item.name);
-    const speed = item.state === "down" ? item.down : item.state === "seed" ? item.up : 0;
-    const color = { down: "var(--lime)", seed: "var(--aqua)", pause: "#c3ad85", wait: "#a7b4c1" }[item.state];
-    return `<tr class="torrent-row">
-      <td><button class="item" data-detail="${item.id}">${tile(item.kind)}<span><strong>${name}</strong><small>${kinds[item.kind][0]} · ${item.size}</small></span></button></td>
-      <td class="host-cell">${item.host}</td><td>${pill(item.state)}</td>
-      <td><div class="progress">${item.percent}%${track(item.percent, color)}</div></td>
-      <td class="rate-cell rate">${speed ? num(speed) + " МБ/с" : "—"}</td>
-      <td><button class="row-more" data-detail="${item.id}" aria-label="Подробности: ${name}">${icon("ChevronRight")}</button></td></tr>`;
-  }).join("");
-  $("empty").hidden = items.length > 0;
-  $("total").textContent = items.length;
-  $("nav-count").textContent = torrents.length;
-  document.querySelector(".tabs").innerHTML = [["", "Все"], ["down", "Загрузка"], ["seed", "Раздача"], ["pause", "Пауза"], ["wait","В очереди"]]
-    .map(([key, label]) => `<button data-filter="${key}" aria-pressed="${key === filter}">${label}</button>`).join("");
-}
-
-function renderChart() {
-  const download = torrents.reduce((sum, item) => sum + (item.state === "down" ? item.down : 0), 0);
-  const upload = torrents.reduce((sum, item) => sum + (item.state === "seed" ? item.up : 0), 0);
-  $("down").textContent = num(download);
-  $("up").textContent = num(upload);
-  // Fixed sample history for both views. The short view shows its last quarter.
-  const history = Array.from({ length: 181 }, (_, i) => {
-    const wave = (f) => Math.sin(i * f);
-    const burst = (Math.floor(i / 19) % 3) * 6;
-    return [30 + burst + 8 * wave(.09) + 5 * wave(.61) + 3 * wave(1.83),
-      8 + burst / 4 + 3 * wave(.12) + 2 * wave(.59)];
-  });
-  history[history.length - 1] = [download, upload];
-  const short = $("period").value === "15";
-  const series = short ? history.slice(-46) : history;
-  const scrub = $("scrub");
-  scrub.max = series.length - 1;
-  scrub.value = scrub.max;
-  function inspect() {
-    const i = Number(scrub.value);
-    const minutes = Math.round((series.length - 1 - i) / 3);
-    $("down").textContent = num(series[i][0]);
-    $("up").textContent = num(series[i][1]);
-    $("sample-time").textContent = i === series.length-1 ? "Сейчас" : minutes ? minutes + " мин назад" : "Менее минуты назад";
-    scrub.setAttribute("aria-valuetext", $("sample-time").textContent + ", загрузка " + num(series[i][0]) + ", отдача " + num(series[i][1]) + " МБ/с");
-    $("graph-cursor").setAttribute("x1", 580*i/(series.length-1));
-    $("graph-cursor").setAttribute("x2", 580*i/(series.length-1));
-  }
-  scrub.oninput = inspect;
-  function point(event) {
-    const rect = $("graph").getBoundingClientRect();
-    scrub.value = Math.round(Math.min(1, Math.max(0, (event.clientX-rect.left)/rect.width))*(series.length-1));
-    inspect();
-  }
-  $("graph").onpointermove = point;
-  $("graph").onpointerdown = point;
-  const points = (channel) => series.map((v,i) => `${(580 * i / (series.length - 1)).toFixed(2)},${(104 - 104 * v[channel] / 80).toFixed(2)}`).join(" ");
-  const grid = [0, 26, 52, 78, 104].map(y =>
-    `<line x1="0" x2="580" y1="${y}" y2="${y}" stroke="#384036" stroke-dasharray="3 5"/>`).join("");
-  $("graph").innerHTML = `<defs><linearGradient id="fill" x1="0" y1="0" x2="0" y2="1"><stop stop-color="#b6ea77" stop-opacity=".26"/><stop offset="1" stop-color="#b6ea77" stop-opacity=".015"/></linearGradient></defs>
-    ${grid}<polygon points="0,104 ${points(0)} 580,104" fill="url(#fill)"/>
-    ${["#c4f88a", "#7ac5ae"].map((c,i) => `<polyline points="${points(i)}" fill="none" vector-effect="non-scaling-stroke" stroke="${c}" stroke-width="1.8" stroke-linejoin="round"/>`).join("")}<line id="graph-cursor" y1="0" y2="104" stroke="#c4f88a" stroke-dasharray="3 3"/>`;
-  inspect();
-  $("ticks").innerHTML = (short ? ["−15 мин", "−10 мин", "−5 мин", "Сейчас"] :
-    ["−60 мин", "−45 мин", "−30 мин", "−15 мин", "Сейчас"]).map(t => "<span>" + t + "</span>").join("");
-}
-function setMenu(open) {
-  document.body.classList.toggle("menu-open", open);
-  $("backdrop").hidden = !open;
-  $("menu").setAttribute("aria-expanded", String(open));
-  document.querySelector("main").inert = open;
-  $("sidebar").inert = matchMedia("(max-width:940px)").matches && !open;
-}
-function navigate(next, host = "") {
-  page = next;
-  const [crumb, title, subtitle] = pages[next];
-  $("crumb").textContent = crumb;
-  $("title").textContent = title;
-  $("subtitle").textContent = subtitle;
-  document.title = title + " — Склад";
-  $("desk").hidden = next !== "overview";
-  $("overview").hidden = next !== "overview";
-  $("transfers").hidden = !["overview", "torrents"].includes(next);
-  $("secondary").hidden = !$("transfers").hidden;
-  $("host").value = host;
-  $("query").value = "";
-  filter = "";
-  setMenu(false);
-  renderNavigation();
-  renderRows();
-  renderWorkbench();
-  window.scrollTo(0,0);
-}
-function renderNavigation() {
-  const host = $("host").value;
-  document.querySelectorAll("nav button").forEach(b => {
-    const active = page === "torrents" && host ? b.dataset.host === host : b.dataset.page === page;
-    b.classList.toggle("active",active);
-    if (active) b.setAttribute("aria-current","page"); else b.removeAttribute("aria-current");
-  });
-}
-function showDialog(title, html) {
-  if (!$("dialog").open) returnFocus = document.activeElement;
-  $("dialog-title").textContent = title;
-  $("dialog").setAttribute("aria-labelledby","dialog-title");
-  $("dialog-content").innerHTML = html;
-  if (!$("dialog").open) $("dialog").showModal();
-}
-function detail(id) {
-  const item = torrents.find(t => t.id === id);
-  const values = [["Хост", item.host], ["Носитель", disk(diskForTorrent(item)).name], ["Статус", pill(item.state)], ["Тип", kinds[item.kind][0]], ["Размер", item.size], ["Прогресс", item.percent + "%"]];
-  showDialog(item.name, `<dl>${values.map(([k,v]) => `<div><dt>${k}</dt><dd>${v}</dd></div>`).join("")}</dl><button class="primary" id="toggle-state">${icon(item.state === "pause" ? "Play" : "Pause")}${item.state === "pause" ? "Продолжить" : "Приостановить"}</button>`);
-  if (item.percent === 100) {
-    const file = catalog.find(f => f.torrent === id);
-    if (file) {
-      $("dialog-content").insertAdjacentHTML("beforeend", '<button class="secondary-action" id="move-current">Перенести раздачу</button>');
-      $("move-current").onclick = () => { $("dialog").close(); navigate("move"); selectSource(file.id); };
-    }
-  }
-  $("toggle-state").onclick = () => {
-    item.state = item.state === "pause" ? (item.percent === 100 ? "seed" : "wait") : "pause";
-    rebalance();
-    renderChart();
-    renderRows();
-    if (page === "scheduler") renderScheduler();
-    detail(id);
-    $("toggle-state").focus();
+function createState(scenario, page = "overview") {
+  const data = DemoData.snapshot(scenario);
+  return {
+    ...data,
+    scenario,
+    scenarioOptions: DemoData.scenarios,
+    ui: {
+      page,
+      menu: false,
+      modal: null,
+      notice: "",
+      query: "",
+      family: "",
+      connection: "all",
+      limit: 6,
+      fileQuery: "",
+      disk: "",
+      host: "",
+      status: "",
+      torrentQuery: "",
+      period: "60",
+      sample: null,
+      platform: "Все",
+      category: Object.keys(data.rules)[0],
+      form: {},
+    },
   };
 }
-function notify(message) {
-  clearTimeout(noticeTimer);
-  $("notice").textContent = message;
-  noticeTimer = setTimeout(() => $("notice").textContent = "", 3500);
-}
-function addTorrent() {
-  showDialog("Добавить торрент", `<form id="add-form">
-    <label>Magnet-ссылка<input id="magnet" required placeholder="magnet:?xt=urn:btih:…" autofocus></label>
-    <label>Хост<select id="target"><option>Mac mini</option><option>Windows PC</option></select></label>
-    <label>Сохранить на носитель<select id="torrent-disk"></select></label>
-    <p class="capacity-label">Раздача появится в демосписке до перезагрузки страницы.</p>
-    <button type="submit" class="primary">${icon("Plus")}Добавить</button></form>`);
-  $("target").value = $("host").value || "Mac mini";
-  function populateTargets() {
-    const host=$("target").value;
-    const options=disks.filter(d=>d.host===host && !d.offline && d.kind!=="Оптика" && d.id!=="pool");
-    $("torrent-disk").replaceChildren(...options.map(d=>new Option(d.name+" · "+sizeText(d.total-d.used)+" свободно",d.id)));
+let state = createState("normal");
+
+// Update only changed nodes. Ticks and filter changes must not replace a focused input,
+// dismiss a native select, reset a file picker or move the caret.
+const rendered = new WeakMap();
+function patchNode(node, next) {
+  if (node.nodeType !== next.nodeType || node.nodeName !== next.nodeName) {
+    node.replaceWith(next.cloneNode(true));
+    return;
   }
-  $("target").onchange=populateTargets;
-  populateTargets();
-  $("magnet").oninput = () => $("magnet").setCustomValidity("");
-  $("add-form").onsubmit = (event) => {
-    event.preventDefault();
-    const link = $("magnet").value.trim();
-    const params = new URLSearchParams(link.slice(link.indexOf("?") + 1));
-    const hash = params.getAll("xt").find(x => /^urn:btih:([0-9a-f]{40}|[a-z2-7]{32})$/i.test(x));
-    if (!/^magnet:\?/i.test(link) || !hash) {
-      $("magnet").setCustomValidity("Нужна magnet-ссылка с хешем BitTorrent (btih).");
-      $("magnet").reportValidity(); return;
+  if (node.nodeType === Node.TEXT_NODE) {
+    if (node.data !== next.data) node.data = next.data;
+    return;
+  }
+  if (node.nodeType !== Node.ELEMENT_NODE) return;
+  for (const attr of [...node.attributes]) if (!next.hasAttribute(attr.name)) node.removeAttribute(attr.name);
+  for (const attr of next.attributes)
+    if (node.getAttribute(attr.name) !== attr.value) node.setAttribute(attr.name, attr.value);
+  patchChildren(node, next);
+  if (node instanceof HTMLInputElement && node.type !== "file" && node.value !== next.value) node.value = next.value;
+  if (node instanceof HTMLSelectElement && node.value !== next.value) node.value = next.value;
+}
+function patchChildren(node, next) {
+  for (let i = 0; i < next.childNodes.length; i++) {
+    const child = next.childNodes[i];
+    if (i >= node.childNodes.length) node.append(child.cloneNode(true));
+    else patchNode(node.childNodes[i], child);
+  }
+  while (node.childNodes.length > next.childNodes.length) node.lastChild.remove();
+}
+function region(id, html) {
+  const node = $(id);
+  if (rendered.get(node) === html) return;
+  const template = document.createElement("template");
+  template.innerHTML = html;
+  patchChildren(node, template.content);
+  rendered.set(node, html);
+}
+function render(s) {
+  region("sidebar", sidebar(s));
+  region("topbar", topbar(s));
+  region("page-head", heading(s));
+  region(
+    "alerts",
+    s.hosts
+      .filter((h) => !h.online)
+      .map(
+        (h) => `<p class="host-alert">${icon("Network")}Нет связи с ${esc(h.name)}. Доступен последний снимок файлов.</p>`,
+      )
+      .join(""),
+  );
+  region("screen", screen(s));
+  region("notice", esc(s.ui.notice));
+  const dialog = $("dialog");
+  if (s.ui.modal) {
+    region("dialog", modalView(s));
+    if (!dialog.open) {
+      dialog.showModal();
+      if (s.ui.modal.kind === "add") $("magnet")?.focus();
     }
-    const host = $("target").value;
-    torrents.unshift({ id: torrents.length, name: params.get("dn") || hash.slice(9,21) + "…",
-      kind: "archive", size: "Размер неизвестен", host, disk: $("torrent-disk").value, state: "down", percent: 0, down: 0, up: 0 });
-    $("dialog").close();
-    rebalance();
-    renderChart();
-    navigate("torrents", host);
-    notify("Раздача добавлена на " + host);
-  };
+  } else if (dialog.open) dialog.close();
+  document.title = pages[s.ui.page][0] + " — Склад";
+  document.body.classList.toggle("menu-open", s.ui.menu);
+  $("backdrop").hidden = !s.ui.menu;
+  document.querySelector("main").inert = s.ui.menu;
+  $("sidebar").inert = !s.ui.menu && matchMedia("(max-width:940px)").matches;
 }
 
-document.querySelectorAll("[data-icon]").forEach(el => { el.innerHTML = icon(el.dataset.icon); });
+let toastTimer;
+function message(text) {
+  clearTimeout(toastTimer);
+  state.ui.notice = text;
+  toastTimer = setTimeout(() => {
+    state.ui.notice = "";
+    render(state);
+  }, 3200);
+}
+function resetForm() {
+  if (state.ui.form.artURL) URL.revokeObjectURL(state.ui.form.artURL);
+  state.ui.form = {};
+}
+function navigate(page) {
+  resetForm();
+  Object.assign(state.ui, { page, menu: false, modal: null });
+  window.scrollTo(0, 0);
+}
+function openSearch() {
+  Object.assign(state.ui, { fileQuery: "", disk: "" });
+  navigate("drives");
+}
+function placement(rule, size, host) {
+  const candidates = state.disks.filter(
+    (d) =>
+      available(state, d) &&
+      (!host || d.host === host) &&
+      (rule.target === "group" ? d.kind === "hdd" : d.id === rule.target) &&
+      d.freeBytes >= size,
+  );
+  return candidates.sort((a, b) => b.freeBytes - a.freeBytes)[0];
+}
+function writeCopy(file, disk, dir, changes = {}) {
+  const copy = { ...file, ...changes, id: crypto.randomUUID(), diskId: disk.id, dir };
+  delete copy.torrentId;
+  const allocated = copy.allocatedBytes ?? copy.sizeBytes;
+  if (disk.freeBytes < allocated) throw new Error("Недостаточно свободного места на " + disk.label + ".");
+  state.files.push(copy);
+  disk.freeBytes -= allocated;
+  return copy;
+}
+function enqueue(kind, title, host, totalBytes, operation) {
+  const duplicate = state.tasks.some(
+    (j) =>
+      ["running", "paused"].includes(j.state) &&
+      (JSON.stringify(j.operation) === JSON.stringify(operation) ||
+        (j.operation?.fileId && j.operation.fileId === operation.fileId)),
+  );
+  if (duplicate) {
+    message("Для этого файла уже есть активное задание.");
+    return false;
+  }
+  const rate = Math.max(1, Math.ceil(totalBytes / 18));
+  state.tasks.unshift({
+    id: crypto.randomUUID(),
+    kind,
+    title,
+    host,
+    totalBytes,
+    operation,
+    bytesPerSec: rate,
+    etaSec: 18,
+    state: "running",
+    progress: 0,
+    error: null,
+  });
+  return true;
+}
+function onArrival(f) {
+  if (!state.automation || !state.previewFresh) return;
+  const d = diskOf(state, f);
+  if (!available(state, d)) return;
+  if (
+    f.platform === "Windows" &&
+    d.host === "pc" &&
+    d.fs === "NTFS" &&
+    f.expectedSaving >= 0.1 &&
+    !f.allocatedBytes &&
+    state.rules["Игры"].after === "Сжатие NTFS"
+  ) {
+    enqueue("copy", "Подготовка игры · " + f.name, d.host, f.sizeBytes, { type: "compress", fileId: f.id });
+  }
+  if (f.type !== "Видео" || f.optimized || state.rules["Фильмы"].after !== "HandBrake") return;
+  const content = "av1:" + f.contentId;
+  if (
+    state.files.some((c) => c.contentId === content) ||
+    state.tasks.some((j) => ["running", "paused"].includes(j.state) && j.operation?.content === content)
+  )
+    return;
+  const size = Math.round(f.sizeBytes * 0.67),
+    rule = state.rules["Фильмы"],
+    dest = placement(rule, size);
+  if (dest)
+    enqueue("copy", "Подготовка видео · " + f.name, "mac", f.sizeBytes, {
+      type: "encode",
+      fileId: f.id,
+      content,
+      size,
+      target: dest.id,
+      dir: rule.folder + "/",
+    });
+}
+function completeTask(task) {
+  const op = task.operation;
+  if (!op) return;
+  const f = byId(state.files, op.fileId),
+    target = byId(state.disks, op.target);
+  if (
+    !byId(state.hosts, task.host)?.online ||
+    (f && !available(state, diskOf(state, f))) ||
+    (target && !available(state, target))
+  )
+    throw new Error("Нет связи с носителем. Подключите его и повторите задание.");
+  switch (op.type) {
+    case "index":
+      target.lastScan = new Date().toISOString();
+      break;
+    case "sha256":
+      Object.assign(state.manifests, op.hashes);
+      if (op.other) {
+        const other = byId(state.files, op.other);
+        state.comparisons.push(
+          f.name +
+            " ↔ " +
+            other.name +
+            " · " +
+            (op.hashes[f.id] === op.hashes[other.id] ? "Копии совпали" : "Контрольные суммы различаются"),
+        );
+      }
+      break;
+    case "copy":
+    case "receive":
+    case "game": {
+      const copy = writeCopy(f, target, op.dir ?? f.dir, op.type === "game" ? { original: f.id } : {});
+      onArrival(copy);
+      break;
+    }
+    case "move": {
+      const allocated = f.allocatedBytes ?? f.sizeBytes;
+      if (target.id !== f.diskId && target.freeBytes < allocated) throw new Error("Недостаточно свободного места.");
+      diskOf(state, f).freeBytes += allocated;
+      target.freeBytes -= allocated;
+      f.diskId = target.id;
+      f.dir = op.dir ?? f.dir;
+      const torrent = byId(state.torrents, f.torrentId);
+      if (torrent) torrent.diskId = target.id;
+      onArrival(f);
+      break;
+    }
+    case "compress":
+      f.allocatedBytes = Math.round(f.sizeBytes * (1 - f.expectedSaving));
+      diskOf(state, f).freeBytes += f.sizeBytes - f.allocatedBytes;
+      break;
+    case "encode":
+      writeCopy(f, target, op.dir, {
+        contentId: op.content,
+        optimized: true,
+        name: f.name.replace(/\.[^.]+$/, "") + ".sklad-av1.mkv",
+        sizeBytes: op.size,
+        allocatedBytes: op.size,
+      });
+      break;
+    case "burn": {
+      const d = {
+        id: crypto.randomUUID(),
+        label: "Запись " + op.medium + " · " + f.name,
+        kind: "optical",
+        host: task.host,
+        sizeBytes: mediaCapacity[op.medium],
+        freeBytes: mediaCapacity[op.medium],
+        online: false,
+        lastSeen: new Date().toISOString(),
+        mount: null,
+        fs: "UDF",
+        location: "Полка · новая запись",
+      };
+      writeCopy(f, d, f.dir);
+      state.disks.push(d);
+      break;
+    }
+    case "image":
+      writeCopy(f, target, "Images/", { contentId: task.id, name: op.name, type: "Образ", platform: null });
+      break;
+    case "send":
+      break;
+  }
+}
+function advanceTasks(seconds) {
+  let changed = false;
+  // Snapshot the list: completing a copy can enqueue another job.
+  for (const j of [...state.tasks]) {
+    if (j.state !== "running") continue;
+    changed = true;
+    j.progress = Math.min(100, j.progress + ((seconds * j.bytesPerSec) / Math.max(j.totalBytes, 1)) * 100);
+    j.etaSec = Math.max(0, Math.ceil((((100 - j.progress) / 100) * j.totalBytes) / j.bytesPerSec));
+    if (j.progress < 100) continue;
+    j.state = "done";
+    j.bytesPerSec = 0;
+    j.etaSec = 0;
+    try {
+      completeTask(j);
+    } catch (e) {
+      j.state = "error";
+      j.error = e.message;
+      j.etaSec = null;
+    }
+  }
+  if (changed) render(state);
+}
+function taskAction(name, id) {
+  const j = byId(state.tasks, id);
+  if (!j) return;
+  if (name === "cancel") {
+    state.tasks = state.tasks.filter((t) => t !== j);
+    message("Задание отменено.");
+    return;
+  }
+  if (name === "pause" && j.state === "running") {
+    j.state = "paused";
+    j.resumeRate = j.bytesPerSec;
+    j.bytesPerSec = 0;
+    j.etaSec = null;
+    return;
+  }
+  if ((name === "pause" && j.state === "paused") || (name === "retry" && j.state === "error")) {
+    if (name === "retry") j.progress = 0;
+    j.state = "running";
+    j.error = null;
+    j.bytesPerSec = j.resumeRate || Math.max(1, Math.ceil(j.totalBytes / 30));
+    j.etaSec = Math.ceil(((1 - j.progress / 100) * j.totalBytes) / j.bytesPerSec);
+  }
+}
+async function runOperation() {
+  const s = state,
+    u = s.ui,
+    page = u.page,
+    m = operationModel(s);
+  if (m.reason || !m.file) return;
+  const f = m.file;
+  let kind = "copy",
+    host = m.src.host,
+    title,
+    op;
+  if (page === "move") {
+    title = m.mode + " · " + f.name;
+    op = { type: m.mode === "Копирование" ? "copy" : "move", fileId: f.id, target: m.target.id };
+  } else if (page === "integrity") {
+    kind = "sha256";
+    title = "SHA-256 · " + f.name;
+    const entries = await Promise.all(
+      [f, m.other].filter(Boolean).map(async (c) => {
+        const hash = await crypto.subtle.digest("SHA-256", new TextEncoder().encode("sklad-demo/" + c.contentId));
+        return [c.id, [...new Uint8Array(hash)].map((b) => b.toString(16).padStart(2, "0")).join("")];
+      }),
+    );
+    if (state !== s || u.page !== page) return;
+    op = { type: "sha256", fileId: f.id, other: m.other?.id, hashes: Object.fromEntries(entries) };
+  } else if (page === "localsend") {
+    title = "LocalSend · " + (m.receive ? "Приём" : "Отправка") + " · " + f.name;
+    op = { type: m.receive ? "receive" : "send", fileId: f.id, peer: m.peer.id };
+    if (m.receive) {
+      op.target = m.inbox.id;
+      op.dir = "Inbox/";
+      host = m.inbox.host;
+    }
+  } else {
+    title = m.opt + " · " + m.medium;
+    host = byId(s.disks, s.imageDisk).host;
+    op = { type: m.opt === "Записать и проверить" ? "burn" : "image", medium: m.medium, fileId: f.id };
+    if (op.type === "image") {
+      op.target = s.imageDisk;
+      op.name = (m.art ? u.form.artName || "Склад" : f.name) + "." + (m.art && m.medium === "CD-R" ? "wav" : "iso");
+    }
+  }
+  if (enqueue(kind, title, host, f.sizeBytes, op)) navigate("jobs");
+}
+function rebalance() {
+  for (const d of state.disks) {
+    const ts = state.torrents.filter((t) => t.diskId === d.id),
+      running = ts.filter((t) => t.state === "down");
+    running.slice(available(state, d) ? 1 : 0).forEach((t) => {
+      t.state = "wait";
+    });
+    if (!running.length && available(state, d)) {
+      const t = ts.filter((t) => t.state === "wait").sort((a, b) => a.rank - b.rank)[0];
+      if (t) {
+        t.state = "down";
+        t.down ||= state.demoTransferRate;
+      }
+    }
+  }
+}
+function finishTorrent(id) {
+  const t = byId(state.torrents, id),
+    d = diskOf(state, t);
+  if (!available(state, d) || t.state !== "down") return;
+  t.progress = 100;
+  t.state = "seed";
+  t.down = 0;
+  if (!state.files.some((f) => f.torrentId === id)) {
+    const f = {
+      id: crypto.randomUUID(),
+      name: t.name,
+      type: fileTypes[t.kind][0],
+      sizeBytes: t.sizeBytes ?? 0,
+      diskId: d.id,
+      dir: "Downloads/",
+      torrentId: id,
+      contentId: "torrent:" + id,
+    };
+    state.files.push(f);
+    d.freeBytes = Math.max(0, d.freeBytes - f.sizeBytes);
+    const rule = state.rules[{ image: "Софт", video: "Фильмы", audio: "Музыка" }[t.kind] || "Прочее"];
+    const target = state.automation ? placement(rule, f.sizeBytes, d.host) : null;
+    if (target)
+      enqueue("copy", "Раскладка · " + f.name, d.host, f.sizeBytes, {
+        type: "move",
+        fileId: f.id,
+        target: target.id,
+        dir: rule.folder + "/",
+      });
+    else onArrival(f);
+  }
+  rebalance();
+}
+function gameAction(id) {
+  const f = byId(state.files, id),
+    copy = state.files.find((c) => c.original === id),
+    pool = byId(state.disks, state.gamePool);
+  if (copy || f.platform === "macOS") {
+    state.ui.modal = { kind: copy ? "launch" : "file", id: copy?.id || id };
+    return;
+  }
+  if (!available(state, pool) || pool.freeBytes < f.sizeBytes) {
+    message("Игровой SSD недоступен или заполнен.");
+    return;
+  }
+  if (
+    enqueue("copy", "Подготовить игру · " + f.name, pool.host, f.sizeBytes, {
+      type: "game",
+      fileId: id,
+      target: pool.id,
+      dir: "Games/",
+    })
+  )
+    navigate("jobs");
+}
+
+async function act(name, value) {
+  const u = state.ui;
+  switch (name) {
+    case "page":
+      navigate(value);
+      break;
+    case "menu":
+      u.menu = true;
+      break;
+    case "closeMenu":
+      u.menu = false;
+      break;
+    case "host":
+      navigate("torrents");
+      u.host = value;
+      u.status = "";
+      u.torrentQuery = "";
+      break;
+    case "find":
+      openSearch();
+      break;
+    case "quickCopy":
+      navigate("move");
+      u.form.mode = "Копирование";
+      break;
+    case "family":
+      u.family = u.family === value ? "" : value;
+      u.limit = 6;
+      break;
+    case "clearShelf":
+      Object.assign(u, { family: "", query: "", connection: "all", limit: 6 });
+      break;
+    case "more":
+      u.limit += 12;
+      break;
+    case "disk":
+      navigate("drives");
+      u.disk = value;
+      u.fileQuery = "";
+      break;
+    case "file":
+    case "torrent":
+      u.modal = { kind: name, id: value };
+      break;
+    case "close":
+      u.modal = null;
+      break;
+    case "fileOp": {
+      const id = u.modal.id;
+      navigate(value);
+      u.form.source = id;
+      break;
+    }
+    case "add":
+      resetForm();
+      u.form.addHost = u.host;
+      u.modal = { kind: "add" };
+      break;
+    case "status":
+      u.status = value;
+      break;
+    case "resetTorrents":
+      u.status = "";
+      u.host = "";
+      u.torrentQuery = "";
+      break;
+    case "toggleTorrent": {
+      const t = byId(state.torrents, value);
+      t.state = t.state === "pause" ? (t.progress === 100 ? "seed" : "wait") : "pause";
+      rebalance();
+      break;
+    }
+    case "moveTorrent":
+      navigate("move");
+      u.form.source = state.files.find((f) => f.torrentId === value).id;
+      break;
+    case "platform":
+      u.platform = value;
+      break;
+    case "game":
+      gameAction(value);
+      break;
+    case "reindex": {
+      const d = byId(state.disks, value);
+      if (enqueue("index", "Обновить индекс · " + d.label, d.host, d.sizeBytes, { type: "index", target: d.id }))
+        navigate("jobs");
+      break;
+    }
+    case "run":
+      await runOperation();
+      break;
+    case "dest":
+      u.form.dest = value;
+      break;
+    case "pause":
+    case "cancel":
+    case "retry":
+      taskAction(name, value);
+      break;
+    case "next":
+      byId(state.torrents, value).rank = Math.min(...state.torrents.map((t) => t.rank)) - 1;
+      break;
+    case "finish":
+      finishTorrent(value);
+      break;
+    case "dry":
+      state.previewFresh = true;
+      break;
+    case "auto":
+      if (state.previewFresh) state.automation = !state.automation;
+      break;
+  }
+}
+async function dispatch(name, value) {
+  const wasPage = state.ui.page;
+  try {
+    await act(name, value);
+  } catch (e) {
+    message(e.message);
+  }
+  render(state);
+  if (name === "find") $("catalog-q")?.focus();
+  else if (name === "menu") $("sidebar").querySelector("button")?.focus();
+  else if (name === "closeMenu") $("menu").focus();
+  else if (wasPage !== state.ui.page) $("title").focus();
+}
+
 document.addEventListener("click", (e) => {
-  const b = e.target.closest("button");
-  if (!b) return;
-  if (b.dataset.page) navigate(b.dataset.page);
-  if (b.dataset.host) navigate("torrents", b.dataset.host);
-  if (b.hasAttribute("data-filter")) {
-    filter = b.dataset.filter;
-    renderRows();
-    document.querySelector(".tabs [aria-pressed=true]").focus();
-  }
-  if (b.hasAttribute("data-detail")) detail(Number(b.dataset.detail));
+  const b = e.target.closest("button[data-action]");
+  if (b) void dispatch(b.dataset.action, b.dataset.value);
+  else if (e.target === $("backdrop")) void dispatch("closeMenu");
+  else if (e.target === $("dialog")) void dispatch("close");
 });
-$("query").oninput = renderRows;
-$("host").onchange = () => { renderRows(); renderNavigation(); };
-$("reset").onclick = () => { navigate(page); $("query").focus(); };
-$("period").onchange = renderChart;
-$("add").onclick = addTorrent;
-$("close").onclick = () => $("dialog").close();
-$("dialog").onclick = (e) => { if (e.target === $("dialog")) $("dialog").close(); };
-$("dialog").onclose = () => {
-  if (returnFocus?.isConnected) returnFocus.focus();
-  else if (returnFocus?.dataset.detail) (document.querySelector(`[data-detail="${returnFocus.dataset.detail}"]`) || $("query")).focus();
-};
-$("menu").onclick = () => { setMenu(true); document.querySelector("nav button").focus(); };
-$("backdrop").onclick = () => { setMenu(false); $("menu").focus(); };
+$("dialog").addEventListener("cancel", (e) => {
+  e.preventDefault();
+  void dispatch("close");
+});
 document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape" && document.body.classList.contains("menu-open")) { setMenu(false); $("menu").focus(); }
+  if (e.key === "Escape" && state.ui.menu) void dispatch("closeMenu");
 });
-matchMedia("(max-width:940px)").addEventListener("change", () => setMenu(false));
+matchMedia("(max-width:940px)").addEventListener("change", () => {
+  state.ui.menu = false;
+  render(state);
+});
+
+const textFields = { "shelf-query": "query", "catalog-q": "fileQuery", query: "torrentQuery" };
+function updateControl(el) {
+  const u = state.ui,
+    id = el.id,
+    v = el.value;
+  if (id === "scenario") {
+    resetForm();
+    clearTimeout(toastTimer);
+    state = createState(v, u.page);
+  } else if (id in textFields) {
+    u[textFields[id]] = v;
+    if (id === "shelf-query") u.limit = 6;
+  } else if (id === "shelf-filter") {
+    u.connection = v;
+    u.limit = 6;
+  } else if (id === "disk-filter") u.disk = v;
+  else if (id === "host") u.host = v;
+  else if (id === "scrub") u.sample = Number(v);
+  else if (id === "period") {
+    u.period = v;
+    u.sample = null;
+  } else if (id === "category") u.category = v;
+  else if (["folder", "rule-target", "rule-index", "after"].includes(id)) {
+    const rule = state.rules[u.category];
+    rule[{ "rule-target": "target", "rule-index": "index" }[id] || id] = v;
+    if (id === "rule-target" && v !== "group" && byId(state.disks, v).fs !== "NTFS") {
+      if (rule.index === "NTFS MFT") rule.index = "Обход папок";
+      if (rule.after === "Сжатие NTFS") rule.after = "Без обработки";
+    }
+    state.previewFresh = false;
+    state.automation = false;
+  } else if (id === "art-file") {
+    if (u.form.artURL) URL.revokeObjectURL(u.form.artURL);
+    const image = el.files[0];
+    u.form.artURL = image ? URL.createObjectURL(image) : "";
+    u.form.artName = image?.name;
+  } else if (id) {
+    if (id === "source") {
+      delete u.form.mode;
+      delete u.form.dest;
+      delete u.form.compare;
+    }
+    if (id === "addHost") delete u.form.addDisk;
+    if (id === "magnet") el.setCustomValidity("");
+    u.form[id] = v;
+  }
+  render(state);
+}
+document.addEventListener("input", (e) => {
+  if (e.target instanceof HTMLInputElement && e.target.type !== "file") updateControl(e.target);
+});
+document.addEventListener("change", (e) => {
+  if (e.target instanceof HTMLSelectElement || e.target.type === "file") updateControl(e.target);
+});
+document.addEventListener("submit", (e) => {
+  if (e.target.id !== "add-form") return;
+  e.preventDefault();
+  const magnet = $("magnet"),
+    link = magnet.value.trim(),
+    params = new URLSearchParams(link.slice(link.indexOf("?") + 1));
+  const hash = params.getAll("xt").find((x) => /^urn:btih:([0-9a-f]{40}|[a-z2-7]{32})$/i.test(x));
+  if (!/^magnet:\?/i.test(link) || !hash) {
+    magnet.setCustomValidity("Укажите magnet-ссылку с хешем BitTorrent (btih).");
+    magnet.reportValidity();
+    return;
+  }
+  const d = byId(state.disks, $("addDisk").value);
+  if (!available(state, d)) return;
+  state.torrents.unshift({
+    id: crypto.randomUUID(),
+    name: params.get("dn") || hash.slice(9, 21) + "…",
+    kind: "archive",
+    diskId: d.id,
+    sizeBytes: null,
+    progress: 0,
+    state: "wait",
+    down: 0,
+    up: 0,
+    rank: state.torrents.length,
+  });
+  Object.assign(state.ui, { modal: null, host: d.host, torrentQuery: "", status: "" });
+  rebalance();
+  message("Раздача добавлена.");
+  render(state);
+});
+document.addEventListener("dragstart", (e) => {
+  if (e.target.id === "grab-file") e.dataTransfer.setData("text/plain", operationModel(state).file.id);
+});
+document.addEventListener("dragover", (e) => {
+  if (e.target.closest('[data-action="dest"]')) e.preventDefault();
+});
+document.addEventListener("drop", (e) => {
+  const dest = e.target.closest('[data-action="dest"]');
+  if (dest) {
+    e.preventDefault();
+    if (e.dataTransfer.getData("text/plain") === operationModel(state).file.id) void dispatch("dest", dest.dataset.value);
+  }
+});
+function inspectGraph(e) {
+  const graph = e.target.closest("#graph");
+  if (!graph) return;
+  const { left, width } = graph.getBoundingClientRect();
+  const sample = Math.round(Math.min(1, Math.max(0, (e.clientX - left) / width)) * Number($("scrub").max));
+  if (sample !== state.ui.sample) {
+    state.ui.sample = sample;
+    render(state);
+  }
+}
+document.addEventListener("pointermove", inspectGraph);
+document.addEventListener("pointerdown", inspectGraph);
+render(state);
+setInterval(() => advanceTasks(1), 1000);

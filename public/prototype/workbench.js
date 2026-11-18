@@ -1,542 +1,601 @@
 "use strict";
 
-const modules = [
-  ["overview","Диспетчер","LayoutDashboard","Диски, файлы и обработка в локальной сети."],
-  ["drives","Все файлы","HardDrive","Поиск по снимкам подключённых дисков и носителей на полке."],
-  ["torrents","Торренты","ArrowDownUp",pages.torrents[2]],
-  ["scheduler","Планировщик","Clock3","Одна активная загрузка на физический диск. Остальные ждут своего слота."],
-  ["jobs","Задания","ListChecks","Ход операций на Mac mini и Windows PC."],
-  ["games","Игровая полка","Gamepad2","Библиотека по платформам и подготовка игр с HDD на игровой SSD."],
-  ["move","Перенос и копирование","ArrowDownUp","Выберите источник и назначение в каталоге."],
-  ["integrity","Проверка SHA-256","Check","Манифесты файлов и сверка двух копий."],
-  ["index","Индекс файлов","Database","Снимки NTFS и обход папок на Mac. Поиск доступен и без подключения носителя."],
-  ["localsend","LocalSend","Network","Передача файлов между устройствами домашней сети."],
-  ["optical","Оптические диски","Disc3","Сборка ISO, запись и проверка дисков, рисунок на поверхности."],
-  ["policies","Правила раскладки","Layers3","Назначение диска, папки и обработки по типу контента."]
-];
-const navGroups = [[0,"Рабочее пространство"],[5,"Библиотека и инструменты"],[9,"Сеть и автоматика"]];
-$("module-nav").innerHTML = modules.map(([id,label,symbol,desc],i) => {
-  pages[id] = [label,id === "overview" ? "Диспетчер склада" : label,desc];
-  const group = navGroups.find(g => g[0] === i);
-  return (group ? '<p class="caption">' + group[1] + '</p>' : "") +
-    `<button data-page="${id}">${icon(symbol)}${label}${id === "torrents" ? '<span id="nav-count" class="count"></span>' : ""}</button>`;
-}).join("");
-
-const disks = [
-  {id:"archive",kind:"HDD",name:"Archive HDD",host:"Windows PC",fs:"NTFS",mount:"D:/",role:"Холодный архив",used:4380,total:8000,tint:"moss"},
-  {id:"pool",kind:"SSD",name:"Game SSD",host:"Windows PC",fs:"NTFS",mount:"C:/",role:"Игровой пул",used:708,total:1000,tint:"amber"},
-  {id:"vault",kind:"SSD",name:"Vault SSD",host:"Mac mini",fs:"APFS",mount:"/Volumes/vault/",role:"Временная обработка",used:1222,total:2000,tint:"aqua"},
-  {id:"media",kind:"HDD",name:"Media HDD",host:"Windows PC",fs:"NTFS",mount:"S:/",role:"Медиатека",used:2410,total:4000,tint:"slate"},
-  {id:"data",kind:"SSD",name:"Data SSD",host:"Mac mini",fs:"APFS",mount:"/System/Volumes/Data/",role:"Временная обработка",used:707,total:1000,tint:"aqua"},
-  {id:"dvd",kind:"Оптика",name:"Архив № 07",host:"Windows PC",fs:"UDF",mount:"",role:"Полка · коробка 2",used:4.1,total:4.7,tint:"violet",offline:true}
-];
-// Each fixture is a physical carrier with a stable identity independent of its mount.
-const collections = [
-  ["HDD", "Архив", 12, 4000, "NTFS", "moss"],
-  ["USB", "Флешка", 5, 64, "exFAT", "amber"],
-  ["SD", "Камера SD", 4, 128, "exFAT", "aqua"],
-  ["Оптика", "Диск", 5, 4.7, "UDF", "violet"]
-];
-for (const [kind, label, count, capacity, fs, tint] of collections) {
-  for (let n=1; n<=count; n++) {
-    const online = kind !== "Оптика" && n === 1;
-    const host = kind === "HDD" ? "Windows PC" : "Mac mini";
-    const optical = ["DVD-R","CD-R","BD-R","DVD-R","CD-R"];
-    const name = (kind==="Оптика"?optical[n-1]:label) + " " + String(n).padStart(2,"0");
-    const total = kind==="Оптика"?({"CD-R":.734,"DVD-R":4.7,"BD-R":25}[optical[n-1]]):capacity;
-    disks.push({id:kind+"-"+n,kind,name,fs,tint,host,offline:!online,
-      role:online ? "Подключён" : (kind==="HDD"?"Стеллаж A · ячейка ":kind==="Оптика"?"Альбом · карман ":"Органайзер · слот ")+n,
-      mount:online ? (host==="Mac mini"?"/Volumes/"+name+"/":"T:/") : "",
-      total,used:Math.round(total*(.28+(n%5)*.1)*100)/100});
-  }
-}
-const disk = id => disks.find(d => d.id === id);
-const catalog = [
-  {id:"hades",name:"Hades",dir:"Games/",disk:"archive",type:"Игра",size:11.1,platform:"Windows",expectedSaving:.24},
-  {id:"gothic",name:"Gothic II",dir:"Games/",disk:"archive",type:"Игра",size:3.6,platform:"Windows"},
-  {id:"zelda",name:"Breath of the Wild",dir:"Switch/",disk:"archive",type:"Игра",size:14.4,platform:"Switch"},
-  {id:"gow",name:"Chains of Olympus",dir:"PSP/",disk:"archive",type:"Игра",size:1.5,platform:"PSP"},
-  {id:"hollow",name:"Hollow Knight.app",dir:"Games/",disk:"data",type:"Игра",size:7.8,platform:"macOS"},
-  {id:"film",name:"Sintel.mkv",dir:"Movies/",disk:"media",type:"Видео",size:3.5},
-  {id:"trailer",name:"Spring.mkv",dir:"Movies/",disk:"vault",type:"Видео",size:1.1},
-  {id:"osm",name:"OpenStreetMap · Europe",dir:"Maps/",disk:"archive",type:"Данные",size:31.6,torrent:2},
-  {id:"blend",name:"Blender Demo Files",dir:"Downloads/",disk:"vault",type:"Архив",size:8.4,torrent:3},
-  {id:"debian",name:"Debian 13 · netinst",dir:"ISO/",disk:"media",type:"Образ",size:.784,torrent:5},
-  {id:"offline",name:"Концерт.flac",dir:"Audio/",disk:"dvd",type:"Музыка",size:.48},
-  {id:"book",name:"Каталог.pdf",dir:"Documents/",disk:"dvd",type:"Документ",size:.024}
-];
-for (const [source, targets] of [
-  ["film", ["HDD-2","USB-1","Оптика-1"]], ["hades", ["HDD-5","HDD-11"]],
-  ["trailer", ["SD-2","USB-3"]], ["book", ["SD-1","USB-4","Оптика-4"]]
-]) {
-  const f=catalog.find(item=>item.id===source);
-  for (const target of targets) catalog.push({...f,id:source+"-"+target,content:source,disk:target});
-}
-for (const d of disks.filter(d=>!catalog.some(f=>f.disk===d.id) && d.id!=="pool")) {
-  const photo=d.kind==="SD";
-  catalog.push({id:"sample-"+d.id,disk:d.id,dir:photo?"DCIM/":"Documents/",
-    name:photo?"Съёмка "+d.name.slice(-2)+".jpg":"Опись — "+d.name+".pdf",
-    type:photo?"Фото":"Документ",size:photo?.012:.003});
-}
-for (const d of disks) {
-  const indexed=catalog.filter(f=>f.disk===d.id).reduce((sum,f)=>sum+f.size,0);
-  d.used=Math.max(d.used,indexed);
-}
-const contentKey = f => f.content || f.id;
-const fileById = id => catalog.find(f => f.id === id);
-const sizeText = gb => gb >= 1000 ? num(gb/1000) + " ТБ" : gb >= 1 ? num(gb) + " ГБ" : num(gb*1000) + " МБ";
-const filePath = f => disk(f.disk).mount + f.dir + f.name;
-const jobs = [];
-let serial = 0;
-let shelfFilter = "all";
-let shelfKind = "";
-let shelfQuery = "";
-let shelfLimit = 6;
-let catalogDisk = "";
-let catalogQuery = "";
-let platform = "Все";
-const platforms = ["Все","Windows","macOS","Switch","PSP","PS2","PS4"];
-const manifests = new Map();
-const pending = j => ["running","waiting","paused"].includes(j.state);
-const phaseLabel = j => j.state === "done" ? "Готово" : j.state === "cancelled" ? "Отменено" :
-  j.state === "paused" ? "На паузе" : j.state === "waiting" ? "В очереди" :
-  j.phases[Math.min(j.phases.length-1,Math.floor(j.percent*j.phases.length/100))];
-function startJob(name, host, phases, done, key = name, resources = []) {
-  if (jobs.some(j=>pending(j) && (j.key === key || resources.some(r=>j.resources.includes(r))))) {
-    notify("Для этого источника уже есть задание"); return false;
-  }
-  jobs.unshift({id:++serial,name,host,phases,done,key,resources,state:"waiting",percent:0});
-  if(!key.startsWith("auto-")) notify("В очереди · " + name);
-  refreshJobs();
-  return true;
-}
-function jobList(compact = false) {
-  const list = compact ? jobs.slice(0,2) : jobs;
-  return list.map(j => `<article class="job-row" data-job-row="${j.id}">
-    <span class="job-icon">${icon(j.state === "done" ? "Check" : "Activity")}</span>
-    <div class="job-body"><b>${escapeHtml(j.name)}</b><small>${j.host} · <span data-phase>${phaseLabel(j)}</span></small>
-    ${track(j.percent)}</div><output>${j.percent}%</output>
-    ${compact ? "" : pending(j) ? `<button class="icon-button" data-job-toggle="${j.id}" aria-label="${j.state==="paused"?"Продолжить":"Приостановить"}">${icon(j.state==="paused"?"Play":"Pause")}</button><button class="icon-button" data-job-cancel="${j.id}" aria-label="Отменить задание">${icon("X")}</button>` : ""}
-    </article>`).join("") || '<p class="empty-hint">Заданий пока нет.</p>';
-}
-function refreshJobs() {
-  $("queue-preview").innerHTML = `<div class="card-heading"><h2>${icon("ListChecks")}Очередь задач</h2><button class="secondary-action" data-page="jobs">Все задания</button></div>${jobList(true)}`;
-  if (page === "jobs") $("secondary").innerHTML = `<div class="card job-list">${jobList()}</div>`;
-}
-function tickJobs() {
-  let changed = false;
-  for (const host of ["Mac mini","Windows PC"]) {
-    let j = jobs.find(j=>j.host === host && j.state === "running");
-    if (!j) {
-      j = jobs.findLast(j=>j.host === host && j.state === "waiting");
-      if (!j) continue;
-      j.state = "running";
-    }
-    j.percent = Math.min(100,j.percent+8);
-    if (j.percent === 100) {
-      j.state = "done"; j.done?.(); changed = true;
-      if(!j.key.startsWith("auto-")) notify("Готово · " + j.name);
-    }
-    document.querySelectorAll(`[data-job-row="${j.id}"]`).forEach(el=>{
-      el.querySelector("[data-phase]").textContent = phaseLabel(j);
-      el.querySelector(".track span").style.width = j.percent+"%";
-      el.querySelector("output").textContent = j.percent+"%";
-    });
-  }
-  if (changed) {
-    refreshJobs();
-    if (page === "games") renderGames();
-    if (page === "drives" || page === "index") renderFiles();
-    if (page === "overview" && Number($("carrier-count")?.textContent)!==disks.length) renderShelf();
-    if (page === "integrity") renderManifests();
-  }
-}
-function openJobs() { navigate("jobs"); }
-function launch(name,host,phases,done,key,resources) {
-  if (startJob(name,host,phases,done,key,resources)) openJobs();
-}
-const moduleButtons = ["games","move","integrity","localsend","optical","policies","index","scheduler"];
-const accents = ["#ddae80","#88ccaf","#a5c4ec","#82cdd0","#e5b2d2","#c3bd97","#aebcd1","#edd194"];
-const actions = ["Библиотека игр","Файлы и раздачи","Сверка копий","Отправка и приём","Образы и запись","Назначения по типу","Поиск по снимкам","Слоты носителей"];
-const families = [
-  ["HDD","Жёсткие диски","moss"],["SSD","SSD","slate"],["USB","USB-флешки","amber"],
-  ["SD","Карты памяти","aqua"],["Оптика","CD / DVD / BD","violet"]
-];
-function landing() {
-  $("desk").innerHTML = `<section class="shelf-block"><div class="block-title"><h2>Коллекция носителей <span class="count" id="carrier-count"></span></h2><button class="secondary-action" data-every-file>Поиск файлов ${icon("Search")}</button></div>
-    <div class="families" id="families"></div>
-    <div class="inventory-controls"><label class="search">${icon("Search")}<input type="search" id="shelf-query" placeholder="Носитель, хост или место хранения" aria-label="Найти носитель"></label>
-    <select id="shelf-filter" aria-label="Подключение"><option value="all">Любое подключение</option><option value="on">Подключены</option><option value="off">На полке</option></select></div>
-    <div class="inventory" id="rack"></div><div class="inventory-foot"><span id="shelf-result"></span><button class="secondary-action" id="more-disks">Показать ещё</button></div></section>
-    <section class="action-section"><div class="block-title"><h2>Библиотека и операции</h2></div><div class="action-grid">${moduleButtons.map((id,i)=>{
-      const [,label,symbol] = modules.find(m=>m[0]===id);
-      return `<button class="tool-tile" data-page="${id}" style="--tool:${accents[i]}"><i>${icon(symbol)}</i><span><b>${label}</b><small>${actions[i]}</small></span></button>`;
-    }).join("")}</div></section>`;
-  $("shelf-filter").value=shelfFilter;
-  $("shelf-query").value=shelfQuery;
-  $("shelf-query").oninput=e=>{shelfQuery=e.target.value;shelfLimit=6;renderShelf();};
-  $("shelf-filter").onchange=e=>{shelfFilter=e.target.value;shelfLimit=6;renderShelf();};
-  $("more-disks").onclick=()=>{shelfLimit+=12;renderShelf();};
-  renderShelf();
-}
-function renderShelf() {
-  if (!$("families")) return;
-  $("carrier-count").textContent=disks.length;
-  $("families").innerHTML=families.map(([kind,label,tint])=>{
-    const group=disks.filter(d=>d.kind===kind);
-    return `<button class="family ${tint}" data-family="${kind}" aria-pressed="${kind===shelfKind}">
-      <span class="drive-art"><span class="hardware model-${kind} ${kind==="Оптика"?"opt-disc":""}"><span class="hw-label">${kind}</span><i></i></span></span>
-      <span class="family-title">${label}<b>${group.length}</b></span><small>Подключено · ${group.filter(d=>!d.offline).length}</small></button>`;
-  }).join("");
-  const q=shelfQuery.trim().toLocaleLowerCase("ru");
-  const matches=disks.filter(d=>(!shelfKind || d.kind===shelfKind) && (shelfFilter==="all" || Boolean(d.offline)===(shelfFilter==="off")) &&
-    [d.name,d.host,d.role,d.kind,d.fs].join(" ").toLocaleLowerCase("ru").includes(q));
-  if(!shelfKind && !q) {
-    const first=families.map(([kind])=>matches.find(d=>d.kind===kind)).filter(Boolean);
-    matches.splice(0,matches.length,...first,...matches.filter(d=>!first.includes(d)));
-  }
-  $("rack").innerHTML=matches.slice(0,shelfLimit).map(d=>`<button class="inventory-drive ${d.tint}" data-open-disk="${d.id}">
-    <span class="carrier-type">${d.kind==="Оптика"?"DISC":d.kind}</span><span class="carrier-label"><b>${escapeHtml(d.name)}</b><small>${escapeHtml(d.offline ? d.role : d.host)} · ${sizeText(d.total)}</small></span>
-    <span class="connect-state ${d.offline?"off":""}">${d.offline?"На полке":"В сети"}</span></button>`).join("") || '<p class="empty-hint">Носители не найдены.</p>';
-  $("more-disks").hidden=matches.length<=shelfLimit;
-  $("shelf-result").innerHTML=`Показано ${Math.min(matches.length,shelfLimit)} из ${matches.length}${shelfKind||shelfFilter!=="all"||q?' · <button class="clear-shelf" data-clear-shelf>Сбросить фильтры</button>':""}`;
-}
-function chooser(id, label, entries) {
-  return `<label class="field">${label}<select id="${id}">${entries.map(([v,s])=>`<option value="${escapeHtml(v)}">${escapeHtml(s)}</option>`).join("")}</select></label>`;
-}
-function block(title,inner) {
-  return `<section class="card work-card"><h2>${title}</h2>${inner}</section>`;
-}
-function renderCatalog() {
-  $("secondary").innerHTML = block(page==="index"?"Поиск по индексу":"Файлы на носителях",
-    `<div class="catalog-controls"><label class="search">${icon("Search")}<input type="search" id="catalog-q" placeholder="Имя файла или путь" aria-label="Имя файла или путь"></label>${chooser("disk-filter","Носитель",[["","Все носители"],...disks.map(d=>[d.id,d.name])])}</div><div id="index-info"></div><div id="file-list"></div>`);
-  $("catalog-q").value=catalogQuery; $("disk-filter").value=catalogDisk;
-  $("catalog-q").oninput=e=>{catalogQuery=e.target.value; renderFiles();};
-  $("disk-filter").onchange=e=>{catalogDisk=e.target.value; renderFiles();};
-  renderFiles();
-}
-function renderFiles() {
-  const list=$("file-list"); if (!list) return;
-  const d=disk(catalogDisk);
-  $("index-info").innerHTML = d ? `<div class="info-strip">${icon("HardDrive")}<span>${d.offline?"Отключён · "+d.role:d.host+" · "+d.fs+" · "+(d.fs==="NTFS"?"снимок MFT":"обход папок")+(d.lastScan?" · обновлён "+d.lastScan:"")}</span>${d.offline?"":`<button class="secondary-action" data-reindex="${d.id}">Обновить индекс</button>`}</div>` : "";
-  const q=catalogQuery.toLowerCase().trim();
-  const matches=catalog.filter(f=>(!catalogDisk||f.disk===catalogDisk) && (filePath(f)+" "+disk(f.disk).name+" "+disk(f.disk).role).toLowerCase().includes(q));
-  const grouped=new Map();
-  for (const f of matches) {
-    const key=contentKey(f);
-    if(!grouped.has(key) || disk(grouped.get(key).disk).offline) grouped.set(key,f);
-  }
-  const counts=new Map();
-  for(const f of catalog) counts.set(contentKey(f),(counts.get(contentKey(f))||0)+1);
-  list.innerHTML = Array.from(grouped.values(), f=>{
-    const count=counts.get(contentKey(f));
-    return `<button class="file-line" data-file="${f.id}"><i>${icon(f.platform?"Gamepad2":f.type==="Видео"?"Film":"File")}</i><span><b>${escapeHtml(f.name)}</b><small>${escapeHtml(filePath(f))}</small></span><em>${escapeHtml(disk(f.disk).name)}${count>1?" · копий: "+count:disk(f.disk).offline?" · на полке":""}</em><small>${sizeText(f.size)}</small>${icon("ChevronRight")}</button>`;
-  }).join("") || '<p class="empty-hint">Совпадений в снимках нет.</p>';
-}
-function openFile(f) {
-  const d=disk(f.disk);
-  const copies=catalog.filter(c=>contentKey(c)===contentKey(f));
-  showDialog(f.name,`<p class="capacity-label">${f.type} · ${sizeText(f.size)}${f.compressed?" · занято "+sizeText(f.allocated):""}</p>
-    <h3 class="copies-heading">Где хранится · ${copies.length}</h3>
-    <div class="copy-list">${copies.map(c=>{
-      const v=disk(c.disk);
-      return `<button class="copy-place" data-copy="${c.id}" aria-pressed="${c.id===f.id}"><b>${escapeHtml(v.name)}</b><span>${v.kind} · ${v.offline?"На полке · "+v.role:v.host}</span><small>${escapeHtml(filePath(c))}</small></button>`;
-    }).join("")}</div>
-    ${d.offline?`<p class="info-strip">Подключите «${escapeHtml(d.name)}» для работы с этой копией.</p>`:`<div class="file-actions">${[["move","Перенести или скопировать"],["localsend","Отправить через LocalSend"],["integrity","Рассчитать SHA-256"]].map(([m,label])=>`<button class="secondary-action" data-file-op="${m}" data-src="${f.id}">${label}</button>`).join("")}</div>`}`);
-}
-function selectSource(id) {
-  if (!$("source") || !Array.from($("source").options).some(o=>o.value===id)) return;
-  $("source").value=id; $("source").dispatchEvent(new Event("change"));
-}
-const opSpecs = {
-  move:["Файлы и раздачи","Поставить в очередь"],
-  integrity:["Контрольные суммы","Поставить проверку в очередь"],
-  localsend:["Передача LocalSend","Поставить передачу в очередь"],
-  optical:["Мастер оптического диска","Поставить задание в очередь"]
+// View helpers take a snapshot; they never query or mutate the document.
+const pages = {
+  overview: ["Диспетчер", "LayoutDashboard", "Диски, файлы и обработка в локальной сети."],
+  drives: ["Все файлы", "HardDrive", "Поиск по снимкам всех носителей, включая отключённые."],
+  torrents: ["Торренты", "ArrowDownUp", "Раздачи qBittorrent на ваших хостах."],
+  scheduler: ["Планировщик", "Clock3", "Одна активная загрузка на физический диск."],
+  jobs: ["Задания", "ListChecks", "Ход операций на ваших хостах."],
+  games: ["Игровая полка", "Gamepad2", "Библиотека игр и подготовка копий на SSD."],
+  move: ["Перенос и копирование", "ArrowDownUp", "Выберите файл и носитель назначения."],
+  integrity: ["Проверка SHA-256", "Check", "Манифесты файлов и сверка копий."],
+  index: ["Индекс файлов", "Database", "Поиск по снимкам и обновление индекса."],
+  localsend: ["LocalSend", "Network", "Отправка и приём файлов по локальной сети."],
+  optical: ["Оптические диски", "Disc3", "Образы, запись с проверкой и рисунок на поверхности."],
+  policies: ["Правила раскладки", "Layers3", "Размещение и фоновая обработка по типу контента."],
 };
-const onlineFiles = () => catalog.filter(f=>!disk(f.disk).offline);
-const fromOptions = files => files.map(f=>[f.id,f.name+" · "+disk(f.disk).name]);
-const pair = (...items) => items.map(x=>[x,x]);
-let copyId = 0;
-function publishCopy(f,target,dir=f.dir,changes={}) {
-  const copy={...f,id:"copy-"+(++copyId),disk:target,dir,content:f.content || f.id,...changes};
-  delete copy.torrent;
-  catalog.push(copy); disk(target).used += copy.allocated ?? copy.size;
-  return copy;
+const families = {
+  hdd: ["HDD", "Жёсткие диски", "moss"],
+  ssd: ["SSD", "SSD", "slate"],
+  usb: ["USB", "USB-флешки", "amber"],
+  sd: ["SD", "Карты памяти", "aqua"],
+  optical: ["DISC", "CD / DVD / BD", "violet"],
+};
+const torrentStates = { down: "Загрузка", seed: "Раздача", pause: "Пауза", wait: "В очереди" };
+const fileTypes = {
+  image: ["Образ диска", "Disc3"],
+  video: ["Видео", "Film"],
+  archive: ["Архив", "FileArchive"],
+  audio: ["Музыка", "Music2"],
+  data: ["Данные", "Database"],
+};
+const mediaCapacity = { "CD-R": 734003200, "DVD-5": 4700372992, "DVD-DL": 8543666176, "BD-R 25 ГБ": 25e9 };
+const esc = (value) =>
+  String(value ?? "").replace(
+    /[&<>"']/g,
+    (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c],
+  );
+const icon = (name) => `<svg class="ico" aria-hidden="true"><use href="#i-${esc(name)}"></use></svg>`;
+const num = (n) => n.toLocaleString("ru-RU", { maximumFractionDigits: 1 });
+const byId = (list, id) => list.find((row) => row.id === id);
+const diskOf = (s, f) => byId(s.disks, f.diskId);
+const hostOf = (s, d) => byId(s.hosts, d.host);
+const available = (s, d) => Boolean(d?.online && hostOf(s, d)?.online);
+const pathOf = (s, f) => (diskOf(s, f).mount || "") + f.dir + f.name;
+const action = (name, value = "") => `data-action="${name}" data-value="${esc(value)}"`;
+function button(name, label, value = "", classes = "secondary-action", extra = "") {
+  return `<button type="button" class="${classes}" ${action(name, value)} ${extra}>${label}</button>`;
 }
-function renderOperation() {
-  const [title,submit]=opSpecs[page];
-  const available=onlineFiles();
-  $("secondary").innerHTML=block(title,`<form id="operation"><div class="form-grid">
-    ${chooser("source","Источник из каталога",fromOptions(available))}
-    <div id="op-fields"></div></div><div id="placement"></div><div class="route-preview" id="route-preview"></div><button class="primary" id="run-op">${icon("Play")}${submit}</button></form>`) +
-    (page==="integrity"?block("Манифесты SHA-256",'<div id="manifests"></div>'):"");
-  const field=(id,label,values)=>chooser(id,label,pair(...values));
-  function fields() {
-    const f=fileById($("source").value); if (!f) return;
-    const d=disk(f.disk);
-    const mode=(page==="move" && f.torrent!=null)?["Перенос раздачи","Копирование"]:["Копирование","Перенос файла"];
-    const devices=disks.filter(x=>!x.offline && x.id!==d.id && x.fs!=="UDF");
-    const options={
-      move:()=>field("mode","Операция",mode)+chooser("dest","Диск назначения",devices.map(x=>[x.id,x.name+" · "+x.host])),
-      integrity:()=>chooser("compare","Сверить с копией",[["","Только записать манифест"],...fromOptions(onlineFiles().filter(x=>x.id!==f.id))]),
-      localsend:()=>field("direction","Направление",["Отправить","Принять"])+field("peer","Устройство",d.host==="Mac mini"?["Windows PC","Планшет"]:["Mac mini","Планшет"]),
-      optical:()=>field("disc-action","Операция",["Собрать ISO","Записать и проверить","Рисунок на поверхности"])+field("medium","Носитель",["DVD-5","DVD-DL","CD-R","BD-R 25 ГБ"])
-    };
-    const previous = Array.from($("op-fields").querySelectorAll("select"), el => [el.id, el.value]);
-    $("op-fields").innerHTML=options[page]();
-    if (page==="move") {
-      const dest=devices.find(x=>x.host===d.host && x.id!=="pool") || devices.find(x=>x.host===d.host);
-      if(dest) $("dest").value=dest.id;
-    }
-    for(const [id,value] of previous){
-      const el=$(id);
-      if(id!=="mode" && id!=="dest" && el && Array.from(el.options).some(o=>o.value===value)) el.value=value;
-    }
-    if(page==="move"){
-      $("placement").innerHTML=`<div class="drop-source" draggable="true" id="grab-file">${icon("FileArchive")}<span>${escapeHtml(f.name)}</span><small>Перетащите на диск или выберите его нажатием</small></div><div class="drop-grid">${devices.map(x=>`<button type="button" class="drop-target" data-place="${x.id}">${icon("HardDrive")}<b>${x.name}</b><small>${sizeText(x.total-x.used)} свободно</small></button>`).join("")}</div>`;
-      $("grab-file").ondragstart=e=>{e.dataTransfer.setData("text/plain",f.id);e.dataTransfer.effectAllowed="move";};
-      document.querySelectorAll("[data-place]").forEach(btn=>{
-        const choose=()=>{$("dest").value=btn.dataset.place;update();};
-        btn.onclick=choose;
-        btn.ondragover=e=>{e.preventDefault();btn.classList.add("drag-over");};
-        btn.ondragleave=()=>btn.classList.remove("drag-over");
-        btn.ondrop=e=>{e.preventDefault();btn.classList.remove("drag-over");if(e.dataTransfer.getData("text/plain")===f.id)choose();};
-      });
-    }
-    if(page==="localsend") $("op-fields").insertAdjacentHTML("beforeend",'<div id="receive-target"></div>');
-    if(page==="optical") $("op-fields").insertAdjacentHTML("beforeend",'<div id="art-controls"></div>');
-    update();
+function bytes(n) {
+  if (n == null) return "—";
+  for (const [unit, scale] of [
+    ["ТБ", 1e12],
+    ["ГБ", 1e9],
+    ["МБ", 1e6],
+    ["КБ", 1e3],
+  ])
+    if (n >= scale) return num(n / scale) + " " + unit;
+  return num(n) + " Б";
+}
+function dateText(value) {
+  const date = new Date(value);
+  return value && Number.isFinite(+date)
+    ? date.toLocaleDateString("ru-RU", { day: "2-digit", month: "2-digit", year: "numeric" })
+    : "нет данных";
+}
+function select(id, choices, current, label, extra = "") {
+  return `<select id="${id}" aria-label="${esc(label)}" ${extra}>${choices
+    .map((item) => {
+      const [value, text] = Array.isArray(item) ? item : [item, item];
+      return `<option value="${esc(value)}"${value === current ? " selected" : ""}>${esc(text)}</option>`;
+    })
+    .join("")}</select>`;
+}
+function field(id, label, choices, current) {
+  return `<label class="field">${label}${select(id, choices, current, label)}</label>`;
+}
+function search(id, label, value) {
+  return `<label class="search">${icon("Search")}<input id="${id}" type="search" value="${esc(value)}" placeholder="${esc(label)}" aria-label="${esc(label)}"></label>`;
+}
+function card(title, content) {
+  return `<section class="card work-card"><h2>${title}</h2>${content}</section>`;
+}
+function empty(text) {
+  return `<p class="empty-hint">${text}</p>`;
+}
+function skeleton(label, count) {
+  return `<div class="skeletons" aria-busy="true" aria-label="${label}"><span class="sr-only">${label}</span>${'<span aria-hidden="true"></span>'.repeat(count)}</div>`;
+}
+function meter(n, label) {
+  const pct = Math.min(100, Math.max(0, n));
+  return `<div class="track" role="progressbar" aria-label="${esc(label)}" aria-valuenow="${pct}" aria-valuemin="0" aria-valuemax="100"><span style="width:${pct}%"></span></div>`;
+}
+function sidebar(s) {
+  const groups = { overview: "Рабочее пространство", games: "Библиотека и инструменты", localsend: "Сеть и автоматика" };
+  const nav = Object.entries(pages)
+    .map(([key, [label, symbol]]) => {
+      const active = s.ui.page === key;
+      return (
+        (groups[key] ? `<p class="caption">${groups[key]}</p>` : "") +
+        button(
+          "page",
+          icon(symbol) + label + (key === "torrents" ? `<span class="count">${s.torrents.length}</span>` : ""),
+          key,
+          active ? "active" : "",
+          active ? 'aria-current="page"' : "",
+        )
+      );
+    })
+    .join("");
+  return `<div class="brand"><span class="brand-icon">${icon("Layers3")}</span>Склад<span class="brand-period">.</span></div><div class="side-inner"><nav id="module-nav" aria-label="Разделы">${nav}</nav>
+    <div class="host-head"><p class="caption">Хосты</p><span class="count">${s.hosts.length}</span></div><nav aria-label="Хосты">${s.hosts.map((h) => button("host", icon(h.id === "mac" ? "Laptop" : "Monitor") + esc(h.name) + `<small class="host-state">${h.online ? "В сети" : "Нет связи"}</small>`, h.id, "")).join("")}</nav></div>
+    <div class="side-foot">${icon("Network")}<div>Локальная сеть<small>Деморежим</small></div></div>`;
+}
+function topbar(s) {
+  return `${button("menu", icon("Menu"), "", "icon-button", `id="menu" aria-label="Открыть навигацию" aria-controls="sidebar" aria-expanded="${s.ui.menu}"`)}
+  <span class="breadcrumb">Рабочее пространство</span><i class="breadcrumb">${icon("ChevronRight")}</i><strong>${pages[s.ui.page][0]}</strong>
+  <span class="online">В сети · ${s.hosts.filter((h) => h.online).length} / ${s.hosts.length}</span>
+  <label class="scenario-label">Демо ${select("scenario", s.scenarioOptions, s.scenario, "Демосостояние")}</label>`;
+}
+function heading(s) {
+  const page = s.ui.page;
+  return (
+    `<div><h1 id="title" tabindex="-1">${page === "overview" ? "Диспетчер склада" : pages[page][0]}</h1><p>${pages[page][2]}</p></div>` +
+    (page === "overview"
+      ? button("find", icon("Search") + "Найти файл", "", "primary")
+      : page === "torrents"
+        ? button(
+            "add",
+            icon("Plus") + "Добавить торрент",
+            "",
+            "primary",
+            s.loading || !s.disks.some((d) => available(s, d)) ? "disabled" : "",
+          )
+        : "")
+  );
+}
+function shelf(s) {
+  const u = s.ui;
+  const q = u.query.trim().toLocaleLowerCase("ru");
+  const matches = s.disks.filter(
+    (d) =>
+      (!u.family || d.kind === u.family) &&
+      (u.connection === "all" || available(s, d) === (u.connection === "on")) &&
+      [d.label, d.kind, d.location, d.fs, hostOf(s, d).name].join(" ").toLocaleLowerCase("ru").includes(q),
+  );
+  const cards = Object.entries(families)
+    .map(([kind, [model, label, tint]]) => {
+      const list = s.disks.filter((d) => d.kind === kind);
+      return button(
+        "family",
+        `<span aria-hidden="true" class="drive-art"><span class="hardware model-${model} ${kind === "optical" ? "opt-disc" : ""}"><span class="hw-label">${model}</span><i></i></span></span>
+      <span class="family-title">${label}<b>${list.length}</b></span><small>Подключено · ${list.filter((d) => available(s, d)).length}</small>`,
+        kind,
+        "family " + tint,
+        `aria-pressed="${u.family === kind}"`,
+      );
+    })
+    .join("");
+  const rows = matches
+    .slice(0, u.limit)
+    .map((d) => {
+      const online = available(s, d);
+      const detail = online ? hostOf(s, d).name + " · " + bytes(d.sizeBytes) : "Был в сети " + dateText(d.lastSeen);
+      return button(
+        "disk",
+        `<span class="carrier-type">${families[d.kind][0]}</span><span class="carrier-label"><b>${esc(d.label)}</b><small>${esc(detail)}</small></span><span class="connect-state ${online ? "" : "off"}">${online ? "В сети" : "Не в сети"}</span>`,
+        d.id,
+        "inventory-drive" + (online ? "" : " unavailable"),
+      );
+    })
+    .join("");
+  const filters = q || u.family || u.connection !== "all";
+  return `<section class="shelf-block"><div class="block-title"><h2>Коллекция носителей ${s.loading ? "" : `<span class="count">${s.disks.length}</span>`}</h2>
+    ${button("find", "<span>Поиск файлов</span>" + icon("Search"), "", "secondary-action shelf-search", 'aria-label="Поиск файлов"')}</div>
+    <div class="families">${s.loading ? skeleton("Загрузка коллекции", 5) : cards}</div>
+    <div class="inventory-controls">${search("shelf-query", "Носитель, хост или место хранения", u.query)}${select(
+      "shelf-filter",
+      [
+        ["all", "Любое подключение"],
+        ["on", "В сети"],
+        ["off", "Не в сети"],
+      ],
+      u.connection,
+      "Подключение носителя",
+    )}</div>
+    <div class="inventory" id="rack">${s.loading ? skeleton("Загрузка списка дисков", 6) : rows || empty(s.disks.length ? "Ничего не найдено." : "Носителей пока нет.")}</div>
+    ${s.loading ? "" : `<div class="inventory-foot"><span>Показано ${Math.min(matches.length, u.limit)} из ${matches.length} ${filters ? button("clearShelf", "Сбросить фильтры", "", "clear-shelf") : ""}</span>${matches.length > u.limit ? button("more", "Показать ещё") : ""}</div>`}</section>`;
+}
+function queue(s, compact = false) {
+  const rows = (compact ? s.tasks.slice(0, 2) : s.tasks)
+    .map((j) => {
+      const label = { running: "Выполняется", paused: "На паузе", error: "Ошибка", done: "Готово" }[j.state];
+      const active = ["running", "paused"].includes(j.state);
+      const metrics =
+        j.state === "running"
+          ? `<span>${bytes(j.bytesPerSec)}/с · осталось ${j.etaSec == null ? "—" : Math.ceil(j.etaSec) + " с"}</span>`
+          : "";
+      return `<article class="job-row ${j.state}" data-job="${esc(j.id)}"><div class="job-body"><b>${esc(j.title)}</b><small>${esc(byId(s.hosts, j.host)?.name)} · <strong>${label}</strong></small>
+      ${active ? meter(j.progress, j.title) : ""}<div class="job-metrics">${active ? num(j.progress) + "%" : ""} ${metrics}</div>
+      ${j.error ? `<p class="error-message">${esc(j.error)}</p>` : ""}<div class="job-actions">${active ? button("pause", j.state === "paused" ? "Продолжить" : "Пауза", j.id) + button("cancel", "Отмена", j.id) : j.state === "error" ? button("retry", "Повторить", j.id) : ""}</div></div></article>`;
+    })
+    .join("");
+  return `<section class="card queue-card"><div class="card-heading"><h2>${icon("ListChecks")}Очередь задач</h2>${compact ? button("page", "Все задания", "jobs") : ""}</div>${s.loading ? skeleton("Загрузка очереди", 2) : rows || empty("В очереди нет задач.")}</section>`;
+}
+function network(s) {
+  const u = s.ui,
+    period = Number(u.period),
+    online = s.torrents.filter((t) => available(s, diskOf(s, t)));
+  const series = s.history.slice(-(period * 3 + 1));
+  if (!series.length)
+    return card("Сетевая активность", s.loading ? skeleton("Загрузка графика", 2) : empty("Нет данных о скорости."));
+  series[series.length - 1] = [
+    online.reduce((n, t) => n + (t.state === "down" ? t.down : 0), 0),
+    online.reduce((n, t) => n + (t.state === "seed" ? t.up : 0), 0),
+  ];
+  const last = series.length - 1,
+    i = Math.min(u.sample ?? last, last),
+    point = series[i],
+    x = (580 * i) / last;
+  const grid = [0, 26, 52, 78, 104]
+    .map((y) => `<line x1="0" x2="580" y1="${y}" y2="${y}" stroke="#384036" stroke-dasharray="3 5"/>`)
+    .join("");
+  const area = series.map((v, n) => numPoint(n, v[0])).join(" ");
+  const lines = [0, 1]
+    .map(
+      (k) =>
+        `<polyline points="${series.map((v, n) => numPoint(n, v[k])).join(" ")}" fill="none" stroke="${k ? "#7ac5ae" : "#c4f88a"}" stroke-width="1.8" vector-effect="non-scaling-stroke"/>`,
+    )
+    .join("");
+  function numPoint(n, value) {
+    return ((580 * n) / last).toFixed(1) + "," + (104 - value * 1.3).toFixed(1);
   }
-  function update() {
-    const f=fileById($("source").value); if(!f) return;
-    const d=disk(f.disk);
-    let plan="",reason="";
-    switch(page) {
-      case "move": {
-        const dest=disk($("dest").value), mode=$("mode").value;
-        reason= mode==="Перенос раздачи" && d.host!==dest.host?"Для setLocation выберите диск на том же хосте.":
-          dest.id==="pool" && !f.platform?"Игровой SSD предназначен для игр.":
-          dest.total-dest.used<f.size?"Недостаточно свободного места.":"";
-        document.querySelectorAll("[data-place]").forEach(btn=>btn.setAttribute("aria-pressed",String(btn.dataset.place===dest.id)));
-        plan=d.name+" → "+dest.name+" · "+sizeText(f.size)+(mode==="Перенос раздачи"?" · setLocation":" · сверка SHA-256");
-        break;
-      }
-      case "integrity": plan=$("compare").value?f.name+" ↔ "+fileById($("compare").value).name:"Создать манифест файла "+f.name; break;
-      case "localsend": {
-        const incoming=$("direction").value==="Принять";
-        if(incoming && !$("recv-disk")) $("receive-target").innerHTML=chooser("recv-disk","Папка приёма",disks.filter(d=>!d.offline && d.id!=="pool").map(d=>[d.id,d.name+" / Inbox"]));
-        if(!incoming) $("receive-target").innerHTML="";
-        plan=incoming?$("peer").value+" → "+disk($("recv-disk").value).name+" / Inbox · демофайл "+f.name:d.host+" → "+$("peer").value+" · "+f.name; break;
-      }
-      case "optical": {
-        const action=$("disc-action").value,medium=$("medium").value;
-        const capacity={"CD-R":.7340032,"DVD-5":4.700372992,"DVD-DL":8.543666176,"BD-R 25 ГБ":25}[medium];
-        const art=action==="Рисунок на поверхности";
-        $("source").closest("label").hidden=art;
-        if(art && !$("art-file")) {
-          $("art-controls").innerHTML='<label class="field">Рисунок на диск<input type="file" id="art-file" accept="image/png,image/jpeg,image/webp"></label><div class="surface-preview" id="surface"><span>Склад</span></div>';
-          $("art-file").onchange=e=>{
-            const image=e.target.files[0];if(!image)return;
-            const reader=new FileReader();reader.onload=()=>{const img=document.createElement("img");img.src=reader.result;img.alt="Предпросмотр рисунка";$("surface")?.replaceChildren(img);};reader.readAsDataURL(image);
-          };
-        }
-        if(!art) $("art-controls").innerHTML="";
-        reason=art && medium==="DVD-DL"?"Для рисунка нужен однослойный носитель.":!art && f.size>capacity?"Набор больше ёмкости "+medium+".":"";
-        plan=art?"DiscImageStudio · "+medium+" → "+(medium==="CD-R"?"WAV":"ISO"):f.name+" · "+sizeText(f.size)+" / "+sizeText(capacity)+" · Windows PC"; break;
-      }
-    }
-    $("route-preview").textContent=reason || plan;
-    $("route-preview").classList.toggle("blocked",Boolean(reason));
-    $("run-op").disabled=Boolean(reason);
+  const time = i === last ? "Сейчас" : Math.ceil((last - i) / 3) + " мин назад";
+  return `<section class="card network-card"><div class="card-heading"><h2>${icon("Activity")}Сетевая активность</h2>${select(
+    "period",
+    [
+      ["60", "За час"],
+      ["15", "За 15 мин"],
+    ],
+    u.period,
+    "Период графика",
+  )}</div>
+    <div class="metrics">${["Загрузка", "Отдача"].map((label, k) => `<div><span class="metric-label">${icon(k ? "ArrowUpRight" : "ArrowDownLeft")} ${label}</span><div class="number"><b>${num(point[k])}</b><small>МБ/с</small></div></div>`).join("")}</div>
+    <svg id="graph" role="img" aria-label="Скорость загрузки и отдачи, МБ/с" viewBox="0 0 580 104" preserveAspectRatio="none"><defs><linearGradient id="chart-fill" x2="0" y2="1"><stop stop-color="#b6ea77" stop-opacity=".25"/><stop offset="1" stop-color="#b6ea77" stop-opacity=".02"/></linearGradient></defs>${grid}<polygon points="0,104 ${area} 580,104" fill="url(#chart-fill)"/>${lines}<line x1="${x}" x2="${x}" y1="0" y2="104" stroke="#c4f88a" stroke-dasharray="3 5"/></svg>
+    <input type="range" id="scrub" aria-label="Момент на графике" aria-valuetext="${time}" min="0" max="${last}" value="${i}"><div id="ticks"><span>−${period} мин</span><span>${time}</span></div></section>`;
+}
+function dashboard(s) {
+  return (
+    shelf(s) +
+    `<section class="quick-actions"><h2>Быстрые действия</h2><div>${button("quickCopy", icon("FileArchive") + "Скопировать файл")}${button("find", icon("Search") + "Найти файл")}${button("page", icon("Check") + "Проверить SHA-256", "integrity")}</div></section>
+    <div class="top-grid">${network(s)}${queue(s, true)}</div>`
+  );
+}
+function fileSearch(s) {
+  const u = s.ui,
+    d = byId(s.disks, u.disk),
+    q = u.fileQuery.trim().toLowerCase(),
+    groups = new Map(),
+    counts = new Map();
+  for (const f of s.files) {
+    counts.set(f.contentId, (counts.get(f.contentId) || 0) + 1);
+    const carrier = diskOf(s, f);
+    if ((d && f.diskId !== d.id) || ![pathOf(s, f), carrier.label, carrier.location].join(" ").toLowerCase().includes(q))
+      continue;
+    if (!groups.has(f.contentId) || !available(s, diskOf(s, groups.get(f.contentId)))) groups.set(f.contentId, f);
   }
-  $("source").onchange=fields;
-  $("op-fields").onchange=update;
-  fields(); renderManifests();
-  $("operation").onsubmit=async e=>{
-    e.preventDefault(); update(); if($("run-op").disabled) return;
-    const f=fileById($("source").value), d=disk(f.disk);
-    const lock=["file:"+f.id];
-    if(page==="move") {
-      const dest=disk($("dest").value), mode=$("mode").value, src=f.disk;
-      launch(mode+" · "+f.name,d.host,["Подготовка","Перенос","Сверка SHA-256"],()=>{
-        if(mode==="Копирование") processArrival(publishCopy(f,dest.id));
-        else {disk(src).used-=f.allocated ?? f.size;dest.used+=f.allocated ?? f.size;f.disk=dest.id; if(f.torrent!=null)torrents.find(t=>t.id===f.torrent).disk=dest.id;processArrival(f);}
-      },mode+f.id+dest.id,lock);
-    } else if(page==="integrity") {
-      const other=fileById($("compare").value);
-      // Hash deterministic fixture bytes. Copies share bytes, encoded outputs have a distinct content key.
-      const digest=async x=>Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256",new TextEncoder().encode("sklad-demo/"+(x.content||x.id)))),b=>b.toString(16).padStart(2,"0")).join("");
-      const [first,second]=await Promise.all([digest(f),other?digest(other):null]);
-      launch("SHA-256 · "+f.name,d.host,["Чтение демофайла","Запись манифеста"],()=>{
-        manifests.set(f.id,first); if(other) manifests.set(other.id,second);
-        if(other) comparisons.push([f.id,other.id,first===second]);
-      },"hash:"+f.id+other?.id,lock);
-    } else if(page==="localsend") {
-      const receive=$("direction").value==="Принять", peer=$("peer").value, target=$("recv-disk")?.value;
-      launch("LocalSend · "+(receive?"Приём":"Отправка")+" · "+f.name, receive?disk(target).host:d.host,
-        ["Согласование","Передача","Сверка SHA-256"],()=>{if(receive) processArrival(publishCopy(f,target,"Inbox/"));},[f.id,peer,target,receive].join(":"));
-    } else if(page==="optical") {
-      const action=$("disc-action").value, medium=$("medium").value;
-      const art=action==="Рисунок на поверхности", artwork=$("art-file")?.files?.[0]?.name || "Склад", burn=action==="Записать и проверить";
-      launch(action+" · "+medium,"Windows PC",burn?["Сборка образа","Запись","Проверка чтением"]:["Подготовка","Сборка образа"],()=>{
-        if(burn) {
-          const id="disc-"+(++copyId);
-          disks.push({id,kind:"Оптика",name:"Запись № "+copyId,host:"Windows PC",fs:"UDF",mount:"",role:"Полка · новая запись",used:0,total:{"CD-R":.7340032,"DVD-5":4.700372992,"DVD-DL":8.543666176,"BD-R 25 ГБ":25}[medium],tint:"violet",offline:true});
-          publishCopy(f,id);
-        } else {
-          publishCopy(f,"media","Images/",{name:(art?artwork:f.name)+"."+(art&&medium==="CD-R"?"wav":"iso"),platform:undefined,type:"Образ",content:"disc:"+medium+f.id});
-        }
-      },[action,medium,art?artwork:f.id].join(":"));
-    }
+  const rows = Array.from(groups.values(), (f) =>
+    button(
+      "file",
+      `<i>${icon(f.platform ? "Gamepad2" : f.type === "Видео" ? "Film" : "File")}</i><span><b>${esc(f.name)}</b><small>${esc(pathOf(s, f))}</small></span><em>${esc(diskOf(s, f).label)} · копий: ${counts.get(f.contentId)}</em><small>${bytes(f.sizeBytes)}</small>`,
+      f.id,
+      "file-line",
+    ),
+  ).join("");
+  return card(
+    u.page === "index" ? "Поиск по индексу" : "Файлы на носителях",
+    `<div class="catalog-controls">${search("catalog-q", "Имя файла или путь", u.fileQuery)}${field("disk-filter", "Носитель", [["", "Все носители"], ...s.disks.map((d) => [d.id, d.label])], u.disk)}</div>
+    ${d ? `<div class="info-strip">${esc(d.label)} · ${available(s, d) ? esc(d.fs) + " · " + (d.fs === "NTFS" ? "снимок MFT" : "обход папок") + (d.lastScan ? " · обновлён " + dateText(d.lastScan) : "") : "Не в сети · " + esc(d.location) + " · " + dateText(d.lastSeen)} ${available(s, d) ? button("reindex", "Обновить индекс", d.id) : ""}</div>` : ""}
+    ${s.loading ? skeleton("Загрузка индекса", 4) : rows || empty("Ничего не найдено в каталоге.")}`,
+  );
+}
+function torrentsPage(s) {
+  const u = s.ui,
+    items = s.torrents.filter(
+      (t) =>
+        (!u.host || diskOf(s, t).host === u.host) &&
+        (!u.status || t.state === u.status) &&
+        t.name.toLowerCase().includes(u.torrentQuery.trim().toLowerCase()),
+    );
+  const tabs = Object.entries({ "": "Все", ...torrentStates })
+    .map(([key, label]) => button("status", label, key, "", `aria-pressed="${key === u.status}"`))
+    .join("");
+  const rows = items
+    .map((t) => {
+      const d = diskOf(s, t),
+        rate = available(s, d) ? (t.state === "down" ? t.down : t.state === "seed" ? t.up : 0) : 0;
+      return `<tr class="torrent-row"><td>${button("torrent", `<span class="tile">${icon(fileTypes[t.kind][1])}</span><span><strong>${esc(t.name)}</strong><small>${bytes(t.sizeBytes)}</small></span>`, t.id, "item")}</td>
+      <td class="host-cell">${esc(hostOf(s, d).name)}</td><td><span class="pill ${t.state}">${available(s, d) ? torrentStates[t.state] : "Не в сети"}</span></td><td><div class="progress">${t.progress}%${meter(t.progress, t.name)}</div></td>
+      <td class="rate-cell rate">${rate ? num(rate) + " МБ/с" : "—"}</td><td>${button("torrent", icon("ChevronRight"), t.id, "row-more", `aria-label="Подробности: ${esc(t.name)}"`)}</td></tr>`;
+    })
+    .join("");
+  return `<section id="transfers" class="card"><div class="card-heading"><h2>${icon("ArrowDownUp")}Раздачи <span class="count">${items.length}</span></h2>${search("query", "Поиск по имени", u.torrentQuery)}</div>
+    <div class="filters"><div class="tabs">${tabs}</div>${select("host", [["", "Все хосты"], ...s.hosts.map((h) => [h.id, h.name])], u.host, "Хост раздачи")}</div>
+    ${s.loading ? skeleton("Загрузка раздач", 4) : rows ? `<div class="table-scroll"><table><thead><tr>${["Название", "Хост", "Статус", "Прогресс", "Скорость", ""].map((t) => `<th>${t}</th>`).join("")}</tr></thead><tbody>${rows}</tbody></table></div>` : empty("Раздач по этим условиям нет. " + button("resetTorrents", "Сбросить фильтры"))}</section>`;
+}
+function scheduler(s) {
+  return (
+    s.disks
+      .map((d) => {
+        const tasks = s.torrents
+          .filter((t) => t.diskId === d.id && t.progress < 100)
+          .sort((a, b) => Number(b.state === "down") - Number(a.state === "down") || a.rank - b.rank);
+        if (!tasks.length) return "";
+        return card(
+          esc(d.label),
+          `<p class="capacity-label">${esc(hostOf(s, d).name)} · ${available(s, d) ? "занято слотов " + tasks.filter((t) => t.state === "down").length + " / 1" : "Не в сети"}</p>` +
+            tasks
+              .map(
+                (t) =>
+                  `<div class="schedule-line"><b>${esc(t.name)}</b><span class="pill ${t.state}">${torrentStates[t.state]}</span>${available(s, d) ? (t.state === "down" ? button("finish", "Завершить в демо", t.id) : t.state === "wait" ? button("next", "Следующим", t.id) : button("torrent", "Открыть", t.id)) : ""}</div>`,
+              )
+              .join(""),
+        );
+      })
+      .join("") || empty("Загрузок в очереди нет.")
+  );
+}
+function gameShelf(s) {
+  const platforms = ["Все", "Windows", "macOS", "Switch", "PSP", "PS2", "PS4"];
+  const tabs = platforms
+    .map((p) => button("platform", p, p, "secondary-action", `aria-pressed="${s.ui.platform === p}"`))
+    .join("");
+  const games = s.files.filter(
+    (f) => f.platform && f.id === f.contentId && (s.ui.platform === "Все" || s.ui.platform === f.platform),
+  );
+  return `<div class="platforms">${tabs}</div><div class="game-grid">${
+    games
+      .map((f) => {
+        const copy = s.files.find((c) => c.original === f.id),
+          disk = diskOf(s, copy || f);
+        return `<article class="card game-card"><div class="game-cover cover-${esc(f.id)}">${icon("Gamepad2")}<b>${esc(f.name)}</b></div><div class="game-meta"><small>${esc(f.platform)} · ${bytes(f.sizeBytes)}</small><p>${esc(disk.label)} · ${available(s, disk) ? "В сети" : "Не в сети"}</p>${button("game", copy ? "Запустить" : f.platform === "macOS" ? "Открыть карточку" : "Подготовить на SSD", f.id, "secondary-action", available(s, disk) ? "" : "disabled")}</div></article>`;
+      })
+      .join("") || empty("Игр для этой платформы пока нет.")
+  }</div>`;
+}
+const operationTitles = {
+  move: ["Файлы и раздачи", "Поставить в очередь"],
+  integrity: ["Контрольные суммы", "Проверить SHA-256"],
+  localsend: ["Передача LocalSend", "Поставить передачу в очередь"],
+  optical: ["Мастер оптического диска", "Поставить задание в очередь"],
+};
+
+function operationModel(s) {
+  const u = s.ui,
+    form = u.form,
+    page = u.page;
+  const files = s.files.filter((f) => available(s, diskOf(s, f)));
+  const file = byId(files, form.source) || files[0];
+  if (!file) return { files, reason: "Нет доступных файлов на подключённых носителях." };
+  const src = diskOf(s, file),
+    writeable = s.disks.filter((d) => available(s, d) && d.kind !== "optical");
+  const targets = writeable.filter((d) => d.id !== src.id);
+  const target = byId(targets, form.dest) || targets.find((d) => d.host === src.host && d.id !== s.gamePool) || targets[0];
+  const mode = form.mode || (file.torrentId ? "Перенос раздачи" : "Копирование");
+  const receive = form.direction === "Принять",
+    recvDisks = writeable.filter((d) => d.id !== s.gamePool);
+  const inbox = byId(recvDisks, form.inbox) || recvDisks[0];
+  const peers = [...s.hosts, ...s.devices].filter((h) => h.id !== src.host && h.online);
+  const peer = byId(peers, form.peer) || peers[0];
+  const medium = form.medium || "DVD-5",
+    opt = form.opt || "Собрать ISO",
+    art = opt === "Рисунок на поверхности";
+  const other = byId(files, form.compare);
+  let reason = "",
+    plan = "";
+  if (page === "move") {
+    if (!target) reason = "Нет подключённого диска назначения.";
+    else if (mode === "Перенос раздачи" && src.host !== target.host) reason = "Выберите диск на том же хосте.";
+    else if (target.id === s.gamePool && !file.platform) reason = "Игровой SSD предназначен для игр.";
+    else if (target.freeBytes < (file.allocatedBytes ?? file.sizeBytes)) reason = "Недостаточно свободного места.";
+    else plan = src.label + " → " + target.label + " · " + bytes(file.sizeBytes);
+  } else if (page === "integrity") plan = other ? file.name + " ↔ " + other.name : "Манифест · " + file.name;
+  else if (page === "localsend") {
+    if (!peer || (receive && !inbox)) reason = "Устройство назначения недоступно.";
+    else if (receive && inbox.freeBytes < file.sizeBytes) reason = "Недостаточно свободного места.";
+    else plan = receive ? peer.name + " → " + inbox.label + " / Inbox" : hostOf(s, src).name + " → " + peer.name;
+  } else if (page === "optical") {
+    if (!available(s, byId(s.disks, s.imageDisk))) reason = "Нет связи с узлом оптического привода.";
+    else if (art && medium === "DVD-DL") reason = "Для рисунка нужен однослойный носитель.";
+    else if (!art && file.sizeBytes > mediaCapacity[medium]) reason = "Набор больше ёмкости " + medium + ".";
+    else plan = (art ? "DiscImageStudio" : file.name) + " · " + medium + " · " + bytes(mediaCapacity[medium]);
+  }
+  return {
+    files,
+    file,
+    src,
+    targets,
+    target,
+    mode,
+    other,
+    peers,
+    peer,
+    receive,
+    inbox,
+    recvDisks,
+    medium,
+    opt,
+    art,
+    reason,
+    plan,
   };
 }
-const comparisons=[];
-function renderManifests() {
-  const el=$("manifests"); if(!el) return;
-  el.innerHTML=Array.from(manifests,([id,sum])=>`<div class="info-strip">${icon("Check")}${escapeHtml(fileById(id).name)} · демофайл <code>${sum}</code></div>`).join("") ||
-    '<p class="empty-hint">Выберите файл выше, чтобы создать первый манифест.</p>';
-  el.innerHTML+=comparisons.map(([a,b,same])=>`<div class="info-strip">${escapeHtml(fileById(a).name)} ↔ ${escapeHtml(fileById(b).name)} · ${same?"Копии совпали":"Контрольные суммы различаются"}</div>`).join("");
-}
-function renderGames() {
-  const games=catalog.filter(f=>f.platform && !f.original && !f.content);
-  const visible=games.filter(f=>platform==="Все" || platform===f.platform);
-  $("secondary").innerHTML=`<div class="platforms">${platforms.map(p=>`<button class="secondary-action" aria-pressed="${p===platform}" data-platform="${p}">${p}</button>`).join("")}</div><div class="game-grid">${visible.map(f=>{
-    const copy=catalog.find(c=>c.original===f.id);
-    return `<article class="card game-card"><div class="game-cover cover-${f.id}">${icon("Gamepad2")}<b>${escapeHtml(f.name.replace(".app",""))}</b></div><div class="game-meta"><small>${f.platform} · ${sizeText(f.size)}</small><p>${copy?"Проверенная копия на Game SSD":disk(f.disk).name}</p>
-    <button class="secondary-action" data-game="${f.id}">${copy?"Запустить":f.platform==="macOS"?"Открыть карточку":"Подготовить на SSD"}</button></div></article>`;
-  }).join("") || '<p class="empty-hint">В демокаталоге игр для этой платформы пока нет.</p>'}</div>`;
-}
-function gameAction(f) {
-  const c=catalog.find(x=>x.original===f.id);
-  if(f.platform==="macOS") return openFile(f);
-  if(c) return showDialog(f.name,`<p>Демозапуск с Game SSD · ${escapeHtml(filePath(c))}</p><p class="capacity-label">Архивная копия на ${disk(f.disk).name} сохранена.</p>`);
-  if(disk("pool").total-disk("pool").used<f.size) return notify("Недостаточно места на игровом SSD");
-  launch("Подготовить игру · "+f.name,"Windows PC",["Копирование на SSD","Сверка SHA-256","Подготовка запуска"],()=>{const local=publishCopy(f,"pool","Games/",{original:f.id});processArrival(local);},"game:"+f.id,["file:"+f.id]);
-}
-const rules = new Map();
-const categories=["Игры","Фильмы","Сериалы","Музыка","Софт","Документы","Прочее"];
-for(const c of categories) rules.set(c,{disk:"group",folder:c,index:"Обход папок",after:c==="Игры"?"Сжатие NTFS":["Фильмы","Сериалы"].includes(c)?"HandBrake":"Без обработки"});
-// This demo opens with an already approved ruleset. Editing it requires another preview.
-let category="Игры",dryRun=true,auto=true;
-function destination(rule, size, host) {
-  let candidates=rule.disk==="group"?disks.filter(d=>d.kind==="HDD"):[disk(rule.disk)];
-  candidates=candidates.filter(d=>d && !d.offline && (!host || d.host===host) && d.total-d.used>=size);
-  return candidates.sort((a,b)=>(b.total-b.used)-(a.total-a.used))[0];
-}
-function processArrival(f) {
-  if(!auto || !dryRun || disk(f.disk).offline) return;
-  const source=disk(f.disk);
-  const category=f.platform?"Игры":f.type==="Видео"?"Фильмы":"Прочее";
-  const rule=rules.get(category);
-  if(rule.after==="Сжатие NTFS" && f.platform==="Windows" && source.host==="Windows PC" &&
-     source.fs==="NTFS" && (f.expectedSaving||0)>=.1 && !f.compressed) {
-    startJob("Подготовка игры · "+f.name,source.host,["Оценка экономии","Фоновое сжатие","Проверка копии"],()=>{
-      f.compressed="XPRESS16K";f.allocated=f.size*(1-f.expectedSaving);source.used-=f.size-f.allocated;
-    },"auto-game:"+f.id,["file:"+f.id]);
+function operationPage(s) {
+  const page = s.ui.page,
+    m = operationModel(s),
+    form = s.ui.form;
+  const [title, submit] = operationTitles[page];
+  const fileOptions = (fs) => fs.map((f) => [f.id, f.name + " · " + diskOf(s, f).label]);
+  if (!m.file) return card(title, empty(m.reason));
+  let fields = "",
+    placement = "";
+  if (page === "move") {
+    const modes = m.file.torrentId ? ["Перенос раздачи", "Копирование"] : ["Копирование", "Перенос файла"];
+    fields =
+      field("mode", "Операция", modes, m.mode) +
+      field(
+        "dest",
+        "Диск назначения",
+        m.targets.map((d) => [d.id, d.label]),
+        m.target?.id,
+      );
+    placement = `<div class="drop-source" draggable="true" id="grab-file">${icon("FileArchive")}${esc(m.file.name)}<small>Перетащите на диск или выберите его нажатием</small></div><div class="drop-grid">${m.targets.map((d) => button("dest", icon("HardDrive") + esc(d.label) + `<small>${bytes(d.freeBytes)} свободно</small>`, d.id, "drop-target", `aria-pressed="${d === m.target}"`)).join("")}</div>`;
+  } else if (page === "integrity") {
+    fields = field(
+      "compare",
+      "Сверить с копией",
+      [["", "Только записать манифест"], ...fileOptions(m.files.filter((f) => f !== m.file))],
+      form.compare || "",
+    );
+  } else if (page === "localsend") {
+    fields =
+      field("direction", "Направление", ["Отправить", "Принять"], m.receive ? "Принять" : "Отправить") +
+      field(
+        "peer",
+        "Устройство",
+        m.peers.map((h) => [h.id, h.name]),
+        m.peer?.id,
+      );
+    if (m.receive)
+      fields += field(
+        "inbox",
+        "Папка приёма",
+        m.recvDisks.map((d) => [d.id, d.label + " / Inbox"]),
+        m.inbox?.id,
+      );
+  } else {
+    fields =
+      field("opt", "Операция", ["Собрать ISO", "Записать и проверить", "Рисунок на поверхности"], m.opt) +
+      field("medium", "Носитель", Object.keys(mediaCapacity), m.medium);
+    if (m.art)
+      fields += `<label class="field">Рисунок на диск<input type="file" id="art-file" accept="image/png,image/jpeg,image/webp"></label><div class="surface-preview">${form.artURL ? `<img src="${esc(form.artURL)}" alt="Предпросмотр рисунка">` : "Склад"}</div>`;
   }
-  if(rule.after!=="HandBrake" || f.type!=="Видео" || f.optimized) return;
-  const key="auto-av1:"+contentKey(f);
-  if(catalog.some(c=>c.content===key) || jobs.some(j=>j.key===key && pending(j))) return;
-  const size=f.size*.67;
-  const target=destination(rule,size);
-  if(!target){notify("Для обработанного видео нужен подключённый носитель со свободным местом");return;}
-  startJob("Подготовка видео · "+f.name,"Mac mini",["Копия во временную папку","Фоновая обработка","Проверка дорожек и длительности","Сохранение на "+target.name],()=>{
-    publishCopy(f,target.id,rule.folder+"/",{name:f.name.replace(/\.[^.]+$/,"")+".sklad-av1.mkv",size,allocated:size,content:key,optimized:true});
-  },key,["file:"+f.id]);
+  let result = card(
+    title,
+    `<div class="form-grid">${m.art && page === "optical" ? "" : field("source", "Источник из каталога", fileOptions(m.files), m.file.id)}${fields}</div>${placement}<div class="route-preview ${m.reason ? "blocked" : ""}">${esc(m.reason || m.plan)}</div>${button("run", icon("Play") + submit, "", "primary", m.reason ? "disabled" : "")}`,
+  );
+  if (page === "integrity")
+    result +=
+      card(
+        "Манифесты SHA-256",
+        Object.entries(s.manifests)
+          .map(([id, hash]) => `<div class="info-strip">${esc(byId(s.files, id)?.name)}<code>${esc(hash)}</code></div>`)
+          .join("") || empty("Манифестов пока нет."),
+      ) + s.comparisons.map((item) => `<p class="info-strip">${esc(item)}</p>`).join("");
+  return result;
 }
-function renderPolicies() {
-  const rule=rules.get(category);
-  $("secondary").innerHTML=block("Назначение контента",`<div class="form-grid">${chooser("category","Категория",pair(...categories))}${chooser("rule-disk","Куда размещать",[["group","Любой архивный HDD со свободным местом"],...disks.filter(d=>!d.offline && d.id!=="pool").map(d=>[d.id,d.name])])}<label class="field">Папка<input id="folder"></label>${chooser("rule-index","Индексация",pair("Нет","Обход папок",...((rule.disk==="group" || disk(rule.disk).fs==="NTFS")?["NTFS MFT"]:[])))}${chooser("after","После загрузки",pair("Без обработки",...(category==="Фильмы"||category==="Сериалы"?["HandBrake"]:[]),...(category==="Игры" && (rule.disk==="group" || disk(rule.disk).fs==="NTFS")?["Сжатие NTFS"]:[])))}</div>
-    <div class="file-actions"><button class="primary" id="dry">Пробный прогон</button><button class="secondary-action" id="automate"></button></div><div id="rule-output"></div>`);
-  $("category").value=category; $("rule-disk").value=rule.disk; $("folder").value=rule.folder; $("rule-index").value=rule.index; $("after").value=rule.after;
-  function output() {
-    $("dry").disabled=Array.from(rules.values()).some(r=>!r.folder.trim());
-    $("automate").disabled=!dryRun;
-    $("automate").textContent=auto?"Выключить автоматику":"Включить автоматику";
-    $("rule-output").innerHTML=dryRun?`<p class="info-strip">${auto?"Демоавтоматика включена":"Результат пробного прогона"}</p>`+categories.map(c=>{
-      const r=rules.get(c);return `<div class="policy-line"><b>${c}</b><span>${escapeHtml((r.disk==="group"?"Группа HDD / ":disk(r.disk).name+" / ")+r.folder)}/</span><small>${r.index} · ${r.after}</small></div>`;
-    }).join(""):'<p class="info-strip">Перед включением автоматики выполните пробный прогон текущих правил.</p>';
+function policyPage(s) {
+  const cat = s.ui.category,
+    r = s.rules[cat],
+    ntfs = r.target === "group" || byId(s.disks, r.target)?.fs === "NTFS";
+  const after = [
+    "Без обработки",
+    ...(["Фильмы", "Сериалы"].includes(cat) ? ["HandBrake"] : []),
+    ...(cat === "Игры" && ntfs ? ["Сжатие NTFS"] : []),
+  ];
+  const options = [
+    ["group", "Любой архивный HDD со свободным местом"],
+    ...s.disks.filter((d) => d.kind !== "optical" && d.id !== s.gamePool).map((d) => [d.id, d.label]),
+  ];
+  return card(
+    "Назначение контента",
+    `<div class="form-grid">${field("category", "Категория", Object.keys(s.rules), cat)}${field("rule-target", "Куда размещать", options, r.target)}
+    <label class="field">Папка<input id="folder" value="${esc(r.folder)}"></label>${field("rule-index", "Индексация", ["Нет", "Обход папок", ...(ntfs ? ["NTFS MFT"] : [])], r.index)}${field("after", "После загрузки", after, r.after)}</div>
+    <div class="file-actions">${button("dry", "Пробный прогон", "", "primary", Object.values(s.rules).every((r) => r.folder.trim()) ? "" : "disabled")}${button("auto", s.automation ? "Выключить автоматику" : "Включить автоматику", "", "secondary-action", s.previewFresh ? "" : "disabled")}</div>
+    ${
+      s.previewFresh
+        ? Object.entries(s.rules)
+            .map(
+              ([label, r]) =>
+                `<div class="policy-line"><b>${esc(label)}</b><span>${esc(byId(s.disks, r.target)?.label || "Группа HDD")} / ${esc(r.folder)}</span><small>${esc(r.index)} · ${esc(r.after)}</small></div>`,
+            )
+            .join("")
+        : empty("Изменения требуют нового пробного прогона.")
+    }`,
+  );
+}
+function modalView(s) {
+  const { kind, id } = s.ui.modal;
+  let title = "",
+    content = "";
+  if (kind === "file" || kind === "launch") {
+    const f = byId(s.files, id),
+      d = diskOf(s, f);
+    title = f.name;
+    content =
+      kind === "launch"
+        ? `<p>Демозапуск · ${esc(pathOf(s, f))}</p>`
+        : `<p>${esc(f.type)} · ${bytes(f.sizeBytes)}${f.allocatedBytes ? " · на диске " + bytes(f.allocatedBytes) : ""}</p><h3 class="copies-heading">Где хранится</h3><div class="copy-list">${s.files
+            .filter((c) => c.contentId === f.contentId)
+            .map((c) => {
+              const v = diskOf(s, c);
+              return button(
+                "file",
+                `<b>${esc(v.label)}</b><span>${available(s, v) ? esc(hostOf(s, v).name) + " · В сети" : "Не в сети · " + esc(v.location) + " · " + dateText(v.lastSeen)}</span><small>${esc(pathOf(s, c))}</small>`,
+                c.id,
+                "copy-place",
+                `aria-pressed="${c.id === id}"`,
+              );
+            })
+            .join("")}</div>
+      ${
+        available(s, d)
+          ? `<div class="file-actions">${[
+              ["move", "Перенести или скопировать"],
+              ["localsend", "Отправить через LocalSend"],
+              ["integrity", "Проверить SHA-256"],
+            ]
+              .map(([key, label]) => button("fileOp", label, key))
+              .join("")}</div>`
+          : empty("Копия недоступна · " + esc(d.label))
+      }`;
+  } else if (kind === "torrent") {
+    const t = byId(s.torrents, id),
+      d = diskOf(s, t);
+    title = t.name;
+    content =
+      `<dl>${[
+        ["Хост", hostOf(s, d).name],
+        ["Носитель", d.label],
+        ["Статус", torrentStates[t.state]],
+        ["Размер", bytes(t.sizeBytes)],
+        ["Прогресс", t.progress + "%"],
+      ]
+        .map(([k, v]) => `<div><dt>${k}</dt><dd>${esc(v)}</dd></div>`)
+        .join("")}</dl>` +
+      button(
+        "toggleTorrent",
+        t.state === "pause" ? "Продолжить" : "Приостановить",
+        id,
+        "primary",
+        available(s, d) ? "" : "disabled",
+      );
+    if (available(s, d) && s.files.some((f) => f.torrentId === id))
+      content += button("moveTorrent", "Перенести раздачу", id);
+  } else if (kind === "add") {
+    title = "Добавить торрент";
+    const hosts = s.hosts.filter(
+      (h) =>
+        h.online && s.disks.some((d) => available(s, d) && d.host === h.id && d.kind !== "optical" && d.id !== s.gamePool),
+    );
+    const h = byId(hosts, s.ui.form.addHost) || hosts[0];
+    const disks = s.disks.filter((d) => available(s, d) && d.host === h?.id && d.kind !== "optical" && d.id !== s.gamePool);
+    content = `<form id="add-form"><label>Magnet-ссылка<input id="magnet" value="${esc(s.ui.form.magnet)}" required placeholder="magnet:?xt=urn:btih:…"></label>
+      ${field(
+        "addHost",
+        "Хост",
+        hosts.map((h) => [h.id, h.name]),
+        h?.id,
+      )}${field(
+        "addDisk",
+        "Сохранить на носитель",
+        disks.map((d) => [d.id, d.label]),
+        s.ui.form.addDisk || disks[0]?.id,
+      )}
+      <button class="primary" type="submit">Добавить</button></form>`;
   }
-  $("category").onchange=e=>{category=e.target.value;renderPolicies();};
-  $("rule-disk").onchange=e=>{rule.disk=e.target.value;if((rule.disk!=="group" && disk(rule.disk).fs!=="NTFS")){if(rule.index==="NTFS MFT")rule.index="Обход папок";if(rule.after==="Сжатие NTFS")rule.after="Без обработки";}dryRun=false;auto=false;renderPolicies();};
-  for(const [id,key] of [["folder","folder"],["rule-index","index"],["after","after"]]) $(id).oninput=e=>{rule[key]=e.target.value;dryRun=false;auto=false;output();};
-  $("dry").onclick=()=>{dryRun=true;output();}; $("automate").onclick=()=>{auto=!auto;output();};output();
+  return `<div class="dialog-inner"><div class="dialog-head"><h2 id="dialog-title">${esc(title)}</h2>${button("close", icon("X"), "", "icon-button", 'aria-label="Закрыть"')}</div>${content}</div>`;
 }
-states.wait=["В очереди","Clock3"];
-const diskForTorrent=t=>t.disk || (t.host==="Mac mini"?"vault":"archive");
-torrents.forEach((t,i)=>{t.disk=["vault","archive","archive","vault","data","media"][i];});
-torrents.push({id:6,name:"Fedora Workstation",kind:"image",size:"2,4 ГБ",host:"Windows PC",disk:"archive",state:"wait",percent:0,down:0,up:0,rank:2},
-  {id:7,name:"Linux Mint Cinnamon",kind:"image",size:"2,9 ГБ",host:"Windows PC",disk:"archive",state:"wait",percent:0,down:0,up:0,rank:3});
-function rebalance() {
-  disks.forEach(d=>{
-    const group=torrents.filter(t=>diskForTorrent(t)===d.id);
-    const running=group.filter(t=>t.state==="down");
-    running.slice(d.offline?0:1).forEach(t=>{t.state="wait";});
-    if(!d.offline && running.length===0){
-      const next=group.filter(t=>t.state==="wait").sort((a,b)=>(a.rank||0)-(b.rank||0))[0];
-      if(next){next.state="down";next.down ||= 12.6;}
-    }
-  });
+function screen(s) {
+  const page = s.ui.page;
+  if (page === "overview") return dashboard(s);
+  if (page === "jobs") return queue(s);
+  if (s.loading) return skeleton("Загрузка раздела", 4);
+  if (page === "drives" || page === "index") return fileSearch(s);
+  if (page === "torrents") return torrentsPage(s);
+  if (page === "games") return gameShelf(s);
+  if (page === "scheduler") return scheduler(s);
+  if (page === "policies") return policyPage(s);
+  return operationPage(s);
 }
-function renderScheduler() {
-  const groups=disks.filter(d=>torrents.some(t=>diskForTorrent(t)===d.id && t.percent<100));
-  $("secondary").innerHTML=groups.map(d=>{
-    const list=torrents.filter(t=>diskForTorrent(t)===d.id && t.percent<100)
-      .sort((a,b)=>Number(b.state==="down")-Number(a.state==="down") || (a.rank||0)-(b.rank||0));
-    return block(d.name,`<p class="capacity-label">${d.host} · ${d.offline?"диск отключён":"слот занят "+list.filter(t=>t.state==="down").length+" / 1"}</p>`+list.map(t=>`<div class="schedule-line"><b>${escapeHtml(t.name)}</b>${pill(t.state)}${t.state==="down"?`<button class="secondary-action" data-finish="${t.id}">Завершить в демо</button>`:t.state==="wait"?`<button class="secondary-action" data-next="${t.id}">Следующим</button>`:`<button class="secondary-action" data-detail="${t.id}">Открыть</button>`}</div>`).join(""));
-  }).join("") || block("Слоты дисков",'<p class="empty-hint">Загрузок в очереди нет.</p>');
-}
-function renderWorkbench(){
-  if(page==="overview") landing();
-  if(page==="drives"||page==="index") renderCatalog();
-  if(page==="games") renderGames();
-  if(page==="policies") renderPolicies();
-  if(page==="scheduler") renderScheduler();
-  if(opSpecs[page]) renderOperation();
-  refreshJobs();
-}
-document.addEventListener("click",e=>{
-  const b=e.target.closest("button"); if(!b) return;
-  const a=b.dataset;
-  if(b.hasAttribute("data-clear-shelf")){shelfKind="";shelfQuery="";shelfFilter="all";shelfLimit=6;landing();}
-  if(a.family){shelfKind=shelfKind===a.family?"":a.family;shelfLimit=6;renderShelf();document.querySelector('[data-family="'+a.family+'"]').focus();}
-  if(b.hasAttribute("data-every-file")){catalogDisk="";catalogQuery="";navigate("drives");$("catalog-q").focus();}
-  if(a.copy)openFile(fileById(a.copy));
-  if(a.openDisk){catalogDisk=a.openDisk;catalogQuery="";navigate("drives");}
-  if(a.file)openFile(fileById(a.file));
-  if(a.fileOp){$("dialog").close();navigate(a.fileOp);selectSource(a.src);}
-  if(a.platform){platform=a.platform;renderGames();}
-  if(a.game)gameAction(fileById(a.game));
-  if(a.reindex){const d=disk(a.reindex);launch("Обновить индекс · "+d.name,d.host,[d.fs==="NTFS"?"Чтение MFT":"Обход папок","Публикация снимка"],()=>{d.lastScan=new Date().toLocaleTimeString("ru-RU");},"index:"+d.id);}
-  if(a.jobToggle || a.jobCancel){
-    const j=jobs.find(x=>x.id===Number(a.jobToggle||a.jobCancel));
-    if(pending(j)) { j.state=a.jobCancel?"cancelled":j.state==="paused"?"waiting":"paused";refreshJobs();}
-  }
-  if(a.next){const t=torrents.find(x=>x.id===Number(a.next));t.rank=Math.min(0,...torrents.map(x=>x.rank||0))-1;renderScheduler();notify("Следующей начнётся "+t.name);}
-  if(a.finish){
-    const t=torrents.find(x=>x.id===Number(a.finish)), dest=diskForTorrent(t);
-    t.state="seed";t.percent=100;t.down=0;t.up=2.6;
-    if(!catalog.some(f=>f.torrent===t.id)){
-      const size=parseFloat(t.size.replace(",",".")) || 0;
-      const f={id:"torrent-"+t.id,name:t.name,type:kinds[t.kind][0],size:t.size.includes("МБ")?size/1000:size,disk:dest,dir:"Downloads/",torrent:t.id};
-      catalog.push(f);disk(dest).used+=f.size;
-      if(auto) {
-        const cat={image:"Софт",video:"Фильмы",audio:"Музыка"}[t.kind] || "Прочее",r={...rules.get(cat)};
-        const target=destination(r,f.size,t.host);
-        if(target) startJob("Раскладка · "+f.name,t.host,["Размещение","Обновление каталога"],()=>{
-          disk(f.disk).used-=f.size;target.used+=f.size;f.disk=target.id;t.disk=target.id;f.dir=r.folder+"/";
-          processArrival(f);
-        },"policy:"+f.id,["file:"+f.id]);
-        else processArrival(f);
-      }
-    }
-    rebalance();renderScheduler();renderChart();renderRows();
-  }
-});
-processArrival(fileById("film"));
-startJob("Индекс · Archive HDD","Windows PC",["Чтение снимка","Публикация индекса"]);
-$("notice").textContent="";
-renderChart();
-navigate("overview");
-setInterval(tickJobs,1200);

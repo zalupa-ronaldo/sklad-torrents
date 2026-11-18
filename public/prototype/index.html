@@ -6,9 +6,10 @@
   <meta name="theme-color" content="#101311">
   <title>Склад — обзор системы</title>
   <link rel="icon" href="data:,">
-  <link rel="stylesheet" href="style.css?v=collection-2">
-  <script src="app.js?v=collection-2" defer></script>
-  <script src="workbench.js?v=collection-2" defer></script>
+  <link rel="stylesheet" href="style.css?v=states-1">
+  <script defer src="demo-data.js?v=states-1"></script>
+  <script defer src="workbench.js?v=states-1"></script>
+  <script defer src="app.js?v=states-1"></script>
 </head>
 <body>
   <svg width="0" height="0" aria-hidden="true" style="position:absolute"><defs>
@@ -42,41 +43,17 @@
 <symbol id="i-Clock3" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"></circle><path d="M12 6v6h4"></path></symbol>
 <symbol id="i-Server" viewBox="0 0 24 24"><rect width="20" height="8" x="2" y="2" rx="2" ry="2"></rect><rect width="20" height="8" x="2" y="14" rx="2" ry="2"></rect><line x1="6" x2="6.01" y1="6" y2="6"></line><line x1="6" x2="6.01" y1="18" y2="18"></line></symbol>
 </defs></svg>
-  <aside id="sidebar">
-    <div class="brand"><span class="brand-icon" data-icon="Layers3"></span>Склад<span class="brand-period">.</span></div>
-    <div class="side-inner">
-      <nav aria-label="Разделы" id="module-nav"></nav>
-      <div class="host-head"><p class="caption">Хосты</p><span class="count">02</span></div>
-      <nav aria-label="Хосты">
-        <button data-host="Mac mini"><i data-icon="Laptop"></i>Mac mini<span class="dot"></span></button>
-        <button data-host="Windows PC"><i data-icon="Monitor"></i>Windows PC<span class="dot"></span></button>
-      </nav>
-    </div>
-    <div class="side-foot"><i data-icon="Network"></i><div>Локальная сеть<small>Деморежим</small></div></div>
-  </aside>
+  <aside id="sidebar" aria-label="Навигация"></aside>
   <button id="backdrop" aria-label="Закрыть навигацию" hidden></button>
   <main>
-    <header><button class="icon-button" id="menu" aria-label="Открыть навигацию" aria-controls="sidebar" aria-expanded="false"><i data-icon="Menu"></i></button><span>Рабочее пространство</span><i data-icon="ChevronRight"></i><strong id="crumb">Обзор</strong><span class="online"><b class="dot"></b><span class="mobile-demo">Демо · </span>2 хоста в сети</span></header>
+    <header id="topbar"></header>
     <div class="content">
-      <div class="page-head"><div><h1 id="title">Обзор системы</h1><p id="subtitle">Сеть, хранилище и раздачи на ваших хостах.</p></div><button class="primary" id="add"><i data-icon="Plus"></i>Добавить торрент</button></div>
-      <div id="desk"></div>
-      <div id="overview" class="top-grid">
-        <section class="card network-card"><div class="card-heading"><h2><i data-icon="Activity"></i>Сетевая активность</h2><select id="period" aria-label="Период графика"><option value="60">За час</option><option value="15">За 15 мин</option></select></div>
-          <div class="metrics"><div><span class="metric-label"><i class="lime" data-icon="ArrowDownLeft"></i> Загрузка</span><div class="number"><b id="down"></b> <small>МБ/с</small></div></div><div><span class="metric-label"><i class="aqua" data-icon="ArrowUpRight"></i> Отдача</span><div class="number"><b id="up"></b> <small>МБ/с</small></div></div></div>
-          <div class="chart"><div class="axis"><span>80</span><span>40</span><span>0</span></div><div><svg id="graph" role="img" aria-label="История скорости загрузки и отдачи, МБ/с" viewBox="0 0 580 104" preserveAspectRatio="none"></svg><input type="range" id="scrub" min="0" max="180" value="180" aria-label="Момент на графике"><div id="ticks"></div><output id="sample-time">Сейчас</output></div></div>
-        </section>
-        <section class="card" id="queue-preview"></section>
-      </div>
-      <section id="transfers" class="card">
-        <div class="card-heading"><h2><i data-icon="ArrowDownUp"></i>Раздачи <span class="count" id="total"></span></h2><label class="search"><i data-icon="Search"></i><input id="query" placeholder="Поиск по имени" aria-label="Поиск раздач по имени" type="search"></label></div>
-        <div class="filters"><div class="tabs" aria-label="Состояние раздачи"></div><select id="host" aria-label="Хост"><option value="">Все хосты</option><option>Mac mini</option><option>Windows PC</option></select></div>
-        <div class="table-scroll"><table><thead><tr><th>Название</th><th>Хост</th><th>Статус</th><th>Прогресс</th><th class="rate-cell">Скорость</th><th aria-label="Подробности"></th></tr></thead><tbody id="rows"></tbody></table></div>
-        <p id="empty" hidden>Раздач по этим условиям нет. <button id="reset">Сбросить фильтры</button></p>
-      </section>
-      <section id="secondary" hidden></section>
+      <div id="alerts" role="status"></div>
+      <div id="page-head" class="page-head"></div>
+      <div id="screen"></div>
     </div>
   </main>
-  <dialog id="dialog"><div class="dialog-inner"><div class="dialog-head"><h2 id="dialog-title"></h2><button class="icon-button" id="close" aria-label="Закрыть"><i data-icon="X"></i></button></div><div id="dialog-content"></div></div></dialog>
+  <dialog id="dialog" aria-labelledby="dialog-title"></dialog>
   <div id="notice" role="status"></div>
 </body>
 </html>
